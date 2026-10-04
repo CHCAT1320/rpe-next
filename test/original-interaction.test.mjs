@@ -54,8 +54,9 @@ test('横线按秒映射跨 BPM，竖线奇偶和小数数量与吸附共享同�
   assert.equal(snapPosition(35, 11, false), 35);
   assert.equal(verticalGrid(3.5).spacing, 540);
   const { timeline } = editor(); timeline.tempo = tempo;
-  assert.equal(timeline.vertical(3) - timeline.vertical(4), 72);
-  assert.equal(timeline.vertical(4) - timeline.vertical(5), 36);
+  assert.equal(timeline.scale, 500);
+  assert.equal(timeline.vertical(3) - timeline.vertical(4), 250);
+  assert.equal(timeline.vertical(4) - timeline.vertical(5), 125);
 });
 
 test('Hold 两次定位固定首次 X，反向放置排序，同拍不制造一拍 Hold', () => {

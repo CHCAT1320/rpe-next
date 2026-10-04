@@ -33,7 +33,7 @@ export class Timeline {
     this.onEvent = onEvent;
     this.changed = changed;
     this.origin = 0;
-    this.scale = 144;
+    this.scale = 500;
     this.division = 4;
     this.snapX = true;
     this.tool = 0;

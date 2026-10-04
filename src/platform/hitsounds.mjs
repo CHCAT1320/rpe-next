@@ -14,7 +14,7 @@ export function hitTimeline(chart, tempo, offsets = [0, 0]) {
 
 export class HitSounds {
   constructor(transport) {
-    this.transport = transport; this.buffers = new Map(); this.sources = new Set(); this.volume = 0.5; this.enabled = true; this.assets = new Map(); this.chartName = ''; this.generation = 0;
+    this.transport = transport; this.buffers = new Map(); this.sources = new Set(); this.volume = 0.3; this.enabled = true; this.assets = new Map(); this.chartName = ''; this.generation = 0;
   }
 
   async prepare() {

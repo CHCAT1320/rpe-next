@@ -6,6 +6,46 @@ import { TempoMap } from '../src/core/tempo.mjs';
 import { lineGuides, pickGuide } from '../src/core/preview-guides.mjs';
 import { Preview } from '../src/ui/preview.mjs';
 
+function previewSurface() {
+  const context = new Proxy({ calls: [] }, { get(target, key) {
+    return key in target ? target[key] : (...args) => target.calls.push({ method: key, args, filter: target.filter });
+  } });
+  return { context, canvas: { style: {}, getContext: () => context, getBoundingClientRect: () => ({ width: 600, height: 400 }) } };
+}
+
+test('编辑背景的不透明度不会被连续绘制覆盖，模糊修改在下一帧生效', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); const tempo = new TempoMap(chart.BPMList);
+  const { context, canvas } = previewSurface(); const preview = new Preview(canvas);
+  Object.assign(preview, { visible: true, applyShaders: false, opacity: 0.1, showHitEffects: false, images: { background: { naturalWidth: 1350, naturalHeight: 900 } } });
+  preview.draw(chart, tempo, 0, 0); preview.draw(chart, tempo, 0.1, 0);
+  assert.equal(canvas.style.opacity, '0.1');
+  assert.equal(context.calls.filter(call => call.method === 'drawImage').at(-1).filter, 'blur(10.5px)');
+  preview.backgroundBlur = 18; preview.opacity = 0.2;
+  preview.draw(chart, tempo, 0.2, 0);
+  assert.equal(canvas.style.opacity, '0.2');
+  assert.equal(context.calls.filter(call => call.method === 'drawImage').at(-1).filter, 'blur(18px)');
+  preview.backgroundBlur = 0; preview.opacity = 0;
+  preview.draw(chart, tempo, 0.3, 0);
+  assert.equal(canvas.style.opacity, '0');
+  assert.equal(context.calls.filter(call => call.method === 'drawImage').at(-1).filter, 'none');
+});
+
+test('背景预览跳过 Tap 与 Hold 打击特效生成，正常预览仍生成特效', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); chart.judgeLineList[0].notes = [createNote(1, 0, 0), createNote(2, 0, 0, 4)];
+  const tempo = new TempoMap(chart.BPMList); const effects = [];
+  const preview = new Preview(previewSurface().canvas);
+  Object.assign(preview, { visible: true, applyShaders: false, effectsSince: -Infinity, showHitEffects: false,
+    skin: { images: new Map(), head: () => true, hold: () => true, tinted(name) { if (name.startsWith('img-')) effects.push(name); return null; } } });
+  preview.draw(chart, tempo, 0.05, 0); preview.draw(chart, tempo, 0.7, 0);
+  assert.equal(effects.length, 0);
+  preview.showHitEffects = true;
+  preview.draw(chart, tempo, 0.05, 0); assert.ok(effects.length >= 2);
+  effects.length = 0;
+  preview.draw(chart, tempo, 0.7, 0); assert.ok(effects.length > 0);
+});
+
 test('普通音符 above=2 与 Hold above=0 均向下，原字段无损保存', () => {
   const chart = createChart();
   chart.judgeLineList[0].notes = [1, 2, 3, 4].flatMap(type => [0, 1, 2].map(above => ({ ...createNote(type, 4, 0, 6), above })));

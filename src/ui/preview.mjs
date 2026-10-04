@@ -14,7 +14,7 @@ const clamp = value => Math.max(0, Math.min(1, value));
 export class Preview {
   constructor(canvas) {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
-    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 0; this.effectsSince = Infinity; this.applyShaders = true;
+    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]]) {
@@ -86,28 +86,30 @@ export class Preview {
       }
       context.restore();
     }
-    const hitStates = new Map();
-    for (const index of order) {
-      const runtime = this.scene.lines[index];
-      if (!runtime) continue;
-      for (const hit of recentHits(runtime, seconds, this.effectsSince, Math.max(HIT_DURATION, 2 / 3))) {
-        const { entry, time, seed } = hit;
-        const frame = hitFrame(seconds - time);
-        const picture = this.skin?.tinted(`img-${frame}`, entry.note.tintHitEffects ?? [255, 236, 160]);
-        if (!hitStates.has(time)) hitStates.set(time, this.scene.sample(time));
-        const state = hitStates.get(time)[index];
-        const position = runtime.noteState(entry, state, time);
-        const angle = state.rotation * Math.PI / 180;
-        const horizontal = width / 2 + (state.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
-        const vertical = height / 2 + (-state.y + position.x * Math.sin(angle) - position.y * Math.cos(angle)) * scale;
-        const size = this.noteSize * 1.4 * scale;
-        if (picture) context.drawImage(picture, horizontal - size / 2, vertical - size / 2, size, size);
-        context.fillStyle = `rgb(${(entry.note.tintHitEffects ?? [255, 236, 160]).join(',')})`;
-        for (const particle of hitParticles(seconds - time, index * 65537 + seed, this.noteSize * scale)) {
-          context.globalAlpha = particle.alpha;
-          context.fillRect(horizontal + particle.x - particle.radius, vertical + particle.y - particle.radius, particle.radius * 2, particle.radius * 2);
+    if (this.showHitEffects) {
+      const hitStates = new Map();
+      for (const index of order) {
+        const runtime = this.scene.lines[index];
+        if (!runtime) continue;
+        for (const hit of recentHits(runtime, seconds, this.effectsSince, Math.max(HIT_DURATION, 2 / 3))) {
+          const { entry, time, seed } = hit;
+          const frame = hitFrame(seconds - time);
+          const picture = this.skin?.tinted(`img-${frame}`, entry.note.tintHitEffects ?? [255, 236, 160]);
+          if (!hitStates.has(time)) hitStates.set(time, this.scene.sample(time));
+          const state = hitStates.get(time)[index];
+          const position = runtime.noteState(entry, state, time);
+          const angle = state.rotation * Math.PI / 180;
+          const horizontal = width / 2 + (state.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
+          const vertical = height / 2 + (-state.y + position.x * Math.sin(angle) - position.y * Math.cos(angle)) * scale;
+          const size = this.noteSize * 1.4 * scale;
+          if (picture) context.drawImage(picture, horizontal - size / 2, vertical - size / 2, size, size);
+          context.fillStyle = `rgb(${(entry.note.tintHitEffects ?? [255, 236, 160]).join(',')})`;
+          for (const particle of hitParticles(seconds - time, index * 65537 + seed, this.noteSize * scale)) {
+            context.globalAlpha = particle.alpha;
+            context.fillRect(horizontal + particle.x - particle.radius, vertical + particle.y - particle.radius, particle.radius * 2, particle.radius * 2);
+          }
+          context.globalAlpha = 1;
         }
-        context.globalAlpha = 1;
       }
     }
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
@@ -124,7 +126,8 @@ export class Preview {
       shaderRendered = this.shaderPipeline.render(this.canvas, this.shaderCanvas, shaderEffects, seconds, effect => this.shaderRuntime.source(effect.shader, effect.sourceName), viewport);
       if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
     } else if (this.shaderCanvas) this.shaderCanvas.style.visibility = 'hidden';
-    if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : '1';
+    if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : String(clamp(this.opacity));
+    for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer) layer.style.opacity = String(clamp(this.opacity));
     if (!shaderRendered && shaderEffects.length && !globalShader) {
       context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
       if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);

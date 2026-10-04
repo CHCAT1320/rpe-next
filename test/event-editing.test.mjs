@@ -7,8 +7,23 @@ import { TempoMap } from '../src/core/tempo.mjs';
 import { EventTrack } from '../src/core/events.mjs';
 import { eventKey, eventList, insertEvent, copyEvents, pasteEvents, deleteEvents, transformEvents, splitEvent } from '../src/application/event-commands.mjs';
 import { HitSounds, hitTimeline } from '../src/platform/hitsounds.mjs';
+import { AudioTransport } from '../src/platform/audio.mjs';
 import { migratePreferences } from '../src/core/preferences.mjs';
 
+test('音乐和打击音量分别即时应用，打击音默认 30%，迁移保留原音量', async () => {
+  const context = { destination: {}, createGain: () => ({ gain: { value: 1 }, connect() {} }) };
+  const audio = new AudioTransport(() => context); audio.ensureContext();
+  const sounds = new HitSounds(audio);
+  for (const name of ['tap', 'drag', 'flick']) sounds.buffers.set(name, {});
+  await sounds.prepare();
+  assert.equal(sounds.volume, 0.3);
+  assert.equal(migratePreferences().settings.hitVolume, 0.3);
+  audio.setVolume(0.2); sounds.setVolume(0.6);
+  assert.equal(audio.gain.gain.value, 0.2); assert.equal(sounds.gain.gain.value, 0.6);
+  audio.setVolume(0); assert.equal(sounds.gain.gain.value, 0.6);
+  sounds.setVolume(0); assert.equal(audio.gain.gain.value, 0);
+  assert.equal(migratePreferences('{"SEVolume":0.8}').settings.hitVolume, 0.8);
+});
 test('事件批改失败不产生部分提交，跨层镜像粘贴与撤销保持未知字段', () => {
   const session = new EditorSession();
   insertEvent(session, 'moveXEvents', { ...createEvent(10, 90, 2, 6), custom: { values: [3] } });

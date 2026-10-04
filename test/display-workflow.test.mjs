@@ -53,6 +53,7 @@ function canvas() { return { clientWidth: 500, clientHeight: 600, style: {}, add
 test('Shift 两次点击框选，左拖轨迹增选、右拖轨迹减选；Y 缩放不依赖 BPM', () => {
   const session = new EditorSession(); session.insertNotes([createNote(1, 2, 0)]); session.selection.clear();
   const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {});
+  timeline.scale = 144;
   const start = { button: 0, shiftKey: true, clientX: 100, clientY: 380 };
   timeline.down(start); timeline.up(start); assert.equal(timeline.drag.kind, 'rectangle'); assert.equal(session.selection.size, 0);
   timeline.down({ button: 0, clientX: 400, clientY: 500 }); assert.equal(session.selection.size, 1);

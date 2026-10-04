@@ -41,7 +41,7 @@ import { assetUrl } from '../core/asset-url.mjs';
 const element = selector => document.querySelector(selector);
 const displayFields = [
   ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
-  ['background-blur', 'backgroundBlur', 0], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
+  ['background-blur', 'backgroundBlur', 10.5], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
   ['line-numbers', 'lineNumbers', true], ['line-arrows', 'lineArrows', true], ['line-tint', 'lineTint', true], ['merge-line-numbers', 'mergeLineNumbers', true], ['pick-preview-lines', 'pickPreviewLines', true],
   ['preserve-pitch', 'preservePitch', true], ['autoplay-view', 'autoplayView', true], ['highlight-notes', 'highlight', true],
   ['autosave-enabled', 'autoSave', true], ['autosave-seconds', 'autoSaveSeconds', 60], ['autosave-limit', 'autoSaveLimit', 10],
@@ -84,6 +84,7 @@ const lineInfoScene = new SceneRuntime();
 const invalidate = () => { dirtyFrame = true; };
 preview.invalidate = realtimePreview.invalidate = invalidate;
 realtimePreview.applyShaders = false;
+realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
 const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error));
@@ -729,7 +730,7 @@ element('#line-select').addEventListener('change', event => { timeline.cancelPla
 element('#hit-volume').addEventListener('input', event => { hitSounds.setVolume(Number(event.target.value)); persistEditor(); });
 element('#hit-enabled').addEventListener('change', event => { hitSounds.enabled = event.target.checked; hitSounds.stop(); persistEditor(); });
 element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
-element('#realtime-alpha').addEventListener('input', event => { element('#realtime-preview').style.opacity = event.target.value; persistEditor(); invalidate(); });
+element('#realtime-alpha').addEventListener('input', event => { realtimePreview.opacity = Number(event.target.value); persistEditor(); invalidate(); });
 for (const selector of ['#loop-start', '#loop-end', '#loop-enabled']) element(selector).addEventListener('change', () => {
   try {
     const start = beatValue(parseBeat(element('#loop-start').value));
@@ -1121,10 +1122,9 @@ function applyPreferences(next) {
   preview.noteSize = realtimePreview.noteSize = next.settings.noteSize;
   preview.lineScale = next.settings.lineScale;
   preview.backgroundAlpha = realtimePreview.backgroundAlpha = next.settings.backgroundAlpha;
-  preview.backgroundBlur = realtimePreview.backgroundBlur = editorPreferences.backgroundBlur ?? 0;
   timeline.noteScale = next.settings.noteSize / 175;
   timeline.gridCount = editorPreferences.gridCount ?? next.settings.gridCount;
-  timeline.scale = editorPreferences.scale ?? 144;
+  timeline.scale = editorPreferences.scale ?? 500;
   timeline.division = editorPreferences.division ?? 4;
   timeline.snapX = editorPreferences.snapX ?? true;
   element('#grid-count').value = timeline.gridCount; element('#division').value = timeline.division; element('#y-scale').value = timeline.scale; element('#snap-x').checked = timeline.snapX;
@@ -1132,7 +1132,7 @@ function applyPreferences(next) {
   realtimePreview.visible = editorPreferences.realtime ?? true;
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
-  element('#realtime-preview').style.opacity = element('#realtime-alpha').value;
+  realtimePreview.opacity = Number(element('#realtime-alpha').value);
   hitSounds.enabled = editorPreferences.hitEnabled ?? true; element('#hit-enabled').checked = hitSounds.enabled;
   preview.allLines = realtimePreview.allLines = editorPreferences.allLines ?? true; element('#preview-mode').value = preview.allLines ? 'all' : 'current';
   timeline.scrollSpeed = next.settings.scrollSpeed / 5;
@@ -1228,6 +1228,7 @@ function applyDisplaySettings() {
   timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value);
   timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
   timeline.seamlessEvents = element('#seamless-events').checked;
+  preview.backgroundBlur = realtimePreview.backgroundBlur = Number(element('#background-blur').value);
   timeline.highlight = preview.highlight = realtimePreview.highlight = element('#highlight-notes').checked;
   audio.setPreservePitch(element('#preserve-pitch').checked);
   rotateTip();
