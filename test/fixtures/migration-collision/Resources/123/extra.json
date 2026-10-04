@@ -1,0 +1,1 @@
+{ "effects": [{ "shader": "grayscale", "start": [0, 0, 1], "end": [10, 0, 1], "vars": { "factor": 1 } }] }

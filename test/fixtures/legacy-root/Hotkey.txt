@@ -1,0 +1,7 @@
+AddTap T
+AddDrag W
+AddFlick E
+AddHold R
+Pause SPACE
+Save LEFTCTRL&S
+FutureTool LEFTALT&F

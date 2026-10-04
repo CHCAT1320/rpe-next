@@ -1,0 +1,4 @@
+#
+Name: Migration regression fixture
+Path: 123
+Chart: 123.json

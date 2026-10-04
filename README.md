@@ -1,0 +1,50 @@
+# Re:PhiEdit Next
+
+作者：**cmdysj**。本项目是在原 **Re:PhiEdit（RPE）** 项目基础上，使用 **AI（GPT）** 进行的重构，是 Phigros 的非官方制谱器。
+
+[在线使用](https://kclg-ysj.github.io/rpe-next/) · [源码](https://github.com/kclg-YSJ/rpe-next)
+
+基于 Canvas、Web Audio、WebGL 和 IndexedDB，支持音符与事件编辑、实时预览、着色器、多谱面管理、原 RPE 谱面导入、热键及设置迁移。当前仍在持续完善，尚不保证与原 RPE 完全一致；建议保留原始谱面与资源备份。
+
+## 使用
+
+推荐使用桌面版现代 Edge 或 Chrome，开启硬件加速。无需安装即可打开在线页面。
+
+- 在谱面库选择“打开 JSON / PEZ”，可导入谱面包或同时选择谱面、音乐、曲绘。
+- 迁移旧 RPE 时，选择包含 `Resources`、`Hotkey.txt`、`Settings.json` 的原 RPE 主文件夹。迁移读取原文件，并复制到当前浏览器谱面库；同标识名项目覆盖前会询问，`extra.json` 随资源迁移。
+- 选择谱面进入编辑，默认 Q/W/E/R 放置 Tap/Drag/Flick/Hold，空格暂停或继续。热键可在设置中修改。
+- 保存到谱面库后，可导出 PEZ 备份完整资源；单独导出的 JSON 不包含音乐和曲绘。
+- shader 仅作用于预览区域，重叠事件按顺序叠加，包括同类型 shader。
+
+## 本地运行
+
+安装 Node.js 22 或更新版本，下载源码后在项目目录运行：
+
+```sh
+npm start
+```
+
+Windows 也可双击 `start.cmd`。无需安装 npm 依赖。默认打开 `http://127.0.0.1:4173`，关闭终端会停止本地服务。
+
+## 数据与隐私
+
+谱面、媒体、热键、设置和自动备份保存在当前浏览器的本地存储中，应用没有上传谱面的服务器或分析埋点。GitHub Pages 提供静态网页托管，访问网页时托管方可能记录常规访问日志。
+
+不同浏览器、地址、端口及在线/本地版本的谱面库相互独立。清除网站数据可能删除谱面库和自动备份，请定期导出 PEZ。选择原 RPE 文件夹只用于本地读取迁移，不会自动上传文件。
+
+## 开发
+
+```sh
+npm test
+npm run build
+npm run smoke-build
+npm run build:pages
+```
+
+`build` 生成可本地运行的 `dist/`；`build:pages` 仅生成静态网站。推送到 `main` 后，GitHub Actions 自动测试并部署 GitHub Pages。
+
+## 许可与来源
+
+本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE)，仅许可符合条款的非商业用途，商业用途需另行取得授权。它属于源码可用许可，不是 OSI 定义的开源许可。再分发须保留许可证及 [NOTICE](NOTICE) 中的必需声明。
+
+原 RPE 代码与素材是本次重构的基础，保留其来源及相应权利；独立第三方内容的原有权利和许可不因本项目许可而改变。本项目并非 Phigros 官方产品。

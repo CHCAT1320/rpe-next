@@ -1,0 +1,29 @@
+{
+  "name": "rpe-next",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent, incremental Re:PhiEdit reconstruction",
+  "author": "cmdysj",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "homepage": "https://kclg-ysj.github.io/rpe-next/",
+  "repository": { "type": "git", "url": "https://github.com/kclg-YSJ/rpe-next.git" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node tools/serve.mjs --open",
+    "copy-assets": "node tools/copy-rpe-assets.mjs",
+    "generate-easings": "node tools/generate-easings.mjs",
+    "serve": "node tools/serve.mjs",
+    "test": "node --test",
+    "benchmark": "node tools/benchmark.mjs",
+    "audit": "node tools/audit.mjs",
+    "verify-original": "node tools/audit.mjs --verify",
+    "compat": "node tools/compat.mjs",
+    "legacy-audit": "node tools/legacy-audit.mjs",
+    "migration-audit": "node tools/migration-audit.mjs",
+    "scene-audit": "node tools/scene-audit.mjs",
+    "build": "node tools/build.mjs",
+    "build:pages": "node tools/build.mjs --pages",
+    "smoke-build": "node tools/smoke-build.mjs"
+  }
+}

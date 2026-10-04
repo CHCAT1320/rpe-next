@@ -1,0 +1,15 @@
+dist/
+node_modules/
+*.log
+docs/
+.local-tools/
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+.DS_Store
+Thumbs.db
+*.zip
+*.pez

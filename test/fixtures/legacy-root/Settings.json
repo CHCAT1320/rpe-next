@@ -1,0 +1,9 @@
+{
+  "MusicVolume": 0.25,
+  "AutoSave": true,
+  "AutoSaveGap": 2,
+  "maxHistorySize": 60,
+  "FpsLimit": 120,
+  "showHotkey": true,
+  "FutureSetting": { "retain": true }
+}
