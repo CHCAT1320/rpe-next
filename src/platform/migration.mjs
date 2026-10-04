@@ -115,7 +115,6 @@ export async function materializeProject(plan, project) {
   for (const entry of plan.entries.filter(entry => entry.path.toLowerCase().startsWith(project.directory.toLowerCase()))) {
     const file = await entry.getFile();
     bytes += file.size;
-    if (bytes > 256 * 1024 * 1024) throw new Error('此项目含资源超过 256 MiB，未导入；请先单独整理资源');
     assets.set(entry.path.slice(project.directory.length), new Uint8Array(await file.arrayBuffer()));
   }
   for (const name of [project.info.Song, project.info.Picture, project.chart.META.song, project.chart.META.background]) {
@@ -123,7 +122,6 @@ export async function materializeProject(plan, project) {
     const entry = assetBytes(references, name, project.path) ?? assetBytes(references, `Resources/${name}`);
     if (entry) {
       const file = await entry.getFile(); bytes += file.size;
-      if (bytes > 256 * 1024 * 1024) throw new Error('此项目含资源超过 256 MiB');
       assets.set(name, new Uint8Array(await file.arrayBuffer()));
     }
   }

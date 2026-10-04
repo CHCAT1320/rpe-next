@@ -50,6 +50,7 @@ export class EventInteraction {
     event.preventDefault?.();
     const session = this.timeline.getSession(); const point = this.timeline.point(event, this.canvas); const rectangle = this.hit(point);
     this.timeline.eventCursor = point; this.timeline.hoverArea = 'events';
+    this.timeline.clipboardPointer = point;
     if (this.drag?.kind === 'rectangle') { this.drag.finished = true; this.up(event); return; }
     if (event.button === 0 && this.timeline.tool && !rectangle) {
       try { this.place(null); } catch (error) { this.timeline.notify?.(error.message, 'error'); }
@@ -60,7 +61,9 @@ export class EventInteraction {
       else try { this.place(); } catch (error) { this.timeline.notify?.(error.message, 'error'); }
       return;
     }
-    session.focus = 'events'; session.eventLayer = this.timeline.layer; session.selection.clear(); this.canvas.focus(); this.canvas.setPointerCapture(event.pointerId);
+    session.focus = 'events'; session.eventLayer = this.timeline.layer;
+    if (!event.ctrlKey && !event.shiftKey && event.button !== 1) session.selection.clear();
+    this.canvas.focus(); this.canvas.setPointerCapture(event.pointerId);
     if (event.shiftKey || event.button === 1) this.drag = { kind: 'rectangle', start: point, current: point, append: true, remove: false };
     else if (rectangle && event.button === 0) {
       const key = eventKey(rectangle.type, rectangle.index);
@@ -76,6 +79,7 @@ export class EventInteraction {
   move(event) {
     const point = this.timeline.point(event, this.canvas);
     this.timeline.eventCursor = point;
+    this.timeline.clipboardPointer = point;
     this.timeline.hoverArea = 'events';
     if (this.drag) {
       const previous = this.drag.current; this.drag.current = point;

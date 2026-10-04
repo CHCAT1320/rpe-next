@@ -5,6 +5,7 @@ import { easing, bezier } from '../core/easing.mjs';
 import { eventKey, eventList } from '../application/event-commands.mjs';
 import { shaderIdentity, shaderEventLanes } from '../core/shader-events.mjs';
 import { EventInteraction } from './event-interaction.mjs';
+import { drawClipboard } from './clipboard-preview.mjs';
 import { TempoMap } from '../core/tempo.mjs';
 import { snapPosition, snapTime, verticalGrid, placementRange } from '../core/edit-grid.mjs';
 import { SPECIAL_TRACKS, eventChains, simultaneousNotes, strokeIntersects } from '../core/editor-display.mjs';
@@ -29,7 +30,7 @@ export class Timeline {
   constructor(notesCanvas, eventsCanvas, getSession, onEvent, changed, reportError = console.error) {
     this.notesCanvas = notesCanvas;
     this.eventsCanvas = eventsCanvas;
-    this.getSession = getSession;
+    this.getSession = () => this.bulkPreview?.session ?? getSession();
     this.onEvent = onEvent;
     this.changed = changed;
     this.origin = 0;
@@ -169,6 +170,7 @@ export class Timeline {
 
   move(event) {
     this.cursor = this.point(event);
+    this.clipboardPointer = this.cursor;
     this.hoverArea = 'notes';
     if (this.drag) {
       const previous = this.drag.current;
@@ -197,11 +199,13 @@ export class Timeline {
     this.notesCanvas.setPointerCapture(event.pointerId);
     const position = this.point(event);
     this.cursor = position;
+    this.clipboardPointer = position;
     this.hoverArea = 'notes';
     const hit = this.hit(position);
     const session = this.getSession();
     if (event.button === 0 && hit && this.curvePick?.(hit.item, hit.index)) return;
-    session.focus = 'notes'; session.eventSelection.clear();
+    session.focus = 'notes';
+    if (!event.ctrlKey && !event.shiftKey && event.button !== 1) session.eventSelection.clear();
     if (this.drag?.kind === 'rectangle') { this.drag.finished = true; this.up(event); return; }
     if (event.button === 0 && (this.pendingHold || this.tool && !event.shiftKey && !event.ctrlKey)) { this.addAtCursor(this.pendingHold ? 2 : this.tool); return; }
     if (event.shiftKey || event.button === 1) {
@@ -305,6 +309,7 @@ export class Timeline {
     }
     context.lineWidth = 1;
     this.drawCurveGhost(context);
+    drawClipboard(this, context, width, height, 'notes');
     const session = this.getSession();
     if (this.highlightChart !== session.chart || this.highlightTempo !== this.tempo) {
       this.highlightChart = session.chart; this.highlightTempo = this.tempo; this.simultaneous = simultaneousNotes(session.chart, this.tempo);
@@ -386,6 +391,7 @@ export class Timeline {
   drawEvents(playBeat) {
     const { context, width, height } = prepareCanvas(this.eventsCanvas);
     this.grid(context, width, height, playBeat);
+    drawClipboard(this, context, width, height, 'events');
     const session = this.getSession();
     const layer = (this.extended ? { ...session.line?.extended, paintEvents: eventList(session, 'paintEvents') } : session.line?.eventLayers?.[this.layer]) ?? {};
     const indexKey = `${session.lineIndex}:${this.extended}:${this.layer}`;

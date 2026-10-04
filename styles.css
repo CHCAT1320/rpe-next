@@ -26,8 +26,23 @@ header { min-height: 48px; display: flex; align-items: center; gap: 14px; paddin
 nav { display: flex; gap: 5px; }
 kbd { font: 10px sans-serif; opacity: .6; }
 button[data-icon]::before { content: ''; display: inline-block; width: 18px; height: 18px; vertical-align: middle; background-image: var(--icon); background-size: contain; background-repeat: no-repeat; background-position: center; margin-right: 6px; }
-.transport { min-height: 60px; display: flex; align-items: center; gap: 12px; padding: 10px 12px; flex: none; background: #202020; border-bottom: 1px solid #555; }
+.transport { min-height: 60px; display: flex; align-items: center; gap: 8px; padding: 10px 12px; flex: none; background: #202020; border-bottom: 1px solid #555; }
+.transport label { white-space: nowrap; flex-shrink: 0; }
 .transport-group { display: flex; gap: 6px; }
+#offset { width: 70px; }
+.batch-execute { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+#batch-action { width: 110px; }
+#batch-run { width: 30px; height: 29px; padding: 0; color: var(--accent); }
+.batch-controls { position: absolute; z-index: 4; display: flex; flex-direction: column; gap: 16px; pointer-events: none; }
+.batch-ball { width: 18px; height: 18px; min-height: 18px; border: 1px solid #ffffff80; border-radius: 50%; padding: 0; background: var(--ball-color); box-shadow: 0 1px 4px #0008; opacity: .85; cursor: grab; touch-action: none; pointer-events: auto; }
+.batch-ball:hover, .batch-ball:active { background: var(--ball-color); opacity: 1; border-color: #fff; }
+.batch-ball:active { cursor: grabbing; }
+.batch-hint { position: absolute; top: -24px; right: 0; white-space: nowrap; color: #fff; text-shadow: 0 1px 3px #000; }
+@media (max-width: 1400px) {
+  .transport-group button[data-icon], #seek { font-size: 0; width: 34px; height: 32px; padding: 6px; }
+  .transport-group button[data-icon]::before, #seek::before { margin-right: 0; }
+  #play[data-playing="true"]::before { content: 'Ⅱ'; background-image: none; font-size: 18px; line-height: 18px; }
+}
 label { display: inline-flex; align-items: center; gap: 6px; color: #ddd; }
 #line-select { width: 115px; } #seek-beat { width: 58px; } .beat-seek { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; } .beat-nudge { display: inline-flex; gap: 2px; } .beat-nudge button { width: 22px; height: 24px; padding: 0; line-height: 20px; font-size: 15px; color: var(--accent); border-color: #806d3c; } #clock { min-width: 72px; color: #eee; font-variant-numeric: tabular-nums; } #bpm-display { color: var(--accent); white-space: nowrap; font-size: 11px; } #scrubber { flex: 1; min-width: 65px; }
 .workspace { display: grid; grid-template-columns: minmax(640px, 70.3%) minmax(285px, 1fr); flex: 1; min-height: 0; }

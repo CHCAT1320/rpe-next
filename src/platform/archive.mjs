@@ -1,6 +1,6 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const MAX_BYTES = 256 * 1024 * 1024;
+const ZIP64_MARKER = 0xffffffff;
 const crcTable = Uint32Array.from({ length: 256 }, (unused, index) => {
   let value = index;
   for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
@@ -20,7 +20,6 @@ function checkPath(name) {
 }
 
 export async function readZip(buffer) {
-  if (buffer.byteLength > MAX_BYTES) throw new Error('压缩包超过 256 MiB 限制');
   const bytes = new Uint8Array(buffer);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let trailer = -1;
@@ -29,10 +28,9 @@ export async function readZip(buffer) {
   }
   if (trailer < 0) throw new Error('无效 ZIP/PEZ 目录');
   const count = view.getUint16(trailer + 10, true);
-  if (view.getUint16(trailer + 4, true) || view.getUint16(trailer + 6, true) || count > 10000) throw new Error('不支持分卷、ZIP64 或超过 10000 个文件的包');
+  if (view.getUint16(trailer + 4, true) || view.getUint16(trailer + 6, true) || count === 0xffff || view.getUint32(trailer + 12, true) === ZIP64_MARKER || view.getUint32(trailer + 16, true) === ZIP64_MARKER) throw new Error('不支持分卷或 ZIP64');
   const files = new Map();
   let offset = view.getUint32(trailer + 16, true);
-  let totalSize = 0;
   for (let index = 0; index < count; index++) {
     if (offset + 46 > trailer || view.getUint32(offset, true) !== 0x02014b50) throw new Error('ZIP 目录损坏');
     const flags = view.getUint16(offset + 8, true);
@@ -44,9 +42,7 @@ export async function readZip(buffer) {
     const extraSize = view.getUint16(offset + 30, true);
     const commentSize = view.getUint16(offset + 32, true);
     const localOffset = view.getUint32(offset + 42, true);
-    if (flags & 1 || size === 0xffffffff || compressedSize === 0xffffffff) throw new Error('不支持加密 ZIP 或 ZIP64');
-    totalSize += size;
-    if (totalSize > MAX_BYTES) throw new Error('解压后总大小超过 256 MiB 限制');
+    if (flags & 1 || size === ZIP64_MARKER || compressedSize === ZIP64_MARKER || localOffset === ZIP64_MARKER) throw new Error('不支持加密 ZIP 或 ZIP64');
     if (offset + 46 + nameSize + extraSize + commentSize > trailer) throw new Error('ZIP 文件名越界');
     const nameBytes = bytes.subarray(offset + 46, offset + 46 + nameSize);
     const name = (flags & 0x800 ? decoder : new TextDecoder('gb18030')).decode(nameBytes);
@@ -79,7 +75,7 @@ export async function readZip(buffer) {
 }
 
 export function writeZip(files) {
-  if (files.size > 10000) throw new Error('文件数量超出限制');
+  if (files.size >= 0xffff) throw new Error('此文件数量需要 ZIP64，暂不支持');
   const records = [];
   const directories = [];
   let offset = 0;
@@ -87,7 +83,8 @@ export function writeZip(files) {
     checkPath(name);
     const nameBytes = encoder.encode(name);
     if (nameBytes.length > 65535) throw new Error('ZIP 文件名过长');
-    const record = new Uint8Array(30 + nameBytes.length + contents.length);
+    if (contents.length >= ZIP64_MARKER || offset + 30 + nameBytes.length + contents.length >= ZIP64_MARKER) throw new Error('此包需要 ZIP64，暂不支持');
+    const record = new Uint8Array(30 + nameBytes.length);
     const view = new DataView(record.buffer);
     view.setUint32(0, 0x04034b50, true);
     view.setUint16(4, 20, true);
@@ -97,7 +94,6 @@ export function writeZip(files) {
     view.setUint32(22, contents.length, true);
     view.setUint16(26, nameBytes.length, true);
     record.set(nameBytes, 30);
-    record.set(contents, 30 + nameBytes.length);
     const directory = new Uint8Array(46 + nameBytes.length);
     const central = new DataView(directory.buffer);
     central.setUint32(0, 0x02014b50, true);
@@ -105,17 +101,18 @@ export function writeZip(files) {
     directory.set(record.subarray(4, 30), 6);
     central.setUint32(42, offset, true);
     directory.set(nameBytes, 46);
-    records.push(record);
+    records.push(record, contents);
     directories.push(directory);
-    offset += record.length;
-    if (offset > MAX_BYTES) throw new Error('导出包超过 256 MiB 限制');
+    offset += record.length + contents.length;
   }
   const trailer = new Uint8Array(22);
   const view = new DataView(trailer.buffer);
   view.setUint32(0, 0x06054b50, true);
   view.setUint16(8, files.size, true);
   view.setUint16(10, files.size, true);
-  view.setUint32(12, directories.reduce((total, entry) => total + entry.length, 0), true);
+  const directorySize = directories.reduce((total, entry) => total + entry.length, 0);
+  if (directorySize >= ZIP64_MARKER) throw new Error('此目录需要 ZIP64，暂不支持');
+  view.setUint32(12, directorySize, true);
   view.setUint32(16, offset, true);
   return new Blob([...records, ...directories, trailer], { type: 'application/zip' });
 }

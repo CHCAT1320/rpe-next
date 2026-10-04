@@ -15,21 +15,27 @@ export function selectedEvents(session) {
   }).filter(entry => entry.event);
 }
 
-export function commitEventLists(session, label, updates, selection = session.eventSelection) {
-  if (!session.line) throw new Error('请先添加判定线');
-  let line = { ...session.line, extended: { ...session.line.extended }, eventLayers: [...(session.line.eventLayers ?? [])] };
+export function chartWithEventLists(chart, lineIndex, eventLayer, updates) {
+  const source = chart.judgeLineList[lineIndex];
+  if (!source) throw new Error('请先添加判定线');
+  const line = { ...source, extended: { ...source.extended }, eventLayers: [...(source.eventLayers ?? [])] };
   for (const [type, events] of updates) {
     for (const event of events) if (beatValue(event.endTime) < beatValue(event.startTime)) throw new Error('事件结束拍不能早于开始拍');
     if (type === 'paintEvents') continue;
     if (EVENT_TYPES.includes(type)) {
-      while (line.eventLayers.length <= session.eventLayer) line.eventLayers.push({});
-      line.eventLayers[session.eventLayer] = { ...line.eventLayers[session.eventLayer], [type]: events };
+      while (line.eventLayers.length <= eventLayer) line.eventLayers.push({});
+      line.eventLayers[eventLayer] = { ...line.eventLayers[eventLayer], [type]: events };
     }
     else line.extended[type] = events;
   }
-  const lines = [...session.chart.judgeLineList]; lines[session.lineIndex] = line;
-  let chart = { ...session.chart, judgeLineList: lines };
-  if (updates.has('paintEvents')) chart = replaceShaderEvents(chart, session.lineIndex, updates.get('paintEvents'));
+  const lines = [...chart.judgeLineList]; lines[lineIndex] = line;
+  chart = { ...chart, judgeLineList: lines };
+  if (updates.has('paintEvents')) chart = replaceShaderEvents(chart, lineIndex, updates.get('paintEvents'));
+  return chart;
+}
+
+export function commitEventLists(session, label, updates, selection = session.eventSelection) {
+  const chart = chartWithEventLists(session.chart, session.lineIndex, session.eventLayer, updates);
   assertChart(chart);
   session.eventSelection = new Set(selection); session.focus = 'events'; session.selection.clear();
   session.commit(label, chart);

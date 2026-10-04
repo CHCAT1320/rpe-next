@@ -7,7 +7,6 @@ import { serializeShaderEvent } from '../core/shader-events.mjs';
 export async function openFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return null;
-  if (files.reduce((total, file) => total + file.size, 0) > 256 * 1024 * 1024) throw new Error('所选文件超过 256 MiB 限制');
   let assets = new Map();
   if (files.length === 1 && /\.(pez|zip)$/i.test(files[0].name)) assets = await readZip(await files[0].arrayBuffer());
   else for (const file of files) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));

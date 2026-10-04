@@ -13,9 +13,9 @@
     </nav>
   </header>
   <section class="transport" aria-label="播放与时间">
-    <div class="transport-group"><button id="play" class="primary" data-icon="play">播放</button><button id="rewind" data-icon="replay" title="回到开头">回到开头</button><button id="view-toggle" data-icon="showback">播放预览</button></div>
-    <label>判定线 <select id="line-select" aria-label="当前判定线"></select></label><label>延迟 <input id="offset" type="number" step="1" aria-label="谱面延迟（毫秒）"></label>
-    <label class="beat-seek">拍数 <input id="seek-beat" value="0" aria-label="定位拍数"></label><button id="seek" data-icon="jump">定位</button>
+    <div class="transport-group"><button id="play" class="primary" data-icon="play" title="播放 / 暂停">播放</button><button id="rewind" data-icon="replay" title="回到开头">回到开头</button><button id="view-toggle" data-icon="showback" title="播放预览 / 返回编辑">播放预览</button></div>
+    <label>判定线 <select id="line-select" aria-label="当前判定线"></select></label><label>延迟 <input id="offset" type="number" step="1" aria-label="谱面延迟（毫秒）"></label><div class="batch-execute"><select id="batch-action" aria-label="批量修改选中音符"></select><button id="batch-run" aria-label="执行批量修改">▶</button></div>
+    <label class="beat-seek">拍数 <input id="seek-beat" value="0" aria-label="定位拍数"></label><button id="seek" data-icon="jump" title="定位到输入的拍数">定位</button>
     <output id="clock">0.000 s</output><output id="bpm-display">120 BPM</output>
     <input id="scrubber" type="range" min="0" max="600" step="0.001" value="0" aria-label="播放进度">
     <label>倍速 <select id="rate"><option>0.25</option><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label><label class="preserve-pitch" title="变速不变调"><input id="preserve-pitch" type="checkbox" checked><span>保调</span></label>

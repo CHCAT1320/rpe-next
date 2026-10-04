@@ -20,7 +20,11 @@ import { RpeSkin } from './skin.mjs';
 import { ProjectImages } from '../platform/images.mjs';
 import { HitSounds } from '../platform/hitsounds.mjs';
 import { renderEventInspector } from './event-inspector.mjs';
-import { eventKey, eventList, commitEventLists, deleteEvents, copyEvents, pasteEvents, transformEvents } from '../application/event-commands.mjs';
+import { eventKey, eventList, commitEventLists, deleteEvents, transformEvents } from '../application/event-commands.mjs';
+import { BATCH_ACTIONS, applyBatchAction, nudgeSelection } from '../application/batch-edit.mjs';
+import { copyObjects, cutObjects, pasteObjects } from '../application/clipboard.mjs';
+import { BatchControls } from './batch-controls.mjs';
+import { clipboardBeat } from './clipboard-preview.mjs';
 import { shaderEvents, replaceShaderEvents } from '../core/shader-events.mjs';
 import { renderMetadataPanel, renderBpmPanel } from './forms.mjs';
 import { EditorPlayback } from '../application/playback.mjs';
@@ -88,6 +92,7 @@ realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
 const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error));
+const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, error => reportError(error));
 function drawTimelineStrips() {
   const height = timeline.notesCanvas.clientHeight; if (!height) return;
   const noteFrame = prepareCanvas(element('#note-density')); const historyFrame = prepareCanvas(element('#history-strip'));
@@ -397,6 +402,7 @@ function renderSession() {
   element('#selection-info').textContent = session.focus === 'events' ? `${session.eventSelection.size} 个事件已选` : `${session.selection.size} 个音符已选`;
   element('#undo').disabled = !session.history.undoStack.length;
   element('#redo').disabled = !session.history.redoStack.length;
+  element('#batch-run').disabled = !session.selection.size;
   const lineList = element('#line-list');
   const scrollPosition = lineList.scrollTop;
   lineList.replaceChildren();
@@ -800,17 +806,24 @@ element('#attach-ui').onchange = event => {
   session.updateLine('绑定游戏 UI', line => ({ ...line, attachUI: value }));
 };
 function copySelection() {
-  if (session.focus === 'events') { copyEvents(session); status(`已复制 ${session.eventClipboard.length} 个事件`); }
-  else { session.copy(); status(`已复制 ${session.clipboard.length} 个音符`); }
+  const count = copyObjects(session);
+  if (count) status(`已复制 ${count} 个物件`);
+  invalidate();
 }
 function deleteSelection() { if (session.focus === 'events') deleteEvents(session); else session.deleteSelection(); }
 function pasteSelection(mirror = false, keepTime = false) {
-  if (session.focus === 'events') pasteEvents(session, currentBeat(), keepTime, mirror);
-  else session.paste(currentBeat(), mirror, keepTime);
+  timeline.clipboardMode = { mirror, keepTime };
+  pasteObjects(session, clipboardBeat(timeline), timeline.clipboardMode);
 }
 listen('#copy', copySelection);
-listen('#cut', () => { copySelection(); deleteSelection(); });
+listen('#cut', () => { cutObjects(session); invalidate(); });
 listen('#paste', () => pasteSelection());
+for (const [name, description] of BATCH_ACTIONS) {
+  const option = new Option(name, name); option.title = description; element('#batch-action').append(option);
+}
+element('#batch-action').onchange = () => { element('#batch-run').title = BATCH_ACTIONS.find(([name]) => name === element('#batch-action').value)[1]; };
+element('#batch-action').onchange();
+listen('#batch-run', () => applyBatchAction(session, element('#batch-action').value, timeline.gridCount));
 listen('#delete', deleteSelection);
 listen('#mirror', () => {
   if (session.focus === 'events') transformEvents(session, '镜像 X / 旋转事件', (event, type) => ['moveXEvents', 'rotateEvents'].includes(type) ? { ...event, start: -event.start, end: -event.end } : event);
@@ -1001,12 +1014,14 @@ window.addEventListener('keydown', async event => {
   const target = event.target;
   const textEntry = target?.isContentEditable || target?.tagName === 'TEXTAREA' || (target?.tagName === 'INPUT' && ['text', 'search', 'url', 'email', 'password'].includes(target.type));
   if (atHome || dialogOpen() || event.isComposing || textEntry) return;
+  if (batchControls.active) { event.preventDefault(); return; }
   const area = timeline.hoverArea ?? session.focus;
   const action = shortcutAction(event, preferences, area);
   let handled = true;
   try {
     if (event.repeat && ['Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) { event.preventDefault(); return; }
-    if (timeline.eventInteraction.pending && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.altKey) timeline.eventInteraction.place(undefined, undefined, Number(event.key) || 10);
+    if (!preview.visible && !event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && (session.selection.size || session.eventSelection.size)) nudgeSelection(session, event.key, timeline.division, timeline.gridCount);
+    else if (timeline.eventInteraction.pending && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.altKey) timeline.eventInteraction.place(undefined, undefined, Number(event.key) || 10);
     else if (action === 'Save') { event.preventDefault(); await save(); }
     else if (action === 'Undo') travel('undo');
     else if (action === 'Redo') travel('redo');
@@ -1016,7 +1031,7 @@ window.addEventListener('keydown', async event => {
       session.notify();
     }
     else if (action === 'Copy') copySelection();
-    else if (action === 'Shear') { copySelection(); deleteSelection(); }
+    else if (action === 'Shear') cutObjects(session);
     else if (['Paste', 'PasteMirror', 'KeepTimePaste', 'KeepTimePasteMirror'].includes(action)) pasteSelection(action.endsWith('Mirror'), action.startsWith('KeepTime'));
     else if (action === 'Pause') { event.preventDefault(); await togglePlayback(); }
     else if (['StartView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) {
@@ -1039,12 +1054,13 @@ window.addEventListener('keydown', async event => {
       const hit = timeline.hit(timeline.cursor);
       if (hit) { session.selection = new Set([hit.index]); session.deleteSelection(); }
     } else if (['LastBeat', 'NextBeat'].includes(action)) seekBeat(Math.max(0, currentBeat() + (action === 'LastBeat' ? -1 : 1) / timeline.division));
-    else if (action === 'Esc') { session.selection.clear(); session.eventSelection.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
+    else if (action === 'Esc') { session.clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
     else handled = false;
     if (handled) event.preventDefault();
   } catch (error) { event.preventDefault(); reportError(error); }
 });
 window.addEventListener('keyup', event => {
+  if (timeline.clipboardMode?.mirror || timeline.clipboardMode?.keepTime) { timeline.clipboardMode = {}; invalidate(); }
   if (heldPreview && (event.code === heldPreview.code || shortcutReleased(event, preferences.hotkeys[heldPreview.action]))) {
     togglePreview(false, heldPreview.action === 'JumpView_HOLD'); heldPreview = null;
   }
@@ -1065,6 +1081,7 @@ let lastTick = 0;
 function frame(timestamp) {
   const elapsed = lastTick ? (timestamp - lastTick) / 1000 : 0; lastTick = timestamp;
   audio.update();
+  batchControls.sync();
   if (!atHome) timeline.autoScroll(elapsed);
   frameSampleCount++;
   if (timestamp - frameSampleStart >= 500) { measuredFps = frameSampleCount * 1000 / (timestamp - frameSampleStart); frameSampleStart = timestamp; frameSampleCount = 0; }
@@ -1090,9 +1107,12 @@ function frame(timestamp) {
     drawTimelineStrips();
     updateLayerButtons();
     preview.duration = realtimePreview.duration = audio.duration;
-    preview.draw(session.chart, tempo, chartSeconds(), session.lineIndex);
-    if (!preview.visible) realtimePreview.draw(session.chart, tempo, chartSeconds(), session.lineIndex);
+    const viewSession = timeline.getSession();
+    preview.draw(viewSession.chart, tempo, chartSeconds(), viewSession.lineIndex);
+    if (!preview.visible) realtimePreview.draw(viewSession.chart, tempo, chartSeconds(), viewSession.lineIndex);
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
+    element('#play').dataset.playing = String(audio.playing);
+    element('#play').title = audio.playing ? '暂停' : '播放';
     element('#clock').textContent = `${chartSeconds().toFixed(3)} s`;
     element('#scrubber').value = audio.time;
     const tempoPoint = tempo.points[Math.max(0, upperBound(tempo.points, beat, point => point.beat) - 1)];
