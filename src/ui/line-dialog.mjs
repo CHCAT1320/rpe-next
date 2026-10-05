@@ -17,9 +17,11 @@ export function manageLines(session) {
     content.append(element);
   };
   const apply = (label, chart, index = session.lineIndex) => {
+    const beforeSelection = session.selectionState();
     session.lineIndex = index;
     session.selection.clear();
-    session.commit(label, chart);
+    session.eventSelection.clear();
+    session.commit(label, chart, beforeSelection);
   };
   const name = document.createElement('input'); name.value = session.line.Name || ''; name.setAttribute('aria-label', '判定线名称'); content.append(name);
   button('重命名', () => session.updateLine('重命名判定线', line => ({ ...line, Name: name.value })));

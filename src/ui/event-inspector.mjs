@@ -6,15 +6,17 @@ import { EASING_NAMES, createEasingPicker } from './easing-picker.mjs';
 import { numericWheel } from './numeric-wheel.mjs';
 import { EVENT_WHEEL_STEPS } from '../core/note-editing.mjs';
 import { renderShaderInspector } from './shader-inspector.mjs';
+import { canCutEvent } from '../application/event-tools.mjs';
+import { runEventTool } from './event-tools.mjs';
 export { EASING_NAMES } from './easing-picker.mjs';
 const galleryState = { open: false };
 
-export function renderEventInspector(session, tempo, currentBeat, reportError) {
+export function renderEventInspector(session, tempo, currentBeat, reportError, notify = () => {}) {
   const container = document.querySelector('#event-properties'); container.replaceChildren();
   const entries = selectedEvents(session); const event = entries[0]?.event; const eventType = entries[0]?.type;
   document.querySelector('#event-selection-count').textContent = `${entries.length} 已选`;
   if (!event) { const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '点击事件查看属性；拖动移动，拖动上/下边缘调整时间。Shift 框选，Ctrl 多选。事件区按 R 两次确定起止拍，Esc 取消。'; container.append(hint); return; }
-  if (eventType === 'paintEvents') { renderShaderInspector(container, session, reportError, () => renderEventInspector(session, tempo, currentBeat, reportError)); return; }
+  if (eventType === 'paintEvents') { renderShaderInspector(container, session, reportError, () => renderEventInspector(session, tempo, currentBeat, reportError, notify)); return; }
   const safely = action => { try { action(); } catch (error) { reportError(error); } };
   const valueKind = (type, value) => type === 'colorEvents' && Array.isArray(value) ? 'array' : type === 'textEvents' && typeof value === 'string' ? 'text' : Array.isArray(value) ? 'array' : 'number';
   const valueTitle = eventType === 'alphaEvents' ? ['起始透明度', '结束透明度'] : eventType === 'speedEvents' ? ['起始速度', '结束速度'] : eventType === 'colorEvents' ? ['起始颜色', '结束颜色'] : eventType === 'textEvents' ? ['起始文字', '结束文字'] : ['起始值', '结束值'];
@@ -47,7 +49,7 @@ export function renderEventInspector(session, tempo, currentBeat, reportError) {
     if (key === 'linkgroup') { input.min = 0; input.step = 1; }
     input.value = kind === 'beat' ? formatBeat(event[key]) : kind === 'array' ? event[key].join(', ') : event[key] ?? (key === 'easingRight' ? 1 : 0);
     input.onfocus = () => { session.liveEventEdit = true; };
-    input.onblur = () => { session.liveEventEdit = false; queueMicrotask(() => { if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError); }); };
+    input.onblur = () => { session.liveEventEdit = false; queueMicrotask(() => { if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify); }); };
     input.oninput = () => { if (kind !== 'number' || input.value.trim()) applyField(input, key, title, kind, true); };
     input.onchange = () => applyField(input, key, title, kind);
     if (kind === 'number') {
@@ -138,6 +140,11 @@ export function renderEventInspector(session, tempo, currentBeat, reportError) {
     container.append(dragCanvas);
   }
   const actions = document.createElement('div'); actions.className = 'action-grid';
+  for (const [action, title] of [['stick', '粘合前一事件'], ['cut', '切割事件']]) {
+    const button = document.createElement('button'); button.type = 'button'; button.textContent = title;
+    if (action === 'cut') { button.disabled = !canCutEvent(eventType, event); button.title = '按横线细分 × 切割密度生成线性事件段；密度可在设置中调整。文字、着色器不支持切割。'; }
+    button.onclick = () => runEventTool(session, action, notify, currentBeat()); actions.append(button);
+  }
   for (const [title, action] of [['首尾交换', () => transformEvents(session, '交换事件首尾', current => ({ ...current, start: current.end, end: current.start }))], ['删除事件', () => deleteEvents(session)]]) {
     const button = document.createElement('button'); button.type = 'button'; button.textContent = title; button.onclick = () => safely(action); actions.append(button);
   } container.append(actions);

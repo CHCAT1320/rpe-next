@@ -46,3 +46,5 @@ export const listProjects = () => access(['summaries'], 'readonly', transaction 
 export const readProject = id => access(['projects'], 'readonly', transaction => transaction.objectStore('projects').get(id));
 export const readPreferences = () => access(['preferences'], 'readonly', transaction => transaction.objectStore('preferences').get('current'));
 export const storePreferences = preferences => access(['preferences'], 'readwrite', transaction => transaction.objectStore('preferences').put(preferences, 'current'));
+export const readClipboardHistory = () => access(['preferences'], 'readonly', transaction => transaction.objectStore('preferences').get('clipboard-history'));
+export const storeClipboardHistory = entries => access(['preferences'], 'readwrite', transaction => transaction.objectStore('preferences').put(entries, 'clipboard-history'));

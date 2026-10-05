@@ -2,12 +2,13 @@ export const DEFAULT_HOTKEYS = {
   AddTap: 'Q', AddDrag: 'W', AddFlick: 'E', AddHold: 'R', AddEvent: 'R', Pause: 'SPACE', Save: 'LEFTCTRL&S',
   Undo: 'LEFTCTRL&Z', Redo: 'LEFTCTRL&Y', SelectAll: 'LEFTCTRL&A', Copy: 'LEFTCTRL&C',
   Shear: 'LEFTCTRL&X', Paste: 'LEFTCTRL&V', PasteMirror: 'LEFTCTRL&B',
+  ClipboardHistory: 'LEFTCTRL&V', NumberMirror: 'A', NumberFill: 'S',
   KeepTimePaste: 'LEFTCTRL&LEFTSHIFT&V', KeepTimePasteMirror: 'LEFTCTRL&LEFTSHIFT&B',
   Delete: 'DELETE', QuickDelete: 'D', LastBeat: 'LEFTARROW', NextBeat: 'RIGHTARROW', Esc: 'ESCAPE',
   StartView: 'I', EndView: 'O', JumpView: 'P', ReplayView: 'LEFTBRACKET', StartView_HOLD: 'T', JumpView_HOLD: 'U',
   SwitchUI: 'LEFTALT&N', ResetCamera: 'LEFTCTRL&M', CurveBegin: 'LEFTCTRL&F', CurveEnd: 'LEFTCTRL&G',
 };
-export const SUPPORTED_SETTINGS = ['MusicVolume', 'maxHistorySize', 'AutoSave', 'AutoSaveGap', 'AutoSaveLimit', 'FpsLimit', 'showHotkey', 'SEVolume', 'NoteSize', 'GridlineCount', 'ScrollSpeed', 'Alpha', 'RealTimeAlpha', 'ScrollAcc', 'ratioWidth', 'ratioHeight', 'BarWidth', 'BarAlpha', 'HighLight', 'autoplayT', 'showViewUI'];
+export const SUPPORTED_SETTINGS = ['CutRho', 'MusicVolume', 'maxHistorySize', 'AutoSave', 'AutoSaveGap', 'AutoSaveLimit', 'FpsLimit', 'showHotkey', 'SEVolume', 'NoteSize', 'GridlineCount', 'ScrollSpeed', 'Alpha', 'RealTimeAlpha', 'ScrollAcc', 'ratioWidth', 'ratioHeight', 'BarWidth', 'BarAlpha', 'HighLight', 'autoplayT', 'showViewUI'];
 
 export function parseHotkeys(text) {
   const result = {};
@@ -26,6 +27,7 @@ export function migratePreferences(settingsText = '{}', hotkeyText = '', uiText 
   return { version: 1, originalSettings, originalHotkeys, originalUI: uiText,
     hotkeys: { ...DEFAULT_HOTKEYS, ...originalHotkeys },
     settings: {
+      cutDensity: finiteRange(originalSettings.CutRho, 0.1, 128, 4),
       volume: finiteRange(originalSettings.MusicVolume, 0, 1, 0.75),
       hitVolume: finiteRange(originalSettings.SEVolume, 0, 1, 0.3),
       noteSize: finiteRange(originalSettings.NoteSize, 10, 500, 175),
@@ -58,23 +60,36 @@ function finiteRange(value, minimum, maximum, fallback) {
 
 const keyNames = { ' ': 'SPACE', ARROWLEFT: 'LEFTARROW', ARROWRIGHT: 'RIGHTARROW', ARROWUP: 'UPARROW', ARROWDOWN: 'DOWNARROW', '[': 'LEFTBRACKET', ']': 'RIGHTBRACKET' };
 
+export function shortcutKey(event) {
+  let key = String(event.key ?? '').toUpperCase();
+  if (event.isComposing || ['PROCESS', 'UNIDENTIFIED', 'DEAD', ''].includes(key)) {
+    const code = String(event.code ?? '').toUpperCase();
+    key = /^(KEY[A-Z]|DIGIT[0-9])$/.test(code) ? code.replace(/^(KEY|DIGIT)/, '') : code;
+    if (key === 'BRACKETLEFT') key = 'LEFTBRACKET';
+    if (key === 'BRACKETRIGHT') key = 'RIGHTBRACKET';
+  }
+  return keyNames[key] ?? key;
+}
+
 export function shortcutMatches(event, specification) {
+  if (typeof specification !== 'string') return false;
   const parts = specification.toUpperCase().replaceAll(' ', '').split('&');
   const control = parts.some(part => ['LEFTCTRL', 'RIGHTCTRL', 'CTRL'].includes(part));
   const shift = parts.some(part => ['LEFTSHIFT', 'RIGHTSHIFT', 'SHIFT'].includes(part));
   const alt = parts.some(part => ['LEFTALT', 'RIGHTALT', 'ALT'].includes(part));
   const keys = parts.filter(part => !/^(LEFT|RIGHT)?(CTRL|SHIFT|ALT)$/.test(part));
-  const key = keyNames[event.key.toUpperCase()] ?? event.key.toUpperCase();
+  const key = shortcutKey(event);
   return keys.length === 1 && keys[0] === key && control === Boolean(event.ctrlKey || event.metaKey) && shift === Boolean(event.shiftKey) && alt === Boolean(event.altKey);
 }
 
 export function shortcutAction(event, preferences, area = 'notes') {
   const actions = Object.keys(DEFAULT_HOTKEYS).filter(action => area === 'events' ? !['AddHold', 'AddDrag', 'AddFlick'].includes(action) : action !== 'AddEvent');
-  return actions.find(action => shortcutMatches(event, preferences.hotkeys[action] ?? DEFAULT_HOTKEYS[action]));
+  return actions.find(action => shortcutMatches(event, preferences?.hotkeys?.[action] ?? DEFAULT_HOTKEYS[action]));
 }
 
 export function shortcutReleased(event, specification) {
-  const key = keyNames[event.key.toUpperCase()] ?? event.key.toUpperCase();
+  if (typeof specification !== 'string') return false;
+  const key = shortcutKey(event);
   const alias = { CONTROL: 'CTRL', META: 'CTRL', SHIFT: 'SHIFT', ALT: 'ALT' }[key];
   return specification.toUpperCase().replaceAll(' ', '').split('&').some(part => part === key || alias && part.replace(/^(LEFT|RIGHT)/, '') === alias);
 }

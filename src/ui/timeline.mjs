@@ -71,6 +71,35 @@ export class Timeline {
     return { x: event.clientX - rectangle.left, y: event.clientY - rectangle.top };
   }
 
+  rectangleSelection() {
+    if (this.drag?.kind === 'rectangle') return { drag: this.drag, canvas: this.notesCanvas, area: 'notes' };
+    if (this.eventInteraction.drag?.kind === 'rectangle') return { drag: this.eventInteraction.drag, canvas: this.eventsCanvas, area: 'events' };
+    return null;
+  }
+
+  rectangleStart(drag) {
+    return { x: drag.start.x, y: drag.startSeconds === undefined ? drag.start.y : this.notesCanvas.clientHeight - 42 - (drag.startSeconds - this.tempo.seconds(this.origin, this.factor)) * this.scale };
+  }
+
+  rectangleTimes(drag) {
+    const start = drag.startSeconds ?? this.timeAt(drag.start.y);
+    const current = this.timeAt(drag.current.y);
+    return [this.tempo.beat(Math.min(start, current), this.factor) - 1e-8, this.tempo.beat(Math.max(start, current), this.factor) + 1e-8];
+  }
+
+  updateRectangle(event) {
+    const selection = this.rectangleSelection(); if (!selection) return;
+    selection.drag.current = this.point(event, selection.canvas); this.changed();
+  }
+
+  finishRectangle(event) {
+    const selection = this.rectangleSelection();
+    if (!selection || ![0, 1, 2].includes(event.button)) return false;
+    selection.drag.finished = true;
+    if (selection.area === 'notes') this.up(event); else this.eventInteraction.up(event);
+    return true;
+  }
+
   get eventTypes() { return this.extended ? SPECIAL_TRACKS.map(track => track.key) : EVENT_TYPES; }
 
   eventColumnBounds(channel, width) {
@@ -195,6 +224,7 @@ export class Timeline {
   down(event) {
     if (![0, 1, 2].includes(event.button)) return;
     event.preventDefault?.();
+    if (this.finishRectangle(event)) return;
     this.notesCanvas.focus();
     this.notesCanvas.setPointerCapture(event.pointerId);
     const position = this.point(event);
@@ -206,10 +236,9 @@ export class Timeline {
     if (event.button === 0 && hit && this.curvePick?.(hit.item, hit.index)) return;
     session.focus = 'notes';
     if (!event.ctrlKey && !event.shiftKey && event.button !== 1) session.eventSelection.clear();
-    if (this.drag?.kind === 'rectangle') { this.drag.finished = true; this.up(event); return; }
     if (event.button === 0 && (this.pendingHold || this.tool && !event.shiftKey && !event.ctrlKey)) { this.addAtCursor(this.pendingHold ? 2 : this.tool); return; }
     if (event.shiftKey || event.button === 1) {
-      this.drag = { kind: 'rectangle', start: position, current: position, append: true, remove: false };
+      this.drag = { kind: 'rectangle', start: position, startSeconds: this.timeAt(position.y), current: position, append: true, remove: false };
     } else if (hit && event.button === 0) {
       if (event.ctrlKey) {
         if (session.selection.has(hit.index)) session.selection.delete(hit.index);
@@ -226,17 +255,17 @@ export class Timeline {
     if (!this.drag) return;
     if (this.drag.kind === 'stroke' && !this.drag.remove && !this.drag.tracing && this.previewPick?.(event)) { this.drag = null; this.changed(); return; }
     if (this.drag.kind === 'stroke' && this.drag.remove && !this.drag.tracing) {
-      this.drag = { ...this.drag, kind: 'rectangle', append: true, remove: false }; this.changed(); return;
+      this.drag = { ...this.drag, kind: 'rectangle', startSeconds: this.timeAt(this.drag.start.y), append: true, remove: false }; this.changed(); return;
     }
     const drag = this.drag;
     drag.current = this.point(event);
     const session = this.getSession();
     if (drag.kind === 'rectangle') {
       if (!drag.finished) { this.changed(); return; }
+      this.refreshIndex();
       const left = Math.min(drag.start.x, drag.current.x);
       const right = Math.max(drag.start.x, drag.current.x);
-      const bottom = Math.min(this.beatAt(drag.start.y), this.beatAt(drag.current.y));
-      const top = Math.max(this.beatAt(drag.start.y), this.beatAt(drag.current.y));
+      const [bottom, top] = this.rectangleTimes(drag);
       if (!drag.append) session.selection.clear();
       for (const entry of this.noteIndex.query(bottom, top)) {
         const horizontal = this.noteHorizontal(entry.item.positionX);
@@ -328,7 +357,7 @@ export class Timeline {
       context.globalAlpha = note.isFake ? 0.45 : noteIsAbove(note) ? 1 : 0.7;
       context.fillStyle = NOTE_COLORS[note.type];
       const highlight = this.highlight !== false && this.simultaneous.has(entry.item);
-      const textured = note.type === 2 ? this.skin?.hold(context, renderedHorizontal, vertical, endVertical, noteWidth, highlight) : this.skin?.head(context, note.type, renderedHorizontal, vertical, noteWidth, highlight);
+      const textured = note.type === 2 ? this.skin?.hold(context, renderedHorizontal, vertical, endVertical, noteWidth, highlight, true, note.tint ?? note.color) : this.skin?.head(context, note.type, renderedHorizontal, vertical, noteWidth, highlight, note.tint ?? note.color);
       if (!textured && note.type === 2) {
         context.globalAlpha *= 0.45;
         const top = Math.max(-10, endVertical);
@@ -340,9 +369,9 @@ export class Timeline {
       if (selected) { context.strokeStyle = '#fff'; context.lineWidth = 2; context.strokeRect(renderedHorizontal - noteWidth / 2 - 3, vertical - 7, noteWidth + 6, 14); context.lineWidth = 1; }
       context.globalAlpha = 1;
     }
-    if (this.drag?.kind === 'rectangle') {
+    if (this.drag?.kind === 'rectangle' && !this.marqueeOverlay) {
       context.fillStyle = '#81bfff22'; context.strokeStyle = '#81bfff';
-      const { start, current } = this.drag;
+      const start = this.rectangleStart(this.drag); const { current } = this.drag;
       context.fillRect(start.x, start.y, current.x - start.x, current.y - start.y);
       context.strokeRect(start.x, start.y, current.x - start.x, current.y - start.y);
     }
@@ -360,6 +389,11 @@ export class Timeline {
     if (this.drag?.kind === 'stroke') {
       context.strokeStyle = this.drag.remove ? '#ff8080' : '#80ffff'; context.beginPath();
       this.drag.points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y)); context.stroke();
+    }
+    if (Number.isFinite(this.scaleAxis)) {
+      context.save(); context.strokeStyle = '#fff3a3'; context.lineWidth = 2; context.setLineDash([8, 5]);
+      const horizontal = this.noteHorizontal(this.scaleAxis);
+      context.beginPath(); context.moveTo(horizontal, 0); context.lineTo(horizontal, height); context.stroke(); context.restore();
     }
     if (!this.notesOnly) this.drawEvents(playBeat);
   }
@@ -482,9 +516,12 @@ export class Timeline {
     });
     const drag = this.eventInteraction.drag;
     if (drag?.kind === 'rectangle') {
+      if (!this.marqueeOverlay) {
       context.fillStyle = '#ffcc4430'; context.strokeStyle = '#ffdd77';
-      context.fillRect(drag.start.x, drag.start.y, drag.current.x - drag.start.x, drag.current.y - drag.start.y);
-      context.strokeRect(drag.start.x, drag.start.y, drag.current.x - drag.start.x, drag.current.y - drag.start.y);
+      const start = this.rectangleStart(drag);
+      context.fillRect(start.x, start.y, drag.current.x - start.x, drag.current.y - start.y);
+      context.strokeRect(start.x, start.y, drag.current.x - start.x, drag.current.y - start.y);
+      }
     } else if (drag?.kind === 'stroke') {
       context.strokeStyle = '#80ffff'; context.beginPath();
       drag.points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y)); context.stroke();

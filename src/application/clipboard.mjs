@@ -16,15 +16,23 @@ export function copyObjects(session) {
 export function cutObjects(session) {
   const count = copyObjects(session);
   if (!count) return 0;
+  deleteObjects(session, '剪切选中项');
+  return count;
+}
+
+export function deleteObjects(session, label = '删除选中项') {
+  const snapshot = captureSelection(session);
+  const count = snapshot.notes.length + snapshot.events.length;
+  if (!count) return 0;
   const updates = new Map();
-  for (const { type } of session.eventClipboard) updates.set(type, eventList(session, type).filter((event, index) => !session.eventSelection.has(eventKey(type, index))));
+  for (const { type } of snapshot.events) updates.set(type, eventList(session, type).filter((event, index) => !session.eventSelection.has(eventKey(type, index))));
   let chart = updates.size ? chartWithEventLists(session.chart, session.lineIndex, session.eventLayer, updates) : session.chart;
   if (session.selection.size) {
     const lines = [...chart.judgeLineList]; const line = lines[session.lineIndex];
     const notes = (line.notes ?? []).filter((note, index) => !session.selection.has(index));
     lines[session.lineIndex] = { ...line, notes, numOfNotes: notes.length }; chart = { ...chart, judgeLineList: lines };
   }
-  commitSelectionEdit(session, { chart, lineIndex: session.lineIndex, eventLayer: session.eventLayer, focus: session.focus, selection: new Set(), eventSelection: new Set() }, '剪切选中项');
+  commitSelectionEdit(session, { chart, lineIndex: session.lineIndex, eventLayer: session.eventLayer, focus: session.focus, selection: new Set(), eventSelection: new Set() }, label);
   return count;
 }
 

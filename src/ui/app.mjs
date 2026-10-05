@@ -9,9 +9,9 @@ import { Timeline, prepareCanvas } from './timeline.mjs';
 import { Preview } from './preview.mjs';
 import { renderProperties } from './inspector.mjs';
 import { showDialog, editJson, choose, confirmAction, dialogOpen } from './dialog.mjs';
-import { migratePreferences, shortcutAction, shortcutReleased } from '../core/preferences.mjs';
+import { migratePreferences, shortcutAction, shortcutReleased, shortcutMatches, DEFAULT_HOTKEYS } from '../core/preferences.mjs';
 import { directoryEntries, uploadedEntries, scanMigration } from '../platform/migration.mjs';
-import { readProject, readPreferences, storePreferences, storeProject } from '../platform/library.mjs';
+import { readProject, readPreferences, storePreferences, storeProject, readClipboardHistory, storeClipboardHistory } from '../platform/library.mjs';
 import { migrationDialog } from './migration-dialog.mjs';
 import { manageLines } from './line-dialog.mjs';
 import { HELP_TEXT } from './help.mjs';
@@ -20,10 +20,18 @@ import { RpeSkin } from './skin.mjs';
 import { ProjectImages } from '../platform/images.mjs';
 import { HitSounds } from '../platform/hitsounds.mjs';
 import { renderEventInspector } from './event-inspector.mjs';
-import { eventKey, eventList, commitEventLists, deleteEvents, transformEvents } from '../application/event-commands.mjs';
+import { eventKey, eventList, deleteEvents, transformEvents } from '../application/event-commands.mjs';
 import { BATCH_ACTIONS, applyBatchAction, nudgeSelection } from '../application/batch-edit.mjs';
-import { copyObjects, cutObjects, pasteObjects } from '../application/clipboard.mjs';
+import { copyObjects, cutObjects, pasteObjects, deleteObjects } from '../application/clipboard.mjs';
+import { ClipboardHistory } from '../application/clipboard-history.mjs';
+import { renderClipboardHistory } from './clipboard-history.mjs';
+import { PasteGesture } from './paste-gesture.mjs';
+import { SelectionOverlay } from './selection-overlay.mjs';
+import { LineSwitcher } from './line-switcher.mjs';
+import { stepLine } from '../core/line-overview.mjs';
+import { applyNumberShortcut } from '../application/number-shortcuts.mjs';
 import { BatchControls } from './batch-controls.mjs';
+import { MultiEditPanel } from './multi-edit.mjs';
 import { clipboardBeat } from './clipboard-preview.mjs';
 import { shaderEvents, replaceShaderEvents } from '../core/shader-events.mjs';
 import { renderMetadataPanel, renderBpmPanel } from './forms.mjs';
@@ -34,16 +42,20 @@ import { createSettingsPanel } from './settings.mjs';
 import { AutoSaveClock } from '../application/autosave.mjs';
 import { SPECIAL_TRACKS, MAX_BASE_LAYERS } from '../core/editor-display.mjs';
 import { UI_BINDINGS } from '../core/game-ui.mjs';
-import { isPlaybackSpace } from './keyboard.mjs';
+import { isPlaybackSpace, isTextEntry, isTypingText, releaseShortcutFocus } from './keyboard.mjs';
 import { setRatioOptions, applyViewControls } from './view-controls.mjs';
 import { generateCurveNotes } from '../core/curve-notes.mjs';
 import { createEasingPicker } from './easing-picker.mjs';
 import { numericWheel } from './numeric-wheel.mjs';
 import { SceneRuntime } from '../core/scene.mjs';
+import { TimelineActivity } from '../core/timeline-activity.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
 
 const element = selector => document.querySelector(selector);
 const displayFields = [
+  ['event-cut-density', 'cutDensity', 4],
+  ['line-switcher-enabled', 'lineSwitcher', true],
+  ['clipboard-history-enabled', 'clipboardHistory', true],
   ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
   ['background-blur', 'backgroundBlur', 10.5], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
   ['line-numbers', 'lineNumbers', true], ['line-arrows', 'lineArrows', true], ['line-tint', 'lineTint', true], ['merge-line-numbers', 'mergeLineNumbers', true], ['pick-preview-lines', 'pickPreviewLines', true],
@@ -85,6 +97,7 @@ const hitSounds = new HitSounds(audio);
 const preview = new Preview(element('#preview'));
 const realtimePreview = new Preview(element('#realtime-preview'));
 const lineInfoScene = new SceneRuntime();
+const timelineActivity = new TimelineActivity();
 const invalidate = () => { dirtyFrame = true; };
 preview.invalidate = realtimePreview.invalidate = invalidate;
 realtimePreview.applyShaders = false;
@@ -93,27 +106,29 @@ const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
 const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error));
 const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, error => reportError(error));
+const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
+  close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
+});
+const clipboardHistory = new ClipboardHistory();
+const selectionOverlay = new SelectionOverlay(element('.stage'), timeline);
+const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
+  chart: session.chart, tempo, seconds: chartSeconds(), selected: session.lineIndex,
+  start: timeline.timeAt(timeline.notesCanvas.clientHeight), end: timeline.timeAt(0),
+  visible: hasDocument && !atHome && !preview.visible && !dialogOpen(),
+}), { select: index => selectOverviewLine(index) });
+const pasteGesture = new PasteGesture({
+  paste: context => { try { pasteObjects(session, context.beat); } catch (error) { reportError(error); } },
+  open: () => { activatePane('clipboard'); renderClipboardPanel(); },
+  reportError: error => notify(`剪贴板历史：${error.message}`, 'error'),
+  valid: context => context.session === session && context.chart === session.chart && context.lineIndex === session.lineIndex && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
+});
+window.addEventListener('blur', () => pasteGesture.cancel());
 function drawTimelineStrips() {
   const height = timeline.notesCanvas.clientHeight; if (!height) return;
   const noteFrame = prepareCanvas(element('#note-density')); const historyFrame = prepareCanvas(element('#history-strip'));
-  const times = []; const secondsFor = (beat, factor = 1) => tempo.seconds(beat, factor);
-  for (const line of session.line ? [session.line] : []) {
-    const factor = line.bpmfactor ?? 1;
-    for (const note of line.notes ?? []) times.push(secondsFor(note.startTime, factor));
-    for (const layer of [...(line.eventLayers ?? []), line.extended ?? {}]) for (const [type, events] of Object.entries(layer ?? {})) if (type !== 'paintEvents' && Array.isArray(events)) for (const event of events) times.push(secondsFor(event.startTime, factor));
-    for (const event of shaderEvents(session.chart, session.lineIndex)) times.push(secondsFor(event.startTime, factor));
-  }
-  const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : (times.length ? Math.max(...times) : 1));
-  const bins = Math.max(96, Math.min(900, Math.max(Math.round(height), Math.ceil(duration * 8)))); const noteBins = new Array(bins).fill(0); const eventBins = new Array(bins).fill(0);
-  const add = (target, seconds) => target[Math.max(0, Math.min(bins - 1, Math.floor(seconds / duration * bins)))]++;
-  for (const line of session.line ? [session.line] : []) {
-    const factor = line.bpmfactor ?? 1;
-    for (const note of line.notes ?? []) add(noteBins, secondsFor(note.startTime, factor));
-    const layer = timeline.extended ? (line === session.line ? line.extended : null) : line.eventLayers?.[timeline.layer];
-    for (const [type, events] of Object.entries(layer ?? {})) if (type !== 'paintEvents' && Array.isArray(events)) for (const event of events) add(eventBins, secondsFor(event.startTime, factor));
-    if (timeline.extended) for (const event of shaderEvents(session.chart, session.lineIndex)) add(eventBins, secondsFor(event.startTime, factor));
-  }
-  const maximum = Math.max(1, ...noteBins, ...eventBins);
+  timelineActivity.compile(session.chart, tempo);
+  const duration = audio.duration > 0 ? audio.duration : timelineActivity.duration;
+  const { bins, noteBins, eventBins, maximum } = timelineActivity.density(session.lineIndex, timeline.layer, timeline.extended, duration, height);
   const historyEntries = session.recentEdits ?? [];
   for (let index = 0; index < bins; index++) {
     const y = height - (index + 1) * height / bins; const barHeight = Math.max(1, height / bins - 1); const half = Math.max(1, noteFrame.width / 2 - 2);
@@ -131,8 +146,8 @@ function drawTimelineStrips() {
 }
 function seekFromStrip(event) {
   const rect = event.currentTarget.getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-  const times = []; for (const line of session.chart.judgeLineList ?? []) for (const note of line.notes ?? []) times.push(tempo.seconds(note.startTime, line.bpmfactor ?? 1));
-  const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : (times.length ? Math.max(...times) : 1)); playback.seek((1 - ratio) * duration + offsetSeconds());
+  timelineActivity.compile(session.chart, tempo);
+  const duration = audio.duration > 0 ? audio.duration : timelineActivity.duration; playback.seek((1 - ratio) * duration + offsetSeconds());
 }
 element('#note-density').addEventListener('click', seekFromStrip);
 element('#history-strip').addEventListener('click', seekFromStrip);
@@ -233,10 +248,20 @@ const autoSave = new AutoSaveClock(async () => {
 }, error => status(`自动保存失败：${error.message}，请手动保存或导出 PEZ`));
 timeline.onWheel = event => {
   if (event.ctrlKey) {
-    const count = session.chart.judgeLineList?.length ?? 0;
-    if (count) { timeline.cancelPlacement(); session.selectLine((session.lineIndex + Math.sign(event.deltaY) + count) % count); }
+    if (event.deltaY) {
+      if (lineSwitcher.enabled) { lineSwitcher.step(event.deltaY); lineSwitcher.show(); }
+      else switchLine(event.deltaY);
+    }
   } else playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed }, performance.now() / 1000);
 };
+function switchLine(direction) {
+  const index = stepLine(session.lineIndex, direction, session.chart.judgeLineList?.length ?? 0);
+  return selectOverviewLine(index);
+}
+function selectOverviewLine(index) {
+  if (!Number.isInteger(index) || !session.chart.judgeLineList?.[index]) return false;
+  batchControls.cancel(); pasteGesture.cancel(); timeline.cancelPlacement(); session.selectLine(index); return true;
+}
 const previewWheel = event => {
   event.preventDefault();
   playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed }, performance.now() / 1000);
@@ -265,6 +290,7 @@ const home = new ProjectHome(async id => {
 
 function setHome(visible) {
   atHome = visible;
+  if (visible) lineSwitcher.reset();
   if (visible) { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); }
   element('#document-name').textContent = visible ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
   element('#home').hidden = !visible;
@@ -284,6 +310,7 @@ function persistEditor() {
 }
 
 function activatePane(name) {
+  if (name !== 'multi') multiEdit.hide();
   activePaneName = name;
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
@@ -337,15 +364,14 @@ function updateLineInfo() {
   if (!lineInfoVisible || !session.line || atHome) { overlay.hidden = true; return; }
   lineInfoScene.compile(session.chart, tempo);
   const seconds = chartSeconds();
-  const states = lineInfoScene.sample(seconds);
-  const state = states[session.lineIndex] ?? { x: 0, y: 0, rotation: 0, alpha: 255 };
+  const state = lineInfoScene.sampler(seconds)(session.lineIndex) ?? { x: 0, y: 0, rotation: 0, alpha: 255 };
   const runtime = lineInfoScene.lines[session.lineIndex];
   const scrollSpeed = runtime?.speeds?.reduce((sum, track) => sum + (track.value(seconds) || 0), 0) ?? 0;
   const line = session.line;
   const lineText = `Pos: (${lineInfoNumber(state.x)},${lineInfoNumber(state.y)})  Dir: ${lineInfoNumber(state.rotation)}  Alpha: ${lineInfoNumber(state.alpha, 0)}  Speed: ${lineInfoNumber(scrollSpeed)}`;
   const dt = 1 / 120;
-  const before = lineInfoScene.sample(seconds - dt)[session.lineIndex] ?? state;
-  const after = lineInfoScene.sample(seconds + dt)[session.lineIndex] ?? state;
+  const before = lineInfoScene.sampler(seconds - dt)(session.lineIndex) ?? state;
+  const after = lineInfoScene.sampler(seconds + dt)(session.lineIndex) ?? state;
   const xSpeed = (after.x - before.x) / (2 * dt) / 120;
   const ySpeed = (after.y - before.y) / (2 * dt) / 120;
   const rotateSpeed = (after.rotation - before.rotation) / (2 * dt);
@@ -381,6 +407,7 @@ function renderSession() {
   if (tempoEntries !== session.chart.BPMList) { tempoEntries = session.chart.BPMList; tempo = new TempoMap(tempoEntries); }
   timeline.tempo = tempo;
   session.tempo = tempo; session.division = timeline.division;
+  session.cutDensity = Number(element('#event-cut-density').value);
   updateLineInfo();
   session.eventWheelSteps = Object.fromEntries(['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents', 'scaleXEvents', 'scaleYEvents'].flatMap((key, index) => Number.isFinite(preferences.originalSettings.scrollValueIncrement?.[index]) ? [[key, preferences.originalSettings.scrollValueIncrement[index]]] : []));
   timeline.origin = currentBeat();
@@ -416,6 +443,7 @@ function renderSession() {
     const option = document.createElement('option'); option.value = index; option.textContent = `${index} · ${line.Name || '未命名'}`; element('#line-select').append(option);
   });
   element('#line-select').value = session.lineIndex;
+  element('#line-next').disabled = element('#line-previous').disabled = session.chart.judgeLineList.length < 2;
   const binding = session.line?.attachUI ?? '';
   element('#attach-ui').replaceChildren(new Option('不绑定', ''), ...UI_BINDINGS.map(([key, label]) => new Option(label, key)));
   if (binding && !UI_BINDINGS.some(([key]) => key === binding)) element('#attach-ui').append(new Option(`保留未知绑定：${binding}`, binding));
@@ -432,20 +460,24 @@ function renderSession() {
   lastDiagnosticSignature = liveSignature;
   if (activePaneName === 'diagnose') renderDiagnostics();
   if (activePaneName === 'history') renderHistoryPanel();
+  if (activePaneName === 'multi') multiEdit.sync();
   if (activePaneName === 'metadata') renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); });
   if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); });
   session.eventLayer = timeline.layer;
   renderProperties(session, reportError);
-  if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError);
+  if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify);
   decorateBeatInputs();
   if (session.eventSelection.size) {
     timeline.eventPlacementType = session.eventSelection.values().next().value.split(':')[0];
   }
-  const selectionSignature = `${session.focus}|${[...session.selection].sort((left, right) => left - right).join(',')}|${[...session.eventSelection].sort().join(',')}`;
+  const selectionSignature = `${session.lineIndex}:${session.eventLayer}|${session.focus}|${[...session.selection].sort((left, right) => left - right).join(',')}|${[...session.eventSelection].sort().join(',')}`;
   if (selectionSignature !== lastSelectionSignature) {
     lastSelectionSignature = selectionSignature;
     const selectionCount = session.focus === 'events' ? session.eventSelection.size : session.selection.size;
-    if (curveEditorOpen) activatePane('curve');
+    if (multiEdit.committing) multiEdit.sync();
+    else if (curveEditorOpen) activatePane('curve');
+    else if (activePaneName === 'clipboard') renderClipboardPanel();
+    else if (selectionCount > 1) { activatePane('multi'); multiEdit.open(session.focus === 'events' ? 'events' : 'notes'); }
     else if (selectionCount === 1) activatePane(session.focus === 'events' ? 'events' : 'notes');
     else activatePane('chart');
   }
@@ -458,10 +490,12 @@ session.addEventListener('change', renderSession);
 
 function replaceChart(chart, name, nextAssets = new Map()) {
   assertChart(chart);
+  lineSwitcher.reset();
   playback.pause(); audio.clear();
   hitSounds.stop(); images.clear(); libraryProject = null;
   session.removeEventListener('change', renderSession);
   session = new EditorSession(chart);
+  clipboardHistory.attach(session);
   lastSelectionSignature = '';
   activatePane('chart');
   session.history.limit = preferences.settings.historyLimit;
@@ -553,31 +587,6 @@ async function save(packageMode = false, exportOnly = false) {
 }
 
 function validateCommit(label, next) { assertChart(next); session.commit(label, next); }
-
-function eventCollection(type) {
-  if (type === 'paintEvents') return eventList(session, type);
-  return EVENT_TYPES.includes(type) ? session.line?.eventLayers?.[timeline.layer]?.[type] ?? [] : session.line?.extended?.[type] ?? [];
-}
-
-function replaceEvents(type, events) {
-  if (!Array.isArray(events)) throw new Error('事件列表必须为数组');
-  if (type === 'paintEvents') { commitEventLists(session, '编辑着色器事件', new Map([[type, events]])); return; }
-  session.updateLine('编辑事件', line => {
-    let next;
-    if (EVENT_TYPES.includes(type)) {
-      const layers = [...(line.eventLayers ?? [])];
-      layers[timeline.layer] = { ...layers[timeline.layer], [type]: events };
-      next = { ...line, eventLayers: layers };
-    } else next = { ...line, extended: { ...line.extended, [type]: events } };
-    const lines = [...session.chart.judgeLineList]; lines[session.lineIndex] = next;
-    assertChart({ ...session.chart, judgeLineList: lines });
-    for (const event of events) {
-      if (beatValue(event.endTime) < beatValue(event.startTime)) throw new Error('事件结束拍不能早于开始拍');
-      if (type !== 'textEvents' && type !== 'colorEvents' && (!Number.isFinite(event.start) || !Number.isFinite(event.end))) throw new Error('数值事件的 start/end 必须为有限数字');
-    }
-    return next;
-  });
-}
 
 function editEvent(type, index, beat = currentBeat()) {
   if (!session.line) { status('请先添加判定线'); return; }
@@ -719,20 +728,18 @@ function updateLayerButtons() {
     container.append(button);
   }
   const bottom = timeline.beatAt(timeline.notesCanvas.clientHeight); const top = timeline.beatAt(0);
+  timelineActivity.compile(session.chart, tempo);
   [...container.children].forEach((button, index) => {
-    const layer = index === MAX_BASE_LAYERS ? session.line?.extended : session.line?.eventLayers?.[index];
-    const allowedTypes = index === MAX_BASE_LAYERS ? SPECIAL_TRACKS.map(track => track.key) : EVENT_TYPES;
-    const events = allowedTypes.filter(type => type !== 'paintEvents').flatMap(type => Array.isArray(layer?.[type]) ? layer[type] : []);
-    const shaders = index === MAX_BASE_LAYERS ? shaderEvents(session.chart, session.lineIndex) : [];
-    const visible = events.some(event => beatValue(event.endTime) >= bottom && beatValue(event.startTime) <= top) || shaders.some(event => beatValue(event.endTime) >= timeline.eventBeatAt(timeline.notesCanvas.clientHeight, 'paintEvents') && beatValue(event.startTime) <= timeline.eventBeatAt(0, 'paintEvents'));
-    events.push(...shaders);
-    button.dataset.state = !events.length ? 'empty' : visible ? 'visible' : 'outside';
+    const state = timelineActivity.layerState(session.lineIndex, index, index === MAX_BASE_LAYERS, bottom, top, timeline.eventBeatAt(timeline.notesCanvas.clientHeight, 'paintEvents'), timeline.eventBeatAt(0, 'paintEvents'));
+    button.dataset.state = state;
     button.classList.toggle('active', timeline.extended ? index === MAX_BASE_LAYERS : index === timeline.layer);
     button.setAttribute('aria-pressed', String(button.classList.contains('active')));
-    button.title = `${index === MAX_BASE_LAYERS ? '特殊层' : `第 ${index} 层`} · ${!events.length ? '空层' : visible ? '当前视野内有事件' : '事件在当前视野外'}`;
+    button.title = `${index === MAX_BASE_LAYERS ? '特殊层' : `第 ${index} 层`} · ${state === 'empty' ? '空层' : state === 'visible' ? '当前视野内有事件' : '事件在当前视野外'}`;
   });
 }
 element('#line-select').addEventListener('change', event => { timeline.cancelPlacement(); session.selectLine(Number(event.target.value)); });
+listen('#line-next', () => switchLine(1));
+listen('#line-previous', () => switchLine(-1));
 element('#hit-volume').addEventListener('input', event => { hitSounds.setVolume(Number(event.target.value)); persistEditor(); });
 element('#hit-enabled').addEventListener('change', event => { hitSounds.enabled = event.target.checked; hitSounds.stop(); persistEditor(); });
 element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
@@ -807,16 +814,17 @@ element('#attach-ui').onchange = event => {
 };
 function copySelection() {
   const count = copyObjects(session);
-  if (count) status(`已复制 ${count} 个物件`);
+  if (count) { clipboardHistory.remember(session); status(`已复制 ${count} 个物件`); }
   invalidate();
 }
-function deleteSelection() { if (session.focus === 'events') deleteEvents(session); else session.deleteSelection(); }
+function deleteSelection() { deleteObjects(session); }
+function cutSelection() { if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
 function pasteSelection(mirror = false, keepTime = false) {
   timeline.clipboardMode = { mirror, keepTime };
   pasteObjects(session, clipboardBeat(timeline), timeline.clipboardMode);
 }
 listen('#copy', copySelection);
-listen('#cut', () => { cutObjects(session); invalidate(); });
+listen('#cut', cutSelection);
 listen('#paste', () => pasteSelection());
 for (const [name, description] of BATCH_ACTIONS) {
   const option = new Option(name, name); option.title = description; element('#batch-action').append(option);
@@ -853,10 +861,29 @@ listen('#line-properties', () => {
     validateCommit('判定线属性', { ...session.chart, judgeLineList: lines });
   });
 });
-listen('#event-list', () => {
-  const type = session.eventSelection.values().next().value?.split(':')[0] ?? timeline.eventTypes[0];
-  editJson(type, '可以批量编辑、复制及删除事件；应用作为一步撤销。', eventCollection(type), events => replaceEvents(type, events));
+listen('#clear-clipboard', () => { clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
+const clipboardButton = document.createElement('button'); clipboardButton.id = 'clipboard-history'; clipboardButton.textContent = '剪贴板历史'; clipboardButton.title = '长按 Ctrl+V';
+element('[data-panel="chart"] .action-grid').append(clipboardButton);
+function renderClipboardPanel() {
+  renderClipboardHistory(element('#clipboard-results'), clipboardHistory, {
+    use: id => { clipboardHistory.use(session, id); invalidate(); },
+  });
+}
+function toggleClipboardPanel() {
+  if (!clipboardHistory.enabled) return;
+  activatePane(activePaneName === 'clipboard' ? 'chart' : 'clipboard'); renderClipboardPanel();
+}
+listen('#clipboard-history', toggleClipboardPanel);
+listen('#clear-clipboard-history', () => clipboardHistory.clearUnpinned());
+let clipboardSave = Promise.resolve();
+clipboardHistory.addEventListener('change', event => {
+  if (activePaneName === 'clipboard' && event.reason !== 'rename') renderClipboardPanel();
+  invalidate();
+  if (!event.persist) return;
+  const entries = structuredClone(clipboardHistory.entries);
+  clipboardSave = clipboardSave.then(() => storeClipboardHistory(entries)).catch(error => status(`剪贴板历史保存失败：${error.message}`));
 });
+readClipboardHistory().then(entries => clipboardHistory.restore(entries)).catch(error => status(`剪贴板历史读取失败：${error.message}`));
 function deleteDiagnosticIssue(issue) {
   if (issue.path.startsWith('paintEvents[')) {
     session.commit('删除着色器检查项', replaceShaderEvents(session.chart, issue.line, shaderEvents(session.chart, issue.line).filter((event, index) => index !== issue.index)));
@@ -985,10 +1012,7 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || event.key !== 'Tab' || dialogOpen() || event.isComposing) return;
-  const target = event.target;
-  const textEntry = target?.isContentEditable || target?.tagName === 'TEXTAREA' || (target?.tagName === 'INPUT' && ['text', 'search', 'url', 'email', 'password'].includes(target.type));
-  if (textEntry) return;
+  if (atHome || !hasDocument || event.key !== 'Tab' || dialogOpen() || isTypingText(event.target)) return;
   event.preventDefault();
   if (event.repeat) return;
   lineInfoVisible = !lineInfoVisible;
@@ -1000,7 +1024,7 @@ window.addEventListener('keyup', event => {
 }, true);
 window.addEventListener('blur', () => { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); });
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || !isPlaybackSpace(event)) return;
+  if (atHome || !hasDocument || dialogOpen() || !isPlaybackSpace(event)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   playbackSpaceHeld = true;
   if (!event.repeat) togglePlayback().catch(reportError);
@@ -1012,14 +1036,19 @@ window.addEventListener('keyup', event => {
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
 window.addEventListener('keydown', async event => {
   const target = event.target;
-  const textEntry = target?.isContentEditable || target?.tagName === 'TEXTAREA' || (target?.tagName === 'INPUT' && ['text', 'search', 'url', 'email', 'password'].includes(target.type));
-  if (atHome || dialogOpen() || event.isComposing || textEntry) return;
+  if (atHome || !hasDocument || dialogOpen() || isTypingText(target)) return;
+  if (isTextEntry(target) && event.key.toLowerCase() === 'v' && (event.ctrlKey || event.metaKey)) return;
   if (batchControls.active) { event.preventDefault(); return; }
   const area = timeline.hoverArea ?? session.focus;
   const action = shortcutAction(event, preferences, area);
+  if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
+  if (pasteGesture.pending && action !== 'Paste') pasteGesture.cancel();
+  if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
+    pasteGesture.down(event, { session, chart: session.chart, lineIndex: session.lineIndex, layer: timeline.layer, beat: clipboardBeat(timeline) }); return;
+  }
   let handled = true;
   try {
-    if (event.repeat && ['Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) { event.preventDefault(); return; }
+    if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) { event.preventDefault(); return; }
     if (!preview.visible && !event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && (session.selection.size || session.eventSelection.size)) nudgeSelection(session, event.key, timeline.division, timeline.gridCount);
     else if (timeline.eventInteraction.pending && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.altKey) timeline.eventInteraction.place(undefined, undefined, Number(event.key) || 10);
     else if (action === 'Save') { event.preventDefault(); await save(); }
@@ -1031,7 +1060,9 @@ window.addEventListener('keydown', async event => {
       session.notify();
     }
     else if (action === 'Copy') copySelection();
-    else if (action === 'Shear') cutObjects(session);
+    else if (action === 'Shear') cutSelection();
+    else if (action === 'ClipboardHistory') toggleClipboardPanel();
+    else if (!preview.visible && ['NumberMirror', 'NumberFill'].includes(action)) applyNumberShortcut(session, action);
     else if (['Paste', 'PasteMirror', 'KeepTimePaste', 'KeepTimePasteMirror'].includes(action)) pasteSelection(action.endsWith('Mirror'), action.startsWith('KeepTime'));
     else if (action === 'Pause') { event.preventDefault(); await togglePlayback(); }
     else if (['StartView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) {
@@ -1047,6 +1078,7 @@ window.addEventListener('keydown', async event => {
     else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place();
     else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) handled = timeline.addAtCursor({ AddTap: 1, AddDrag: 4, AddFlick: 3, AddHold: 2 }[action]);
     else if (action === 'Delete') deleteSelection();
+    else if (action === 'QuickDelete' && session.selection.size + session.eventSelection.size > 1) deleteSelection();
     else if (action === 'QuickDelete' && session.focus === 'events' && timeline.eventCursor) {
       const hit = timeline.eventInteraction.hit(timeline.eventCursor);
       if (hit) { session.eventSelection = new Set([eventKey(hit.type, hit.index)]); deleteEvents(session); }
@@ -1056,15 +1088,16 @@ window.addEventListener('keydown', async event => {
     } else if (['LastBeat', 'NextBeat'].includes(action)) seekBeat(Math.max(0, currentBeat() + (action === 'LastBeat' ? -1 : 1) / timeline.division));
     else if (action === 'Esc') { session.clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
     else handled = false;
-    if (handled) event.preventDefault();
+    if (handled) { event.preventDefault(); event.stopPropagation(); }
   } catch (error) { event.preventDefault(); reportError(error); }
-});
+}, true);
 window.addEventListener('keyup', event => {
+  pasteGesture.up(event);
   if (timeline.clipboardMode?.mirror || timeline.clipboardMode?.keepTime) { timeline.clipboardMode = {}; invalidate(); }
   if (heldPreview && (event.code === heldPreview.code || shortcutReleased(event, preferences.hotkeys[heldPreview.action]))) {
     togglePreview(false, heldPreview.action === 'JumpView_HOLD'); heldPreview = null;
   }
-});
+}, true);
 window.addEventListener('blur', () => { if (heldPreview) { togglePreview(false); heldPreview = null; } });
 
 window.addEventListener('beforeunload', event => { if (session.history.dirty) { event.preventDefault(); event.returnValue = ''; } });
@@ -1082,6 +1115,7 @@ function frame(timestamp) {
   const elapsed = lastTick ? (timestamp - lastTick) / 1000 : 0; lastTick = timestamp;
   audio.update();
   batchControls.sync();
+  lineSwitcher.draw(timestamp);
   if (!atHome) timeline.autoScroll(elapsed);
   frameSampleCount++;
   if (timestamp - frameSampleStart >= 500) { measuredFps = frameSampleCount * 1000 / (timestamp - frameSampleStart); frameSampleStart = timestamp; frameSampleCount = 0; }
@@ -1103,13 +1137,18 @@ function frame(timestamp) {
     session.editSeconds = Math.max(0, chartSeconds());
     updateLineInfo();
     if (audio.playing) timeline.origin = beat;
-    timeline.draw(beat);
-    drawTimelineStrips();
-    updateLayerButtons();
+    if (!preview.visible) {
+      timeline.draw(beat);
+      multiEdit.drawTimeline();
+      selectionOverlay.draw();
+      drawTimelineStrips();
+      updateLayerButtons();
+    }
     preview.duration = realtimePreview.duration = audio.duration;
     const viewSession = timeline.getSession();
-    preview.draw(viewSession.chart, tempo, chartSeconds(), viewSession.lineIndex);
-    if (!preview.visible) realtimePreview.draw(viewSession.chart, tempo, chartSeconds(), viewSession.lineIndex);
+    const viewChart = multiEdit.active && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart;
+    preview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
+    if (!preview.visible) realtimePreview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
     element('#play').dataset.playing = String(audio.playing);
     element('#play').title = audio.playing ? '暂停' : '播放';
@@ -1134,6 +1173,7 @@ setHome(true);
 requestAnimationFrame(frame);
 
 function applyPreferences(next) {
+  next = { ...next, hotkeys: { ...DEFAULT_HOTKEYS, ...next.hotkeys } };
   preferences = next;
   audio.setVolume(editorPreferences.volume ?? next.settings.volume);
   element('#volume').value = audio.volume;
@@ -1248,6 +1288,13 @@ function applyDisplaySettings() {
   timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value);
   timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
   timeline.seamlessEvents = element('#seamless-events').checked;
+  session.cutDensity = Number(element('#event-cut-density').value);
+  clipboardHistory.enabled = element('#clipboard-history-enabled').checked;
+  lineSwitcher.enabled = element('#line-switcher-enabled').checked;
+  if (!lineSwitcher.enabled) lineSwitcher.hide();
+  if (!clipboardHistory.enabled) pasteGesture.cancel();
+  element('#clipboard-history').hidden = !clipboardHistory.enabled;
+  if (!clipboardHistory.enabled && activePaneName === 'clipboard') activatePane('chart');
   preview.backgroundBlur = realtimePreview.backgroundBlur = Number(element('#background-blur').value);
   timeline.highlight = preview.highlight = realtimePreview.highlight = element('#highlight-notes').checked;
   audio.setPreservePitch(element('#preserve-pitch').checked);

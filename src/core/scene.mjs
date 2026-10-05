@@ -90,6 +90,7 @@ export class SceneRuntime {
   constructor() { this.cache = new WeakMap(); }
 
   compile(chart, tempo) {
+    if (this.chart === chart && this.tempo === tempo) return;
     if (this.tempo !== tempo) { this.cache = new WeakMap(); this.tempo = tempo; }
     this.chart = chart;
     this.lines = (chart.judgeLineList ?? []).map(line => {
@@ -99,17 +100,18 @@ export class SceneRuntime {
     this.order = this.lines.map((line, index) => index).sort((left, right) => Number(this.lines[left].line.zOrder ?? 0) - Number(this.lines[right].line.zOrder ?? 0) || left - right);
   }
 
-  sample(seconds) {
-    const states = this.lines.map(runtime => runtime.state(seconds));
+  sampler(seconds) {
+    const states = [];
     const done = new Set();
     const resolving = new Set();
     const resolve = index => {
       if (done.has(index)) return true;
       if (resolving.has(index)) return false;
       resolving.add(index);
+      states[index] = this.lines[index].state(seconds);
       const line = this.lines[index].line;
       const parent = line.father === null || line.father === undefined || line.father === '' ? -1 : (Number.isInteger(line.father) ? line.father : Number(line.father));
-      if (Number.isInteger(parent) && parent >= 0 && parent < states.length) {
+      if (Number.isInteger(parent) && parent >= 0 && parent < this.lines.length) {
         if (!resolve(parent)) { resolving.delete(index); done.add(index); return false; }
         const ancestor = states[parent];
         const local = states[index];
@@ -122,7 +124,11 @@ export class SceneRuntime {
       done.add(index);
       return true;
     };
-    for (let index = 0; index < states.length; index++) resolve(index);
-    return states;
+    return index => { if (!this.lines[index]) return undefined; resolve(index); return states[index]; };
+  }
+
+  sample(seconds) {
+    const sample = this.sampler(seconds);
+    return this.lines.map((runtime, index) => sample(index));
   }
 }

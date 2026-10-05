@@ -7,9 +7,9 @@ export class History {
     this.limit = limit;
   }
 
-  commit(label, next) {
+  commit(label, next, selectionState = {}) {
     if (next === this.document) return false;
-    this.undoStack.push({ label, before: this.document, after: next });
+    this.undoStack.push({ label, before: this.document, after: next, ...selectionState });
     if (this.undoStack.length > this.limit) this.undoStack.shift();
     this.document = next;
     this.redoStack = [];

@@ -70,9 +70,10 @@ export function editCapturedSelection(snapshot, { note = value => value, event =
 export function commitSelectionEdit(session, result, label) {
   if (result.chart === session.chart) return false;
   assertChart(result.chart);
+  const beforeSelection = session.selectionState();
   session.lineIndex = result.lineIndex; session.eventLayer = result.eventLayer; session.focus = result.focus;
   session.selection = result.selection; session.eventSelection = result.eventSelection;
-  session.commit(label, result.chart);
+  session.commit(label, result.chart, beforeSelection);
   return true;
 }
 
@@ -124,6 +125,16 @@ export function controlLineOffset(delta, events = false) {
   return Math.abs(delta) < threshold ? 0 : Math.sign(delta) * (1 + Math.floor((Math.abs(delta) - threshold) / 50));
 }
 
+export function selectionScaleAnchor(snapshot, anchorMode = 0) {
+  const ordered = snapshot.notes.toSorted((left, right) => beatValue(left.note.startTime) - beatValue(right.note.startTime));
+  if (!ordered.length) return null;
+  if (anchorMode === 1) return ordered[0].note.positionX;
+  if (anchorMode === 2) return ordered.at(-1).note.positionX;
+  const minimum = ordered.reduce((value, entry) => Math.min(value, entry.note.positionX), Infinity);
+  const maximum = ordered.reduce((value, entry) => Math.max(value, entry.note.positionX), -Infinity);
+  return (minimum + maximum) / 2;
+}
+
 export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaX = 0, dragX = 0, anchorMode = 0 } = {}) {
   if (kind === 'note-move') {
     const minimum = snapshot.notes.reduce((value, entry) => Math.min(value, entry.note.positionX), Infinity);
@@ -135,7 +146,7 @@ export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaX = 0, dr
     const ordered = snapshot.notes.toSorted((left, right) => beatValue(left.note.startTime) - beatValue(right.note.startTime));
     const minimum = ordered.reduce((value, entry) => Math.min(value, entry.note.positionX), Infinity);
     const maximum = ordered.reduce((value, entry) => Math.max(value, entry.note.positionX), -Infinity);
-    const anchor = anchorMode === 1 ? ordered[0].note.positionX : anchorMode === 2 ? ordered.at(-1).note.positionX : (minimum + maximum) / 2;
+    const anchor = selectionScaleAnchor(snapshot, anchorMode);
     let rate = 1 + dragX / 300 * (anchorMode === 2 ? -1 : 1);
     if (minimum >= -675 && maximum <= 675) {
       let lower = -Infinity; let upper = Infinity;

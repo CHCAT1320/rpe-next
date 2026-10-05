@@ -1,6 +1,7 @@
 import { beatValue, fromNumber } from '../core/beat.mjs';
-import { eventKey, selectedEvents, transformEvents, placedEvent, insertEvent } from '../application/event-commands.mjs';
+import { eventKey, eventList, selectedEvents, transformEvents, placedEvent, insertEvent } from '../application/event-commands.mjs';
 import { strokeIntersects } from '../core/editor-display.mjs';
+import { shaderEventLanes } from '../core/shader-events.mjs';
 
 export class EventInteraction {
   constructor(timeline, reportError) {
@@ -48,11 +49,11 @@ export class EventInteraction {
   down(event) {
     if (![0, 1, 2].includes(event.button)) return;
     event.preventDefault?.();
+    if (this.timeline.finishRectangle(event)) return;
     const session = this.timeline.getSession(); const point = this.timeline.point(event, this.canvas); const rectangle = this.hit(point);
     this.timeline.eventCursor = point; this.timeline.hoverArea = 'events';
     this.timeline.clipboardPointer = point;
-    if (this.drag?.kind === 'rectangle') { this.drag.finished = true; this.up(event); return; }
-    if (event.button === 0 && this.timeline.tool && !rectangle) {
+    if (event.button === 0 && this.timeline.tool && !rectangle && !event.shiftKey && !event.ctrlKey) {
       try { this.place(null); } catch (error) { this.timeline.notify?.(error.message, 'error'); }
       return;
     }
@@ -64,7 +65,7 @@ export class EventInteraction {
     session.focus = 'events'; session.eventLayer = this.timeline.layer;
     if (!event.ctrlKey && !event.shiftKey && event.button !== 1) session.selection.clear();
     this.canvas.focus(); this.canvas.setPointerCapture(event.pointerId);
-    if (event.shiftKey || event.button === 1) this.drag = { kind: 'rectangle', start: point, current: point, append: true, remove: false };
+    if (event.shiftKey || event.button === 1) this.drag = { kind: 'rectangle', start: point, startSeconds: this.timeline.timeAt(point.y), current: point, append: true, remove: false };
     else if (rectangle && event.button === 0) {
       const key = eventKey(rectangle.type, rectangle.index);
       if (event.ctrlKey) { if (session.eventSelection.has(key)) session.eventSelection.delete(key); else session.eventSelection.add(key); }
@@ -102,7 +103,7 @@ export class EventInteraction {
     if (this.drag.kind === 'stroke' && !this.drag.remove && !this.drag.tracing && this.timeline.previewPick?.(event)) { this.drag = null; this.timeline.changed(); return; }
     this.drag.current = this.timeline.point(event, this.canvas);
     if (this.drag.kind === 'stroke' && this.drag.remove && !this.drag.tracing) {
-      this.drag = { ...this.drag, kind: 'rectangle', append: true, remove: false }; this.timeline.changed(); return;
+      this.drag = { ...this.drag, kind: 'rectangle', startSeconds: this.timeline.timeAt(this.drag.start.y), append: true, remove: false }; this.timeline.changed(); return;
     }
     if (this.drag.kind === 'rectangle' && !this.drag.finished) { this.timeline.changed(); return; }
     const drag = this.drag; const delta = this.delta(); this.drag = null;
@@ -110,11 +111,22 @@ export class EventInteraction {
     try {
       if (drag.kind === 'rectangle') {
         if (!drag.append) session.eventSelection.clear();
-        for (const rectangle of this.timeline.eventRects) {
-          if (rectangle.x < Math.max(drag.start.x, drag.current.x) && rectangle.x + rectangle.width > Math.min(drag.start.x, drag.current.x) && rectangle.y < Math.max(drag.start.y, drag.current.y) && rectangle.y + rectangle.height > Math.min(drag.start.y, drag.current.y)) {
-            const key = eventKey(rectangle.type, rectangle.index); drag.remove ? session.eventSelection.delete(key) : session.eventSelection.add(key);
-          }
-        }
+        const [bottom, top] = this.timeline.rectangleTimes(drag);
+        const left = Math.min(drag.start.x, drag.current.x); const right = Math.max(drag.start.x, drag.current.x);
+        this.timeline.eventTypes.forEach((type, channel) => {
+          const bounds = this.timeline.eventColumnBounds(channel, this.canvas.clientWidth);
+          if (bounds.x >= right || bounds.x + bounds.width <= left) return;
+          const items = eventList(session, type); const lanes = type === 'paintEvents' ? shaderEventLanes(items) : null;
+          items.forEach((item, index) => {
+            if (beatValue(item.startTime) > top || beatValue(item.endTime) < bottom) return;
+            if (lanes) {
+              const lane = lanes.get(index); const width = bounds.width / lane.count;
+              const horizontal = bounds.x + lane.lane * width;
+              if (horizontal >= right || horizontal + Math.max(2, width - (lane.count > 1 ? 2 : 0)) <= left) return;
+            }
+            const key = eventKey(type, index); drag.remove ? session.eventSelection.delete(key) : session.eventSelection.add(key);
+          });
+        });
         session.notify();
       } else if (delta && Math.abs(drag.current.y - drag.start.y) > 3 && selectedEvents(session).length) {
         transformEvents(session, drag.kind === 'move' ? '移动事件' : '调整事件时长', current => ({ ...current,

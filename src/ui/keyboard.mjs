@@ -1,3 +1,5 @@
+import { shortcutKey } from '../core/preferences.mjs';
+
 export function isTextEntry(target) {
   if (target?.isContentEditable || target?.closest?.('textarea,[contenteditable="true"],[role="textbox"]')) return true;
   const input = target?.closest?.('input');
@@ -5,5 +7,14 @@ export function isTextEntry(target) {
 }
 
 export function isPlaybackSpace(event) {
-  return event.key === ' ' && !event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && !isTextEntry(event.target);
+  return shortcutKey(event) === 'SPACE' && !event.ctrlKey && !event.metaKey && !event.altKey && !isTextEntry(event.target);
+}
+export function isTypingText(target) {
+  if (target?.isContentEditable || target?.closest?.('textarea,[contenteditable="true"],[role="textbox"]')) return true;
+  const input = target?.closest?.('input');
+  return Boolean(input && ['text', 'search', 'url', 'email', 'password', 'tel'].includes(input.type));
+}
+
+export function releaseShortcutFocus(target) {
+  if (!isTypingText(target) && target?.closest?.('input,select,button')) target.blur?.();
 }

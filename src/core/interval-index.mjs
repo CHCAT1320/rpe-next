@@ -24,4 +24,14 @@ export class IntervalIndex {
     visit(this.root);
     return matches;
   }
+
+  has(start, end) {
+    const visit = node => {
+      if (!node || node.maxEnd < start) return false;
+      if (visit(node.left)) return true;
+      if (node.entry.start > end) return false;
+      return node.entry.end >= start || visit(node.right);
+    };
+    return visit(this.root);
+  }
 }

@@ -1,4 +1,4 @@
-import { captureSelection, controlSelection, commitSelectionEdit } from '../application/batch-edit.mjs';
+import { captureSelection, controlSelection, commitSelectionEdit, selectionScaleAnchor } from '../application/batch-edit.mjs';
 import { beatValue } from '../core/beat.mjs';
 import { snapTime } from '../core/edit-grid.mjs';
 
@@ -27,9 +27,9 @@ export class BatchControls {
     }
     window.addEventListener('keydown', event => {
       if (!this.active) return;
-      if (event.key === 'Escape') { event.preventDefault(); this.cancel(); }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); this.cancel(); return; }
       if (['1', '2'].includes(event.key) && this.active.kind === 'note-scale') { event.preventDefault(); this.anchorMode = Number(event.key); this.update(); }
-    });
+    }, true);
     window.addEventListener('keyup', event => { if (Number(event.key) === this.anchorMode) { this.anchorMode = 0; this.update(); } });
     window.addEventListener('blur', () => this.cancel());
   }
@@ -72,6 +72,7 @@ export class BatchControls {
     this.active = { session, snapshot, kind, button, area, signature: this.signature(area, session), pointerId: event.pointerId, start: point, point, canvas,
       unit: Math.max(0.35, canvas.clientHeight / 1080), factor: session.line.bpmfactor ?? 1,
       startBeat: this.timeline.snappedBeat(point.y), startX: this.timeline.positionAt(point.x) };
+    this.timeline.scaleAxis = kind === 'note-scale' ? selectionScaleAnchor(snapshot, this.anchorMode) : null;
     button.setPointerCapture(event.pointerId); this.timeline.changed();
   }
 
@@ -83,6 +84,7 @@ export class BatchControls {
   update() {
     const active = this.active; if (!active) return;
     const { point, start, kind, snapshot, factor } = active;
+    this.timeline.scaleAxis = kind === 'note-scale' ? selectionScaleAnchor(snapshot, this.anchorMode) : null;
     const deltaX = point.x - start.x; const deltaY = point.y - start.y;
     active.button.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
     const seconds = this.timeline.tempo.seconds(this.timeline.origin, factor) + (active.canvas.clientHeight - 42 - point.y) / this.timeline.scale;
@@ -100,7 +102,7 @@ export class BatchControls {
   end(event) {
     const active = this.active; if (!active || event.pointerId !== active.pointerId) return;
     this.move(event);
-    this.timeline.bulkPreview = null;
+    this.timeline.bulkPreview = null; this.timeline.scaleAxis = null;
     try {
       if (Math.hypot(active.point.x - active.start.x, active.point.y - active.start.y) > 3) {
         if (this.getSession() !== active.session || active.session.chart !== active.snapshot.chart || this.signature(active.area, active.session) !== active.signature) throw new Error('选中内容已改变，已取消拖动');
@@ -129,6 +131,6 @@ export class BatchControls {
 
   cancel() {
     const active = this.active; if (!active) return;
-    this.active = null; this.timeline.bulkPreview = null; this.returnBall(active); this.timeline.changed();
+    this.active = null; this.timeline.bulkPreview = null; this.timeline.scaleAxis = null; this.returnBall(active); this.timeline.changed();
   }
 }

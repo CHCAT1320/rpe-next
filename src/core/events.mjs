@@ -16,6 +16,8 @@ export class EventTrack {
 
   sample(entry, seconds) {
     const event = entry.event;
+    if (typeof event.start === 'number' && event.start === event.end) return event.start;
+    if (Array.isArray(event.start) && Array.isArray(event.end) && event.start.every((value, index) => value === event.end[index])) return event.start;
     const progress = entry.end <= entry.start ? 1 : Math.max(0, Math.min(1, (seconds - entry.start) / (entry.end - entry.start)));
     const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1);
     if (Array.isArray(event.start) && Array.isArray(event.end)) return event.start.map((value, index) => value + (event.end[index] - value) * amount);
@@ -61,6 +63,12 @@ export class SpeedIntegral extends EventTrack {
 
   integrate(segment, end) {
     if (!segment.entry) return 0;
+    const { event, start: eventStart, end: eventEnd } = segment.entry;
+    const duration = end - segment.start;
+    if (event.start === event.end) return duration * event.start;
+    if (segment.start >= eventEnd) return duration * this.sample(segment.entry, eventEnd);
+    if (end <= eventStart) return duration * this.sample(segment.entry, eventStart);
+    if (!event.bezier && (event.easingType ?? 1) === 1) return duration * (this.sample(segment.entry, segment.start) + this.sample(segment.entry, end)) / 2;
     const step = (end - segment.start) / 20;
     let sum = 0;
     for (let index = 0; index <= 20; index++) {

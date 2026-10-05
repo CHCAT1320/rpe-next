@@ -8,12 +8,14 @@ import { recentHits } from '../core/hit-effects.mjs';
 import { lineGuides, mergeGuides, pickGuide, formatLineNumbers } from '../core/preview-guides.mjs';
 import { ShaderRuntime } from '../core/shader.mjs';
 import { ShaderPipeline } from './shader-pipeline.mjs';
+import { PreviewBackground, textureInViewport } from './preview-background.mjs';
 
 const clamp = value => Math.max(0, Math.min(1, value));
 
 export class Preview {
   constructor(canvas) {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
+    this.backgroundFrame = new PreviewBackground();
     this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
@@ -37,25 +39,27 @@ export class Preview {
     const scale = viewport.scale / divisor;
     context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
     if (this.applyShaders) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
-    const background = this.images?.background;
+    let background = this.images?.background;
+    if (background && this.images.texture) background = this.images.texture(this.images.backgroundName, Math.max(1350 / background.naturalWidth, 900 / background.naturalHeight) * scale * (devicePixelRatio || 1)) ?? background;
     if (background) {
-      const ratio = Math.max(1350 / background.naturalWidth, 900 / background.naturalHeight) * scale;
       context.globalAlpha = this.backgroundAlpha;
-      context.filter = this.backgroundBlur > 0 ? `blur(${this.backgroundBlur}px)` : 'none';
-      context.drawImage(background, (width - background.naturalWidth * ratio) / 2, (height - background.naturalHeight * ratio) / 2, background.naturalWidth * ratio, background.naturalHeight * ratio);
-      context.filter = 'none';
+      this.backgroundFrame.draw(context, background, width, height, scale, this.backgroundBlur, devicePixelRatio || 1, this.images.backgroundAnimated);
       context.globalAlpha = 1;
-    }
+    } else this.backgroundFrame.clear();
     const states = this.scene.sample(seconds);
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.viewport = viewport; this.selectedLine = selectedLine;
     this.guides = lineGuides(states, chart.judgeLineList, order, width, height, scale);
     const visibleNotes = new Map(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index], 1600 * divisor + Math.hypot(states[index]?.x ?? 0, states[index]?.y ?? 0)) ?? []]));
     for (const pass of this.passes) for (const index of pass.kind === 'line' ? [pass.index] : order) {
-      if (pass.kind === 'line' && (!order.includes(index) || chart.judgeLineList[index].attachUI)) continue;
+      if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || chart.judgeLineList[index].attachUI || states[index].alpha <= 0 || states[index].scaleX === 0 || states[index].scaleY === 0)) continue;
       const runtime = this.scene.lines[index];
       const state = states[index];
       if (!runtime) continue;
+      if (pass.kind === 'line' && !runtime.line.extended?.textEvents?.length && runtime.line.Texture && runtime.line.Texture !== 'line.png') {
+        const texture = this.images?.describe?.(runtime.line.Texture) ?? this.images?.images.get(runtime.line.Texture);
+        if (!texture || texture.naturalWidth && !textureInViewport(texture, runtime.line, state, width, height, scale, viewport)) continue;
+      }
       context.save();
       context.translate(width / 2 + state.x * scale, height / 2 - state.y * scale);
       context.rotate(state.rotation * Math.PI / 180);
@@ -64,14 +68,16 @@ export class Preview {
         const note = entry.note;
         if ((note.type === 2) !== (pass.kind === 'hold')) continue;
         const position = runtime.noteState(entry, state, seconds);
+        if (position.alpha <= 0 || position.size === 0) continue;
         const noteWidth = this.noteSize * scale * position.size;
         const horizontal = position.x * scale;
         context.save();
         context.globalAlpha = clamp(position.alpha);
-        context.fillStyle = Array.isArray(note.color) ? `rgb(${note.color.join(',')})` : NOTE_COLORS[note.type];
+        const tint = note.tint ?? note.color;
+        context.fillStyle = Array.isArray(tint) ? `rgb(${tint.join(',')})` : NOTE_COLORS[note.type];
         let drawnHold = false;
         const highlight = this.highlight !== false && this.simultaneous.has(note);
-        if (note.type === 2) drawnHold = this.skin?.hold(context, horizontal, -position.y * scale, -position.tail * scale, noteWidth, highlight, position.showHead);
+        if (note.type === 2) drawnHold = this.skin?.hold(context, horizontal, -position.y * scale, -position.tail * scale, noteWidth, highlight, position.showHead, tint);
         if (note.type === 2 && !drawnHold) {
           context.globalAlpha *= 0.55;
           context.fillRect(horizontal - noteWidth / 2, -position.tail * scale, noteWidth, (position.tail - position.y) * scale);
@@ -80,7 +86,7 @@ export class Preview {
         if (position.showHead && !drawnHold) {
           context.translate(horizontal, -position.y * scale);
           context.transform(1, 0, Math.tan(position.skew * Math.PI / 180), 1, 0, 0);
-          if (!this.skin?.head(context, note.type, 0, 0, noteWidth, highlight)) context.fillRect(-noteWidth / 2, -2, noteWidth, 4);
+          if (!this.skin?.head(context, note.type, 0, 0, noteWidth, highlight, tint)) context.fillRect(-noteWidth / 2, -2, noteWidth, 4);
         }
         context.restore();
       }
@@ -94,9 +100,9 @@ export class Preview {
         for (const hit of recentHits(runtime, seconds, this.effectsSince, Math.max(HIT_DURATION, 2 / 3))) {
           const { entry, time, seed } = hit;
           const frame = hitFrame(seconds - time);
-          const picture = this.skin?.tinted(`img-${frame}`, entry.note.tintHitEffects ?? [255, 236, 160]);
-          if (!hitStates.has(time)) hitStates.set(time, this.scene.sample(time));
-          const state = hitStates.get(time)[index];
+          const picture = frame === null ? null : this.skin?.tinted(`img-${frame}`, entry.note.tintHitEffects ?? [255, 236, 160]);
+          if (!hitStates.has(time)) hitStates.set(time, this.scene.sampler(time));
+          const state = hitStates.get(time)(index);
           const position = runtime.noteState(entry, state, time);
           const angle = state.rotation * Math.PI / 180;
           const horizontal = width / 2 + (state.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
@@ -139,6 +145,7 @@ export class Preview {
       this.drawGuides(overlayContext, scale, selectedLine);
       this.overlayCanvas.style.visibility = 'visible';
     } else if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
+    this.images?.trim?.();
   }
 
   pick(clientX, clientY) {
@@ -184,13 +191,13 @@ export class Preview {
       context.fillText(state.text, 0, 0);
     } else {
       const defaultLine = !line.Texture || line.Texture === 'line.png';
-      const texture = defaultLine ? this.skin?.tinted('line', state.color) : this.images?.images.get(line.Texture);
+      const texture = defaultLine ? this.skin?.tinted('line', state.color) : this.images?.texture ? this.images.texture(line.Texture, scale * Math.max(Math.abs(state.scaleX), Math.abs(state.scaleY)) * (devicePixelRatio || 1)) : this.images?.images.get(line.Texture);
       if (defaultLine) {
         if (texture) context.drawImage(texture, -DEFAULT_LINE_WIDTH * scale / 2, -DEFAULT_LINE_HEIGHT * scale / 2, DEFAULT_LINE_WIDTH * scale, DEFAULT_LINE_HEIGHT * scale);
         else context.fillRect(-DEFAULT_LINE_WIDTH * scale / 2, -DEFAULT_LINE_HEIGHT * scale / 2, DEFAULT_LINE_WIDTH * scale, DEFAULT_LINE_HEIGHT * scale);
       } else if (texture) {
         const anchor = line.anchor ?? [0.5, 0.5];
-        context.drawImage(texture, -texture.naturalWidth * anchor[0] * scale, -texture.naturalHeight * (1 - anchor[1]) * scale, texture.naturalWidth * scale, texture.naturalHeight * scale);
+        context.drawImage(texture.source ?? texture, -texture.naturalWidth * anchor[0] * scale, -texture.naturalHeight * (1 - anchor[1]) * scale, texture.naturalWidth * scale, texture.naturalHeight * scale);
       }
     }
     context.restore();

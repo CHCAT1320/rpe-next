@@ -35,10 +35,11 @@ export function chartWithEventLists(chart, lineIndex, eventLayer, updates) {
 }
 
 export function commitEventLists(session, label, updates, selection = session.eventSelection) {
+  const beforeSelection = session.selectionState();
   const chart = chartWithEventLists(session.chart, session.lineIndex, session.eventLayer, updates);
   assertChart(chart);
   session.eventSelection = new Set(selection); session.focus = 'events'; session.selection.clear();
-  session.commit(label, chart);
+  session.commit(label, chart, beforeSelection);
 }
 
 export function transformEvents(session, label, transform) {

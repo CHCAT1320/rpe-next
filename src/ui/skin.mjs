@@ -30,25 +30,30 @@ export class RpeSkin {
     return this.tints.get(key);
   }
 
-  head(context, type, horizontal, vertical, width, highlight = false) {
-    const picture = this.images.get((highlight ? highlights : names)[type]);
+  head(context, type, horizontal, vertical, width, highlight = false, color) {
+    const name = (highlight ? highlights : names)[type];
+    const picture = this.images.get(name);
     if (!picture) return false;
     const height = Math.max(5, width * picture.naturalHeight / picture.naturalWidth);
-    context.drawImage(picture, horizontal - width / 2, vertical - height / 2, width, height);
+    const customTint = Array.isArray(color) && color.length === 3 && color.every(Number.isFinite) && color.some(value => value !== 255);
+    context.drawImage(customTint ? this.tinted(name, color) : picture, horizontal - width / 2, vertical - height / 2, width, height);
     return true;
   }
 
-  hold(context, horizontal, head, tail, width, highlight = false, showHead = true) {
-    const body = highlight ? this.images.get('HoldHL') : this.images.get('Hold3') ?? this.images.get('Hold');
+  hold(context, horizontal, head, tail, width, highlight = false, showHead = true, color) {
+    const bodyName = highlight ? 'HoldHL' : this.images.has('Hold3') ? 'Hold3' : 'Hold';
+    const body = this.images.get(bodyName);
     const end = this.images.get('HoldEnd');
     if (!body) return false;
     const direction = tail <= head ? 1 : -1;
     const headPicture = this.images.get(highlight ? 'HoldHeadHL' : 'HoldHead');
+    const customTint = Array.isArray(color) && color.length === 3 && color.every(Number.isFinite) && color.some(value => value !== 255);
+    const texture = name => customTint ? this.tinted(name, color) : this.images.get(name);
     const unit = width / body.naturalWidth;
     context.save(); context.translate(horizontal, head); context.scale(1, direction);
-    context.drawImage(body, -width / 2, -Math.abs(tail - head), width, Math.max(1, Math.abs(tail - head)));
-    if (end) context.drawImage(end, -end.naturalWidth * unit / 2, -Math.abs(tail - head) - end.naturalHeight * unit, end.naturalWidth * unit, end.naturalHeight * unit);
-    if (showHead && headPicture) context.drawImage(headPicture, -headPicture.naturalWidth * unit / 2, 0, headPicture.naturalWidth * unit, headPicture.naturalHeight * unit);
+    context.drawImage(texture(bodyName), -width / 2, -Math.abs(tail - head), width, Math.max(1, Math.abs(tail - head)));
+    if (end) context.drawImage(texture('HoldEnd'), -end.naturalWidth * unit / 2, -Math.abs(tail - head) - end.naturalHeight * unit, end.naturalWidth * unit, end.naturalHeight * unit);
+    if (showHead && headPicture) context.drawImage(texture(highlight ? 'HoldHeadHL' : 'HoldHead'), -headPicture.naturalWidth * unit / 2, 0, headPicture.naturalWidth * unit, headPicture.naturalHeight * unit);
     context.restore();
     return true;
   }
