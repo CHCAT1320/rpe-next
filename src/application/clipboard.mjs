@@ -1,6 +1,6 @@
 import { beatValue } from '../core/beat.mjs';
 import { alignShaderParameters } from '../core/shader-events.mjs';
-import { chartWithEventLists, eventKey, eventList } from './event-commands.mjs';
+import { chartWithEventLists, eventKey, eventList, eventListAt } from './event-commands.mjs';
 import { captureSelection, commitSelectionEdit, shiftedTime } from './batch-edit.mjs';
 
 export function copyObjects(session) {
@@ -8,7 +8,9 @@ export function copyObjects(session) {
   const count = snapshot.notes.length + snapshot.events.length;
   if (!count) return 0;
   session.clipboard = structuredClone(snapshot.notes.map(entry => entry.note));
+  session.clipboardNoteLines = snapshot.notes.map(entry => Number.isInteger(entry.lineIndex) ? entry.lineIndex : session.lineIndex);
   session.eventClipboard = structuredClone(snapshot.events.map(({ type, event }) => ({ type, event })));
+  session.eventClipboardLines = snapshot.events.map(entry => Number.isInteger(entry.lineIndex) ? entry.lineIndex : session.lineIndex);
   session.clipboardVisible = true;
   return count;
 }
@@ -24,15 +26,37 @@ export function deleteObjects(session, label = '删除选中项') {
   const snapshot = captureSelection(session);
   const count = snapshot.notes.length + snapshot.events.length;
   if (!count) return 0;
-  const updates = new Map();
-  for (const { type } of snapshot.events) updates.set(type, eventList(session, type).filter((event, index) => !session.eventSelection.has(eventKey(type, index))));
-  let chart = updates.size ? chartWithEventLists(session.chart, session.lineIndex, session.eventLayer, updates) : session.chart;
-  if (session.selection.size) {
-    const lines = [...chart.judgeLineList]; const line = lines[session.lineIndex];
-    const notes = (line.notes ?? []).filter((note, index) => !session.selection.has(index));
-    lines[session.lineIndex] = { ...line, notes, numOfNotes: notes.length }; chart = { ...chart, judgeLineList: lines };
+  const updatesByLine = new Map();
+  for (const entry of snapshot.events) {
+    const lineIndex = Number.isInteger(entry.lineIndex) ? entry.lineIndex : session.lineIndex;
+    const key = `${lineIndex}:${entry.type}`;
+    if (updatesByLine.has(key)) continue;
+    const selected = new Set(snapshot.events.filter(item => (item.lineIndex ?? session.lineIndex) === lineIndex && item.type === entry.type).map(item => item.index));
+    const original = eventListAt(session, lineIndex, entry.type);
+    if (!original) continue;
+    if (!updatesByLine.has(lineIndex)) updatesByLine.set(lineIndex, new Map());
+    updatesByLine.get(lineIndex).set(entry.type, original.filter((event, index) => !selected.has(index)));
   }
-  commitSelectionEdit(session, { chart, lineIndex: session.lineIndex, eventLayer: session.eventLayer, focus: session.focus, selection: new Set(), eventSelection: new Set() }, label);
+  let chart = session.chart;
+  for (const [lineIndex, updates] of updatesByLine) chart = chartWithEventLists(chart, lineIndex, session.eventLayer, updates);
+  const noteEntries = snapshot.notes;
+  if (noteEntries.length) {
+    const lines = [...chart.judgeLineList];
+    const byLine = new Map();
+    for (const entry of noteEntries) {
+      const lineIndex = Number.isInteger(entry.lineIndex) ? entry.lineIndex : session.lineIndex;
+      if (!byLine.has(lineIndex)) byLine.set(lineIndex, new Set());
+      byLine.get(lineIndex).add(entry.index);
+    }
+    for (const [lineIndex, selected] of byLine) {
+      const line = lines[lineIndex]; if (!line) continue;
+      const notes = (line.notes ?? []).filter((note, index) => !selected.has(index));
+      lines[lineIndex] = { ...line, notes, numOfNotes: notes.length };
+    }
+    chart = { ...chart, judgeLineList: lines };
+  }
+  commitSelectionEdit(session, { chart, lineIndex: session.lineIndex, eventLayer: session.eventLayer, focus: session.focus,
+    selection: new Set(), eventSelection: new Set(), multiLineSelection: new Map(), multiEventSelection: new Map() }, label);
   return count;
 }
 
@@ -43,10 +67,21 @@ export function clipboardStart(session) {
   return earliest;
 }
 
-export function projectClipboard(session, beat, { mirror = false, keepTime = false } = {}) {
+export function projectClipboard(session, beat, { mirror = false, keepTime = false, targetLineIndex } = {}) {
   const earliest = clipboardStart(session);
   if (!Number.isFinite(earliest)) return { notes: [], events: [] };
   const delta = keepTime ? 0 : beat - earliest;
+  const lineCount = session.chart?.judgeLineList?.length ?? 0;
+  const noteLines = session.clipboard.map((unused, index) => Number.isInteger(session.clipboardNoteLines?.[index]) ? session.clipboardNoteLines[index] : session.lineIndex);
+  const eventLines = session.eventClipboard.map((unused, index) => Number.isInteger(session.eventClipboardLines?.[index]) ? session.eventClipboardLines[index] : session.lineIndex);
+  const sourceLines = [...noteLines, ...eventLines];
+  const sourceAnchor = sourceLines.length ? Math.min(...sourceLines) : session.lineIndex;
+  const target = Number.isInteger(targetLineIndex) ? targetLineIndex : session.lineIndex;
+  const mapLine = source => {
+    const mapped = target + source - sourceAnchor;
+    if (!lineCount) return mapped;
+    return ((mapped % lineCount) + lineCount) % lineCount;
+  };
   const notes = session.clipboard.map(note => ({ ...shiftedTime(note, delta), positionX: note.positionX * (mirror ? -1 : 1) }));
   const events = session.eventClipboard.map(({ type, event }) => {
     let next = shiftedTime(event, delta);
@@ -54,7 +89,7 @@ export function projectClipboard(session, beat, { mirror = false, keepTime = fal
     if (mirror && type !== 'alphaEvents' && typeof next.start === 'number' && typeof next.end === 'number') next = { ...next, start: -next.start, end: -next.end };
     return { type, event: next };
   });
-  return { notes, events };
+  return { notes, events, noteLines: noteLines.map(mapLine), eventLines: eventLines.map(mapLine), sourceAnchor, targetLineIndex: target };
 }
 
 export function pasteObjects(session, beat, options) {
@@ -62,19 +97,39 @@ export function pasteObjects(session, beat, options) {
   if (!projected.notes.length && !projected.events.length) return false;
   let chart = session.chart;
   const selection = new Set(); const eventSelection = new Set(); const updates = new Map();
-  for (const { type, event } of projected.events) {
-    if (!updates.has(type)) updates.set(type, [...eventList(session, type)]);
-    const events = updates.get(type); eventSelection.add(eventKey(type, events.length)); events.push(event);
+  const multiEventSelection = new Map();
+  const eventUpdates = new Map();
+  for (const [{ type, event }, lineIndex] of projected.events.map((entry, index) => [entry, projected.eventLines?.[index] ?? session.lineIndex])) {
+    if (!eventUpdates.has(lineIndex)) eventUpdates.set(lineIndex, new Map());
+    if (!eventUpdates.get(lineIndex).has(type)) eventUpdates.get(lineIndex).set(type, [...eventListAt(session, lineIndex, type)]);
+    const events = eventUpdates.get(lineIndex).get(type);
+    const key = eventKey(type, events.length); events.push(event);
+    if (!multiEventSelection.has(lineIndex)) multiEventSelection.set(lineIndex, new Set());
+    multiEventSelection.get(lineIndex).add(key);
+    if (lineIndex === session.lineIndex) eventSelection.add(key);
   }
-  if (updates.size) chart = chartWithEventLists(chart, session.lineIndex, session.eventLayer, updates);
+  for (const [lineIndex, lineUpdates] of eventUpdates) chart = chartWithEventLists(chart, lineIndex, session.eventLayer, lineUpdates);
+  const multiLineSelection = new Map();
   if (projected.notes.length) {
-    const lines = [...chart.judgeLineList]; const line = lines[session.lineIndex];
-    const existing = line.notes ?? [];
-    const notes = [...existing, ...projected.notes];
-    projected.notes.forEach((note, index) => selection.add(existing.length + index));
-    lines[session.lineIndex] = { ...line, notes, numOfNotes: notes.length }; chart = { ...chart, judgeLineList: lines };
+    const lines = [...chart.judgeLineList];
+    const grouped = new Map();
+    projected.notes.forEach((note, index) => {
+      const lineIndex = projected.noteLines?.[index] ?? session.lineIndex;
+      if (!grouped.has(lineIndex)) grouped.set(lineIndex, []);
+      grouped.get(lineIndex).push(note);
+    });
+    for (const [lineIndex, notesToAdd] of grouped) {
+      const line = lines[lineIndex]; if (!line) continue;
+      const existing = line.notes ?? []; const notes = [...existing, ...notesToAdd];
+      const selected = new Set(notesToAdd.map((unused, index) => existing.length + index));
+      lines[lineIndex] = { ...line, notes, numOfNotes: notes.length };
+      multiLineSelection.set(lineIndex, selected);
+      if (lineIndex === session.lineIndex) for (const index of selected) selection.add(index);
+    }
+    chart = { ...chart, judgeLineList: lines };
   }
   session.clipboardVisible = true;
   return commitSelectionEdit(session, { chart, lineIndex: session.lineIndex, eventLayer: session.eventLayer,
-    focus: projected.notes.length ? 'notes' : 'events', selection, eventSelection }, options?.mirror ? '镜像粘贴' : '粘贴选中项');
+    focus: projected.notes.length ? 'notes' : 'events', selection, eventSelection,
+    multiLineSelection, multiEventSelection }, options?.mirror ? '镜像粘贴' : '粘贴选中项');
 }

@@ -4,9 +4,13 @@ import { EventTrack } from '../core/events.mjs';
 import { shaderEvents, replaceShaderEvents, alignShaderParameters } from '../core/shader-events.mjs';
 
 export const eventKey = (type, index) => `${type}:${index}`;
+export function eventListAt(session, lineIndex, type, layer = session.eventLayer) {
+  if (type === 'paintEvents') return shaderEvents(session.chart, lineIndex);
+  const line = session.chart.judgeLineList?.[lineIndex];
+  return EVENT_TYPES.includes(type) ? line?.eventLayers?.[layer]?.[type] ?? [] : line?.extended?.[type] ?? [];
+}
 export function eventList(session, type) {
-  if (type === 'paintEvents') return shaderEvents(session.chart, session.lineIndex);
-  return EVENT_TYPES.includes(type) ? session.line?.eventLayers?.[session.eventLayer]?.[type] ?? [] : session.line?.extended?.[type] ?? [];
+  return eventListAt(session, session.lineIndex, type);
 }
 export function selectedEvents(session) {
   return [...session.eventSelection].map(key => {
@@ -69,13 +73,31 @@ export function transformEvents(session, label, transform) {
 
 export function insertEvent(session, type, event) {
   const events = eventList(session, type);
+  if (session.multiLineActive && session.multiLineMode === 'events') {
+    const updates = new Map([[type, [...events, event]]]);
+    commitEventLists(session, '添加事件', updates, [eventKey(type, events.length)]);
+    return;
+  }
   commitEventLists(session, '添加事件', new Map([[type, [...events, event]]]), [eventKey(type, events.length)]);
 }
 
-export function placedEvent(session, type, first, second, easingType) {
+export function insertEventAt(session, lineIndex, type, event) {
+  const events = eventListAt(session, lineIndex, type);
+  const chart = chartWithEventLists(session.chart, lineIndex, session.eventLayer, new Map([[type, [...events, event]]]));
+  const key = eventKey(type, events.length);
+  const beforeSelection = session.selectionState();
+  session.focus = 'events'; session.selection.clear();
+  if (session.multiLineActive && session.multiLineMode === 'events') {
+    session.multiEventSelection.set(lineIndex, new Set([key]));
+    if (lineIndex === session.lineIndex) session.eventSelection = new Set([key]);
+  } else session.eventSelection = new Set([key]);
+  session.commit('添加事件', chart, beforeSelection);
+}
+
+export function placedEvent(session, type, first, second, easingType, lineIndex = session.lineIndex) {
   const start = Math.min(first, second); const end = Math.max(first, second);
   if (end - start < 0.001) return null;
-  const events = eventList(session, type);
+  const events = eventListAt(session, lineIndex, type);
   if (type === 'paintEvents') return { startTime: fromNumber(start), endTime: fromNumber(end), shader: 'chromatic', global: false, order: 0, vars: {} };
   if (events.some(event => start < beatValue(event.endTime) && end > beatValue(event.startTime))) throw new Error('该时间范围与同轨道已有事件重叠，请调整终点或按 Esc 取消');
   const previous = events.filter(event => beatValue(event.endTime) <= start).sort((left, right) => beatValue(right.startTime) - beatValue(left.startTime))[0];

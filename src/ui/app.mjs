@@ -32,6 +32,7 @@ import { stepLine } from '../core/line-overview.mjs';
 import { applyNumberShortcut } from '../application/number-shortcuts.mjs';
 import { BatchControls } from './batch-controls.mjs';
 import { MultiEditPanel } from './multi-edit.mjs';
+import { MultiLinePanel } from './multi-line.mjs';
 import { clipboardBeat } from './clipboard-preview.mjs';
 import { shaderEvents, replaceShaderEvents } from '../core/shader-events.mjs';
 import { renderMetadataPanel, renderBpmPanel } from './forms.mjs';
@@ -56,7 +57,7 @@ const displayFields = [
   ['event-cut-density', 'cutDensity', 4],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
-  ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
+  ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
   ['background-blur', 'backgroundBlur', 10.5], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
   ['line-numbers', 'lineNumbers', true], ['line-arrows', 'lineArrows', true], ['line-tint', 'lineTint', true], ['merge-line-numbers', 'mergeLineNumbers', true], ['pick-preview-lines', 'pickPreviewLines', true],
   ['preserve-pitch', 'preservePitch', true], ['autoplay-view', 'autoplayView', true], ['highlight-notes', 'highlight', true],
@@ -105,22 +106,61 @@ realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
 const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error));
+timeline.multiLineLabels = element('#multi-line-labels');
+timeline.multiLineScrollElement = element('#multi-line-scroll');
+timeline.multiLineScrollElement.addEventListener('input', event => {
+  const area = session.multiLineMode === 'events' ? 'events' : 'notes';
+  if (typeof timeline.multiLineScroll === 'number') timeline.multiLineScroll = { notes: timeline.multiLineScroll, events: timeline.multiLineScroll };
+  timeline.multiLineScroll[area] = Number(event.target.value) || 0;
+  invalidate();
+});
+let draggingMultiLineScroll = false;
+function updateMultiLineScrollFromPointer(event) {
+  const range = timeline.multiLineScrollElement;
+  const rectangle = range.getBoundingClientRect();
+  if (!rectangle.width) return;
+  const ratio = Math.max(0, Math.min(1, (event.clientX - rectangle.left) / rectangle.width));
+  range.value = String(Number(range.max || 0) * ratio);
+  range.dispatchEvent(new Event('input', { bubbles: true }));
+}
+timeline.multiLineScrollElement.addEventListener('pointerdown', event => {
+  event.preventDefault(); event.stopPropagation(); draggingMultiLineScroll = true;
+  timeline.multiLineScrollElement.setPointerCapture?.(event.pointerId);
+  updateMultiLineScrollFromPointer(event);
+});
+timeline.multiLineScrollElement.addEventListener('pointermove', event => {
+  if (!draggingMultiLineScroll) return;
+  event.preventDefault(); event.stopPropagation(); updateMultiLineScrollFromPointer(event);
+});
+const stopMultiLineScrollDrag = event => {
+  if (!draggingMultiLineScroll) return;
+  draggingMultiLineScroll = false; event?.stopPropagation?.();
+};
+timeline.multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
+timeline.multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
+timeline.multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
 const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, error => reportError(error));
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
 });
+const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const clipboardHistory = new ClipboardHistory();
 const selectionOverlay = new SelectionOverlay(element('.stage'), timeline);
 const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
   chart: session.chart, tempo, seconds: chartSeconds(), selected: session.lineIndex,
-  start: timeline.timeAt(timeline.notesCanvas.clientHeight), end: timeline.timeAt(0),
+  start: timeline.timeAt(timeline.viewHeight()), end: timeline.timeAt(0),
   visible: hasDocument && !atHome && !preview.visible && !dialogOpen(),
 }), { select: index => selectOverviewLine(index) });
+function clipboardTargetLine() {
+  return timeline.hoverArea === 'events'
+    ? timeline.lineIndexAt(timeline.eventCursor?.x ?? 0, timeline.eventsCanvas.clientWidth, 'events')
+    : timeline.lineIndexAt(timeline.cursor?.x ?? 0, timeline.notesCanvas.clientWidth, 'notes');
+}
 const pasteGesture = new PasteGesture({
-  paste: context => { try { pasteObjects(session, context.beat); } catch (error) { reportError(error); } },
+  paste: context => { try { pasteObjects(session, context.beat, { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() }); } catch (error) { reportError(error); } },
   open: () => { activatePane('clipboard'); renderClipboardPanel(); },
   reportError: error => notify(`剪贴板历史：${error.message}`, 'error'),
-  valid: context => context.session === session && context.chart === session.chart && context.lineIndex === session.lineIndex && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
+  valid: context => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
 });
 window.addEventListener('blur', () => pasteGesture.cancel());
 function drawTimelineStrips() {
@@ -303,7 +343,7 @@ function setHome(visible) {
 }
 
 function persistEditor() {
-  editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX,
+  editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
     hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'compact' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
@@ -320,6 +360,19 @@ for (const button of document.querySelectorAll('[data-pane]')) button.onclick = 
   if (['notes', 'events'].includes(pane)) session.focus = pane;
   activatePane(pane);
 };
+function openMultiLinePanel() { activatePane('multi-line'); multiLinePanel.render(); }
+element('#multi-line-tool').addEventListener('click', openMultiLinePanel);
+element('#multi-line-open').addEventListener('click', openMultiLinePanel);
+element('#multi-line-toggle').addEventListener('click', () => {
+  const enabling = !session.multiLineEnabled;
+  session.setMultiLineEnabled(enabling, session.focus === 'events' ? 'events' : 'notes');
+  if (enabling) openMultiLinePanel();
+});
+element('#multi-line-prev-add').addEventListener('click', () => session.addPreviousMultiLine());
+element('#multi-line-prev-remove').addEventListener('click', () => session.removeMinimumMultiLine());
+element('#multi-line-next-add').addEventListener('click', () => session.addNextMultiLine());
+element('#multi-line-next-remove').addEventListener('click', () => session.removeMaximumMultiLine());
+element('#multi-line-merge').addEventListener('click', () => session.setMultiLineMerge(!session.multiLineMerge));
 for (const button of document.querySelectorAll('[data-return-chart]')) button.onclick = () => activatePane('chart');
 for (const form of document.querySelectorAll('#properties, #event-properties')) form.addEventListener('submit', event => { event.preventDefault(); document.activeElement?.blur(); });
 for (const button of document.querySelectorAll('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
@@ -334,6 +387,8 @@ function togglePreview(force, stay = false, replay = false) {
   preview.visible = visible;
   element('.preview-wrap').hidden = !preview.visible;
   element('#view-toggle').classList.toggle('active', preview.visible);
+  element('#multi-line-labels').hidden = preview.visible;
+  element('#multi-line-scroll').hidden = preview.visible;
   element('#preview-title').textContent = session.chart.META.name ?? '';
   timeline.origin = currentBeat();
   invalidate();
@@ -402,6 +457,9 @@ function updateLineInfo() {
 }
 
 function renderSession() {
+  const editor = element('.editor');
+  editor.classList.toggle('multi-notes', session.multiLineActive && session.multiLineMode === 'notes');
+  editor.classList.toggle('multi-events', session.multiLineActive && session.multiLineMode === 'events');
   const context = `${session.lineIndex}:${timeline.layer}`;
   if (placementContext !== context) { timeline.cancelPlacement(); placementContext = context; }
   if (tempoEntries !== session.chart.BPMList) { tempoEntries = session.chart.BPMList; tempo = new TempoMap(tempoEntries); }
@@ -443,6 +501,16 @@ function renderSession() {
     const option = document.createElement('option'); option.value = index; option.textContent = `${index} · ${line.Name || '未命名'}`; element('#line-select').append(option);
   });
   element('#line-select').value = session.lineIndex;
+  element('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
+  element('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
+  element('#multi-line-count').textContent = session.multiLineActive ? session.multiLineIndices.length : 0;
+  element('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
+  element('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
+  const hasLines = session.multiLineActive && session.multiLineIndices.length;
+  element('#multi-line-prev-add').disabled = !hasLines || session.multiLineIndices.length >= session.chart.judgeLineList.length;
+  element('#multi-line-next-add').disabled = !hasLines || session.multiLineIndices.length >= session.chart.judgeLineList.length;
+  element('#multi-line-prev-remove').disabled = !hasLines;
+  element('#multi-line-next-remove').disabled = !hasLines;
   element('#line-next').disabled = element('#line-previous').disabled = session.chart.judgeLineList.length < 2;
   const binding = session.line?.attachUI ?? '';
   element('#attach-ui').replaceChildren(new Option('不绑定', ''), ...UI_BINDINGS.map(([key, label]) => new Option(label, key)));
@@ -461,6 +529,7 @@ function renderSession() {
   if (activePaneName === 'diagnose') renderDiagnostics();
   if (activePaneName === 'history') renderHistoryPanel();
   if (activePaneName === 'multi') multiEdit.sync();
+  if (activePaneName === 'multi-line') multiLinePanel.render();
   if (activePaneName === 'metadata') renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); });
   if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); });
   session.eventLayer = timeline.layer;
@@ -470,16 +539,24 @@ function renderSession() {
   if (session.eventSelection.size) {
     timeline.eventPlacementType = session.eventSelection.values().next().value.split(':')[0];
   }
-  const selectionSignature = `${session.lineIndex}:${session.eventLayer}|${session.focus}|${[...session.selection].sort((left, right) => left - right).join(',')}|${[...session.eventSelection].sort().join(',')}`;
+  const multiEventSignature = [...(session.multiEventSelection ?? new Map())].map(([line, values]) => `${line}:${[...values].sort().join(',')}`).sort().join('|');
+  const multiNoteSignature = [...(session.multiLineSelection ?? new Map())].map(([line, values]) => `${line}:${[...values].sort((left, right) => left - right).join(',')}`).sort().join('|');
+  const selectionSignature = `${session.lineIndex}:${session.eventLayer}|${session.focus}|${[...session.selection].sort((left, right) => left - right).join(',')}|${[...session.eventSelection].sort().join(',')}|${multiNoteSignature}|${multiEventSignature}`;
   if (selectionSignature !== lastSelectionSignature) {
     lastSelectionSignature = selectionSignature;
-    const selectionCount = session.focus === 'events' ? session.eventSelection.size : session.selection.size;
+    const selectionCount = session.focus === 'events'
+      ? (session.multiLineActive && session.multiLineMode === 'events'
+        ? Math.max(session.eventSelection.size, [...(session.multiEventSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0))
+        : session.eventSelection.size)
+      : (session.multiLineActive && session.multiLineMode === 'notes'
+        ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
+        : session.selection.size);
     if (multiEdit.committing) multiEdit.sync();
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
     else if (selectionCount > 1) { activatePane('multi'); multiEdit.open(session.focus === 'events' ? 'events' : 'notes'); }
     else if (selectionCount === 1) activatePane(session.focus === 'events' ? 'events' : 'notes');
-    else activatePane('chart');
+    else if (activePaneName !== 'multi-line') activatePane('chart');
   }
   const limits = previewLimitations(session.chart);
   element('#compatibility').textContent = '已使用原 RPE 音符素材与打击音；支持封面、静态纹理、多线与控制曲线。尚需原版逐帧对照。' + (limits.length ? `需进一步验证：${limits.join('、')}。` : '');
@@ -821,7 +898,7 @@ function deleteSelection() { deleteObjects(session); }
 function cutSelection() { if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
 function pasteSelection(mirror = false, keepTime = false) {
   timeline.clipboardMode = { mirror, keepTime };
-  pasteObjects(session, clipboardBeat(timeline), timeline.clipboardMode);
+  pasteObjects(session, clipboardBeat(timeline), { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() });
 }
 listen('#copy', copySelection);
 listen('#cut', cutSelection);
@@ -1043,20 +1120,24 @@ window.addEventListener('keydown', async event => {
   const action = shortcutAction(event, preferences, area);
   if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
   if (pasteGesture.pending && action !== 'Paste') pasteGesture.cancel();
-  if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
-    pasteGesture.down(event, { session, chart: session.chart, lineIndex: session.lineIndex, layer: timeline.layer, beat: clipboardBeat(timeline) }); return;
+    if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
+    pasteGesture.down(event, { session, chart: session.chart, lineIndex: session.lineIndex, targetLineIndex: clipboardTargetLine(), layer: timeline.layer, beat: clipboardBeat(timeline) }); return;
   }
   let handled = true;
   try {
-    if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) { event.preventDefault(); return; }
-    if (!preview.visible && !event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && (session.selection.size || session.eventSelection.size)) nudgeSelection(session, event.key, timeline.division, timeline.gridCount);
+    if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD', 'ToggleMultiLine', 'SwitchMultiLineMode'].includes(action)) { event.preventDefault(); return; }
+    const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
+    if (!preview.visible && !event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && (session.selection.size || session.eventSelection.size || hasMultiSelection)) nudgeSelection(session, event.key, timeline.division, timeline.gridCount);
     else if (timeline.eventInteraction.pending && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.altKey) timeline.eventInteraction.place(undefined, undefined, Number(event.key) || 10);
     else if (action === 'Save') { event.preventDefault(); await save(); }
     else if (action === 'Undo') travel('undo');
     else if (action === 'Redo') travel('redo');
     else if (action === 'SelectAll') {
       if (session.focus === 'events') session.eventSelection = new Set(timeline.eventTypes.flatMap(type => eventList(session, type).map((event, index) => eventKey(type, index))));
-      else session.selection = new Set(session.notes.map((note, index) => index));
+      else if (session.multiLineActive && session.multiLineMode === 'notes') {
+        session.multiLineSelection = new Map(session.targetLineIndices.map(lineIndex => [lineIndex, new Set((session.chart.judgeLineList?.[lineIndex]?.notes ?? []).map((note, index) => index))]));
+        session.selection = new Set(session.multiLineSelection.get(session.lineIndex) ?? []);
+      } else session.selection = new Set(session.notes.map((note, index) => index));
       session.notify();
     }
     else if (action === 'Copy') copySelection();
@@ -1073,20 +1154,26 @@ window.addEventListener('keydown', async event => {
     else if (action === 'JumpView') togglePreview(false, true);
     else if (action === 'SwitchUI') switchNoteView();
     else if (action === 'ResetCamera') resetCamera();
+    else if (action === 'ToggleMultiLine') {
+      const enabling = !session.multiLineEnabled;
+      session.setMultiLineEnabled(enabling, session.focus === 'events' ? 'events' : 'notes');
+      if (enabling) openMultiLinePanel();
+    }
+    else if (action === 'SwitchMultiLineMode' && session.multiLineActive) session.setMultiLineMode(session.multiLineMode === 'events' ? 'notes' : 'events');
     else if (action === 'CurveBegin' || action === 'CurveEnd') captureCurve(action === 'CurveEnd');
     else if (preview.visible && ['AddTap', 'AddDrag', 'AddFlick', 'AddHold', 'AddEvent'].includes(action)) handled = false;
     else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place();
     else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) handled = timeline.addAtCursor({ AddTap: 1, AddDrag: 4, AddFlick: 3, AddHold: 2 }[action]);
     else if (action === 'Delete') deleteSelection();
-    else if (action === 'QuickDelete' && session.selection.size + session.eventSelection.size > 1) deleteSelection();
+    else if (action === 'QuickDelete' && session.selection.size + session.eventSelection.size + [...(session.multiLineSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) + [...(session.multiEventSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) > 1) deleteSelection();
     else if (action === 'QuickDelete' && session.focus === 'events' && timeline.eventCursor) {
       const hit = timeline.eventInteraction.hit(timeline.eventCursor);
       if (hit) { session.eventSelection = new Set([eventKey(hit.type, hit.index)]); deleteEvents(session); }
     } else if (action === 'QuickDelete' && timeline.cursor) {
       const hit = timeline.hit(timeline.cursor);
-      if (hit) { session.selection = new Set([hit.index]); session.deleteSelection(); }
+      if (hit) { if (session.multiLineActive && session.multiLineMode === 'notes') session.multiLineSelection.set(hit.lineIndex, new Set([hit.index])); session.selection = new Set([hit.index]); deleteSelection(); }
     } else if (['LastBeat', 'NextBeat'].includes(action)) seekBeat(Math.max(0, currentBeat() + (action === 'LastBeat' ? -1 : 1) / timeline.division));
-    else if (action === 'Esc') { session.clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
+    else if (action === 'Esc') { session.clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); session.multiLineSelection?.clear(); session.multiEventSelection?.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
     else handled = false;
     if (handled) { event.preventDefault(); event.stopPropagation(); }
   } catch (error) { event.preventDefault(); reportError(error); }
@@ -1146,7 +1233,7 @@ function frame(timestamp) {
     }
     preview.duration = realtimePreview.duration = audio.duration;
     const viewSession = timeline.getSession();
-    const viewChart = multiEdit.active && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart;
+    const viewChart = multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart;
     preview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
     if (!preview.visible) realtimePreview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
@@ -1156,7 +1243,9 @@ function frame(timestamp) {
     element('#scrubber').value = audio.time;
     const tempoPoint = tempo.points[Math.max(0, upperBound(tempo.points, beat, point => point.beat) - 1)];
     element('#bpm-display').textContent = `${(60 / tempoPoint.secondsPerBeat).toFixed(2)} BPM`;
-    const draggedNote = ['move', 'startTime', 'endTime'].includes(timeline.drag?.kind) ? timeline.movedNote(session.notes[timeline.drag.anchor]) : null;
+    const draggedLineIndex = Number.isInteger(timeline.drag?.lineIndex) ? timeline.drag.lineIndex : session.lineIndex;
+    const draggedSource = session.chart.judgeLineList?.[draggedLineIndex]?.notes?.[timeline.drag?.anchor];
+    const draggedNote = ['move', 'startTime', 'endTime'].includes(timeline.drag?.kind) ? timeline.movedNote(draggedSource) : null;
     const positionInput = element('#properties input[aria-label="X 坐标"]');
     if (draggedNote && positionInput && document.activeElement !== positionInput) positionInput.value = Number(draggedNote.positionX).toFixed(2);
     element('#cursor-position').textContent = draggedNote ? `X ${draggedNote.positionX.toFixed(2)} · ${beatValue(draggedNote.startTime).toFixed(3)} 拍` : timeline.cursor ? `X ${timeline.positionAt(timeline.cursor.x).toFixed(2)} · ${timeline.snappedBeat(timeline.cursor.y).toFixed(3)} 拍` : '';
@@ -1187,6 +1276,10 @@ function applyPreferences(next) {
   timeline.scale = editorPreferences.scale ?? 500;
   timeline.division = editorPreferences.division ?? 4;
   timeline.snapX = editorPreferences.snapX ?? true;
+  timeline.multiLineWidth = editorPreferences.multiLineWidth ?? 0;
+  timeline.multiLineEventWidth = editorPreferences.multiLineEventWidth ?? 0;
+  timeline.multiLineWidthExplicit = Number.isFinite(editorPreferences.multiLineWidth);
+  timeline.multiLineEventWidthExplicit = Number.isFinite(editorPreferences.multiLineEventWidth);
   element('#grid-count').value = timeline.gridCount; element('#division').value = timeline.division; element('#y-scale').value = timeline.scale; element('#snap-x').checked = timeline.snapX;
   element('#y-scale-slider').value = timeline.scale;
   realtimePreview.visible = editorPreferences.realtime ?? true;
@@ -1286,7 +1379,7 @@ function applyDisplaySettings() {
   element('.editor-toolbar').classList.add(`mode-${toolbarMode}`);
   element('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;
   timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value);
-  timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
+  timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventValueThreshold = Number(element('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element('#event-curve-threshold').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
   timeline.seamlessEvents = element('#seamless-events').checked;
   session.cutDensity = Number(element('#event-cut-density').value);
   clipboardHistory.enabled = element('#clipboard-history-enabled').checked;

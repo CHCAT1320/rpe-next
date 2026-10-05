@@ -4,7 +4,7 @@
 
 [在线使用](https://kclg-ysj.github.io/rpe-next/) · [源码](https://github.com/kclg-YSJ/rpe-next)
 
-当前版本：**0.6.0**。
+当前版本：**0.6.1**。
 
 基于 Canvas、Web Audio、WebGL 和 IndexedDB，支持音符与事件编辑、实时预览、着色器、多谱面管理、原 RPE 谱面导入、热键及设置迁移。当前仍在持续完善，尚不保证与原 RPE 完全一致；建议保留原始谱面与资源备份。
 

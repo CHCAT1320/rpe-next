@@ -103,8 +103,9 @@ function validateChange(change, lineCount, snapshot) {
 function assemble(snapshot, changes, kind, removeSource = false) {
   let chart = snapshot.chart;
   const selection = new Set(kind === 'notes' ? snapshot.notes.map(entry => entry.index) : []);
-  const eventSelection = new Set(kind === 'events' && !removeSource ? snapshot.events.map(entry => eventKey(entry.type, entry.index)) : []);
-  const affected = new Set(changes.flatMap(change => [snapshot.lineIndex, change.lineIndex]));
+  const eventSelection = new Set(kind === 'events' && !removeSource ? snapshot.events.filter(entry => (entry.lineIndex ?? snapshot.lineIndex) === snapshot.lineIndex).map(entry => eventKey(entry.type, entry.index)) : []);
+  const sourceEventLines = new Set(snapshot.events.map(entry => Number.isInteger(entry.lineIndex) ? entry.lineIndex : snapshot.lineIndex));
+  const affected = new Set(changes.flatMap(change => [snapshot.lineIndex, change.lineIndex, ...(kind === 'events' ? sourceEventLines : [])]));
   const notesByLine = new Map(); const eventsByLine = new Map();
   const selectedNotes = new Set(snapshot.notes.map(entry => entry.index));
   const noteUpdates = new Map(changes.filter(change => !change.copy).map(change => [change.index, change]));
@@ -124,12 +125,14 @@ function assemble(snapshot, changes, kind, removeSource = false) {
   if (removeSource) {
     const selected = new Map();
     for (const entry of snapshot.events) {
-      if (!selected.has(entry.type)) selected.set(entry.type, new Set());
-      selected.get(entry.type).add(entry.index);
+      const lineIndex = Number.isInteger(entry.lineIndex) ? entry.lineIndex : snapshot.lineIndex;
+      const key = `${lineIndex}:${entry.type}`;
+      if (!selected.has(key)) selected.set(key, { lineIndex, type: entry.type, indices: new Set() });
+      selected.get(key).indices.add(entry.index);
     }
-    for (const [type, indices] of selected) {
-      const original = eventList({ chart, lineIndex: snapshot.lineIndex, line: chart.judgeLineList[snapshot.lineIndex], eventLayer: snapshot.eventLayer }, type);
-      eventsByLine.get(snapshot.lineIndex).set(type, original.filter((event, index) => !indices.has(index)));
+    for (const { lineIndex, type, indices } of selected.values()) {
+      const original = eventList({ chart, lineIndex, line: chart.judgeLineList[lineIndex], eventLayer: snapshot.eventLayer }, type);
+      eventsByLine.get(lineIndex)?.set(type, original.filter((event, index) => !indices.has(index)));
     }
   }
   for (const change of changes) {
@@ -152,7 +155,17 @@ function assemble(snapshot, changes, kind, removeSource = false) {
   if (notesByLine.size) chart = { ...chart, judgeLineList: chart.judgeLineList.map((line, index) => notesByLine.has(index) ? { ...line, notes: notesByLine.get(index), numOfNotes: notesByLine.get(index).length } : line) };
   for (const [lineIndex, updates] of eventsByLine) if (updates.size) chart = chartWithEventLists(chart, lineIndex, snapshot.eventLayer, updates);
   assertChart(chart);
-  return { chart, lineIndex: snapshot.lineIndex, eventLayer: snapshot.eventLayer, focus: kind, selection, eventSelection, changes };
+  const multiEventSelection = new Map();
+  if (kind === 'events' && !removeSource) {
+    for (const change of changes) {
+      if (!change.copy) {
+        const lineIndex = Number.isInteger(change.lineIndex) ? change.lineIndex : snapshot.lineIndex;
+        if (!multiEventSelection.has(lineIndex)) multiEventSelection.set(lineIndex, new Set());
+        multiEventSelection.get(lineIndex).add(eventKey(change.type, change.index));
+      }
+    }
+  }
+  return { chart, lineIndex: snapshot.lineIndex, eventLayer: snapshot.eventLayer, focus: kind, selection, eventSelection, multiEventSelection, changes };
 }
 
 export function previewMultiEdit(snapshot, kind, options = {}) {
@@ -166,22 +179,25 @@ export function previewMultiEdit(snapshot, kind, options = {}) {
   const random = randomSource(options.seed ?? 1);
   const modifier = scriptMode || field === 'hitSound' ? null : distribution(options, random);
   const groups = new Map();
+  const applicationMode = kind === 'events' && options.eventApplicationMode === 'global' ? 'global' : 'per-line';
   for (const entry of kind === 'notes' ? snapshot.notes : snapshot.events) {
     if (kind === 'notes' && Number(options.noteType) && entry.note.type !== Number(options.noteType)) continue;
     if (kind === 'events' && options.eventType && options.eventType !== 'all' && options.eventType !== entry.type) continue;
-    const key = kind === 'notes' ? 'notes' : entry.type;
+    const sourceLine = Number.isInteger(entry.lineIndex) ? entry.lineIndex : snapshot.lineIndex;
+    const key = kind === 'notes' ? 'notes' : applicationMode === 'global' ? entry.type : `${sourceLine}:${entry.type}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ ...entry, before: entry.note ?? entry.event });
   }
   const changes = [];
   for (const entries of groups.values()) {
     entries.sort((left, right) => beatValue(left.before.startTime) - beatValue(right.before.startTime) || left.index - right.index);
-    const filtered = entries.filter((entry, index) => condition(scopeFor(entry.before, kind, snapshot.lineIndex, index, entries.length)));
+    const filtered = entries.filter((entry, index) => condition(scopeFor(entry.before, kind, Number.isInteger(entry.lineIndex) ? entry.lineIndex : snapshot.lineIndex, index, entries.length)));
     let time = filtered.length ? beatValue(filtered[0].before.startTime) : 0;
     const groupChanges = [];
     filtered.forEach((entry, index) => {
-      const after = structuredClone(entry.before); const scope = scopeFor(after, kind, snapshot.lineIndex, index, filtered.length);
-      const change = { kind, type: entry.type, index: entry.index, before: entry.before, after, lineIndex: snapshot.lineIndex, copy: false };
+      const sourceLine = Number.isInteger(entry.lineIndex) ? entry.lineIndex : snapshot.lineIndex;
+      const after = structuredClone(entry.before); const scope = scopeFor(after, kind, sourceLine, index, filtered.length);
+      const change = { kind, type: entry.type, index: entry.index, before: entry.before, after, lineIndex: sourceLine, copy: false };
       if (scriptMode) {
         for (const statement of script) {
           const value = statement.evaluate(scope); const previous = scope[statement.field];
@@ -198,7 +214,7 @@ export function previewMultiEdit(snapshot, kind, options = {}) {
         const endpointDistribution = kind === 'notes' || ['line', 'duration', 'order'].includes(field);
         const progress = endpointDistribution ? scope.u : (index + 1) / filtered.length;
         const value = modifier(index, progress); if (value === null) return;
-        if (field === 'line') { change.lineIndex = Math.round(batchOperation(snapshot.lineIndex, value, operation)); change.copy = kind === 'events'; }
+        if (field === 'line') { change.lineIndex = Math.round(batchOperation(sourceLine, value, operation)); change.copy = kind === 'events'; }
         else if (field === 'both') {
           if (typeof after.start !== 'number' || typeof after.end !== 'number') throw new Error('首尾数值编辑适用于数值事件；颜色、文字、着色器可编辑时间或克隆');
           after.start = batchOperation(after.start, value, operation); after.end = batchOperation(after.end, value, operation);

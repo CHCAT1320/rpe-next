@@ -10,24 +10,35 @@ export function clipboardBeat(timeline) {
 export function drawClipboard(timeline, context, width, height, area) {
   const session = timeline.getSession();
   if (session.clipboardVisible === false || timeline.bulkPreview || timeline.pendingHold || timeline.eventInteraction.pending) return;
-  const projected = projectClipboard(session, clipboardBeat(timeline), timeline.clipboardMode);
+  const pointer = timeline.clipboardPointer;
+  const targetLineIndex = pointer && typeof timeline.lineIndexAt === 'function'
+    ? timeline.lineIndexAt(pointer.x, width, area)
+    : session.lineIndex;
+  const projected = projectClipboard(session, clipboardBeat(timeline), { ...timeline.clipboardMode, targetLineIndex });
   if (!projected.notes.length && !projected.events.length) return;
   context.save();
   context.globalAlpha = 0.175;
-  if (area === 'notes') for (const note of projected.notes) {
-    const horizontal = timeline.noteHorizontal(note.positionX); const noteWidth = timeline.noteWidth(note);
-    const bottom = timeline.vertical(beatValue(note.startTime)); const top = timeline.vertical(beatValue(note.endTime));
-    if (bottom < -10 || top > height + 10 || timeline.clampNoteHorizontal(horizontal, noteWidth, width) === null) continue;
+  if (area === 'notes') for (const [index, note] of projected.notes.entries()) {
+    const lineIndex = projected.noteLines?.[index] ?? session.lineIndex;
+    const horizontal = timeline.noteHorizontal(note.positionX, lineIndex); const noteWidth = timeline.noteWidth(note);
+    const bottom = timeline.verticalForLine(beatValue(note.startTime), lineIndex, height); const top = timeline.verticalForLine(beatValue(note.endTime), lineIndex, height);
+    if (bottom < -10 || top > height + 10 || timeline.clampNoteHorizontal(horizontal, noteWidth, width, lineIndex) === null) continue;
     context.fillStyle = colors[note.type];
     context.fillRect(horizontal - noteWidth / 2, Math.max(-10, note.type === 2 ? top : bottom - 5), noteWidth, note.type === 2 ? Math.min(height + 20, bottom - Math.max(-10, top)) : 10);
   }
-  if (area === 'events') for (const { type, event } of projected.events) {
+  if (area === 'events') for (const [{ type, event }, index] of projected.events.map((entry, index) => [entry, index])) {
+    const lineIndex = projected.eventLines?.[index] ?? session.lineIndex;
     const channel = timeline.eventTypes.indexOf(type); if (channel < 0) continue;
-    const top = Math.max(23, timeline.eventVertical(beatValue(event.endTime), type));
-    const bottom = Math.min(height, timeline.eventVertical(beatValue(event.startTime), type));
+    const vertical = session.multiLineActive && session.multiLineMode === 'events'
+      ? beat => timeline.verticalForLine(beat, lineIndex, height)
+      : beat => timeline.eventVertical(beat, type);
+    const top = Math.max(23, vertical(beatValue(event.endTime)));
+    const bottom = Math.min(height, vertical(beatValue(event.startTime)));
     if (bottom < top) continue;
-    const bounds = timeline.eventColumnBounds(channel, width);
-    context.fillStyle = '#ffa334'; context.fillRect(bounds.x, top, bounds.width, Math.max(2, bottom - top));
+    const panelWidth = timeline.panelWidth(width, 'events');
+    const panelOffset = timeline.panelIndex(lineIndex, 'events') * timeline.panelStride(width, 'events') - timeline.multiLineViewportOffset(width, 'events');
+    const bounds = timeline.eventColumnBounds(channel, panelWidth);
+    context.fillStyle = '#ffa334'; context.fillRect(panelOffset + bounds.x, top, bounds.width, Math.max(2, bottom - top));
   }
   context.globalAlpha = 0.7; context.strokeStyle = '#ff5cab'; context.lineWidth = 1;
   const source = timeline.vertical(clipboardStart(session));

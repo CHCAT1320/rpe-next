@@ -14,8 +14,9 @@ export function renderProperties(session, reportError) {
     const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '在左侧音符区点选音符；按已配置的音符快捷键放置。Hold 两次定位起止拍，Esc 取消。拖动实时显示吸附位置；竖线吸附可单独关闭。'; container.append(hint); return;
   }
   const directionOptions = note.type === 2 ? { 0: '下方', 1: '上方' } : { 1: '上方', 2: '下方' };
+  const lineOptions = Object.fromEntries((session.chart.judgeLineList ?? []).map((line, index) => [index, `${index} · ${line.Name || '未命名'}`]));
   const fields = [
-    ['type', '类型', 'select', NOTE_NAMES], ['startTime', '开始拍', 'beat'], ['endTime', '结束拍', 'beat'],
+    ['lineIndex', '所属线号', 'select', lineOptions], ['type', '类型', 'select', NOTE_NAMES], ['startTime', '开始拍', 'beat'], ['endTime', '结束拍', 'beat'],
     ['positionX', 'X 坐标', 'number'], ['above', '方向', 'select', directionOptions],
     ['isFake', 'Fake', 'select', { 0: '否', 1: '是' }], ['speed', '速度', 'number', 1],
     ['size', '大小', 'number', 1], ['alpha', '透明度', 'number', 255],
@@ -37,12 +38,13 @@ export function renderProperties(session, reportError) {
     if (kind === 'number') input.step = step;
     if (key === 'size') input.min = 0.01;
     if (key === 'alpha') { input.min = 0; input.max = 255; }
-    input.value = kind === 'beat' ? formatBeat(note[key]) : note[key] ?? (typeof options === 'number' ? options : 0);
+    input.value = key === 'lineIndex' ? session.lineIndex : kind === 'beat' ? formatBeat(note[key]) : note[key] ?? (typeof options === 'number' ? options : 0);
     if (key === 'above') input.value = noteIsAbove(note) ? 1 : note.type === 2 ? 0 : 2;
     if (beatDuration && note.visibleTime < 999999) input.value = formatBeat(fromNumber(visibleBeats(note, session.tempo, session.line.bpmfactor ?? 1)));
     if (duration) { input.min = 0; input.title = '999999 表示无限；首次滚轮调节重置为 0，之后每次增减一横线间隔拍'; }
     const apply = () => {
       try {
+        if (key === 'lineIndex') { session.moveSelectionToLine(Number(input.value)); return; }
         const value = kind === 'beat' ? parseBeat(input.value) : beatDuration ? beatValue(parseBeat(input.value)) : Number(input.value);
         if (kind !== 'beat' && (input.value.trim() === '' || !Number.isFinite(value))) throw new Error('请输入有限数字');
         if (key === 'size' && value <= 0) throw new Error('大小必须大于零');
@@ -59,7 +61,7 @@ export function renderProperties(session, reportError) {
           if (key === 'endTime' && (current.type !== 2 || beatValue(value) < beatValue(current.startTime))) throw new Error('结束拍只能用于 Hold，且不能早于开始拍');
           return next;
         });
-      } catch (error) { reportError(error); input.value = kind === 'beat' ? formatBeat(note[key]) : note[key] ?? 0; }
+      } catch (error) { reportError(error); input.value = key === 'lineIndex' ? session.lineIndex : kind === 'beat' ? formatBeat(note[key]) : note[key] ?? 0; }
     };
     input.onchange = apply;
     input.oninput = () => { if (input.value.trim()) apply(); };

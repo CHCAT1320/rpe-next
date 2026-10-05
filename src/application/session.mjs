@@ -10,10 +10,19 @@ export class EditorSession extends EventTarget {
     this.lineIndex = 0;
     this.selection = new Set();
     this.clipboard = [];
+    this.clipboardNoteLines = [];
     this.eventSelection = new Set();
     this.eventClipboard = [];
+    this.eventClipboardLines = [];
     this.eventLayer = 0;
     this.focus = 'notes';
+    this.multiLineEnabled = false;
+    this.multiLineMode = 'notes';
+    this.multiLineMerge = true;
+    this.multiLineIndices = [];
+    this.multiLineSelection = new Map();
+    this.multiEventSelection = new Map();
+    this.multiSelectionIntent = null;
     this.editSeconds = 0;
     this.recentEdits = [];
   }
@@ -21,6 +30,66 @@ export class EditorSession extends EventTarget {
   get chart() { return this.history.document; }
   get line() { return this.chart.judgeLineList?.[this.lineIndex]; }
   get notes() { return this.line?.notes ?? []; }
+  get multiLineActive() { return this.multiLineEnabled && this.multiLineIndices.length > 0; }
+  get targetLineIndices() {
+    if (!this.multiLineActive) return [this.lineIndex];
+    return [...this.multiLineIndices];
+  }
+  get targetLines() { return this.targetLineIndices.map(index => this.chart.judgeLineList?.[index]).filter(Boolean); }
+  isTargetLine(index) { return this.multiLineActive && this.multiLineIndices.includes(index); }
+  setMultiLineEnabled(enabled = true, mode = this.multiLineMode) {
+    this.multiLineEnabled = Boolean(enabled);
+    this.multiLineMode = mode === 'events' ? 'events' : 'notes';
+    if (this.multiLineEnabled && !this.multiLineIndices.length) this.multiLineIndices = [this.lineIndex];
+    // Turning the mode off only hides multi-line editing. Keep the selected line
+    // list and per-line selections so reopening the mode restores the workspace.
+    this.normalizeMultiLine(); this.notify();
+  }
+  setMultiLineMerge(enabled) { this.multiLineMerge = Boolean(enabled); this.notify(); }
+  setMultiLineMode(mode) { this.multiLineMode = mode === 'events' ? 'events' : 'notes'; this.notify(); }
+  normalizeMultiLine() {
+    const length = this.chart.judgeLineList?.length ?? 0;
+    this.multiLineIndices = [...new Set(this.multiLineIndices.filter(index => Number.isInteger(index) && index >= 0 && index < length))].sort((a, b) => a - b);
+    if (this.multiLineEnabled && !this.multiLineIndices.length && length) this.multiLineIndices = [Math.max(0, Math.min(this.lineIndex, length - 1))];
+  }
+  addMultiLine(index = this.lineIndex) {
+    this.multiLineEnabled = true;
+    if (Number.isInteger(index)) this.multiLineIndices = [...this.multiLineIndices, index];
+    this.normalizeMultiLine(); this.notify();
+  }
+  removeMultiLine(index = this.lineIndex) {
+    this.multiLineIndices = this.multiLineIndices.filter(value => value !== index);
+    if (!this.multiLineIndices.length) this.multiLineEnabled = false;
+    this.normalizeMultiLine(); this.notify();
+  }
+  clearMultiLines() { this.multiLineIndices = []; this.multiLineEnabled = false; this.notify(); }
+  toggleMultiLine(index = this.lineIndex) { this.isTargetLine(index) ? this.removeMultiLine(index) : this.addMultiLine(index); }
+  addNextMultiLine() {
+    if (!this.multiLineIndices.length) return this.addMultiLine(this.lineIndex);
+    const length = this.chart.judgeLineList?.length ?? 0;
+    if (!length || this.multiLineIndices.length >= length) return;
+    const selected = new Set(this.multiLineIndices);
+    for (let offset = 1; offset <= length; offset++) {
+      const next = (Math.max(...this.multiLineIndices) + offset) % length;
+      if (!selected.has(next)) return this.addMultiLine(next);
+    }
+  }
+  addPreviousMultiLine() {
+    if (!this.multiLineIndices.length) return this.addMultiLine(this.lineIndex);
+    const length = this.chart.judgeLineList?.length ?? 0;
+    if (!length || this.multiLineIndices.length >= length) return;
+    const selected = new Set(this.multiLineIndices);
+    for (let offset = 1; offset <= length; offset++) {
+      const previous = (Math.min(...this.multiLineIndices) - offset + length * 2) % length;
+      if (!selected.has(previous)) return this.addMultiLine(previous);
+    }
+  }
+  removeMaximumMultiLine() {
+    if (this.multiLineIndices.length) this.removeMultiLine(Math.max(...this.multiLineIndices));
+  }
+  removeMinimumMultiLine() {
+    if (this.multiLineIndices.length) this.removeMultiLine(Math.min(...this.multiLineIndices));
+  }
   notify() { this.dispatchEvent(new Event('change')); }
 
   selectionState() { return selectionState(this); }
@@ -49,10 +118,24 @@ export class EditorSession extends EventTarget {
   }
 
   insertNotes(notes, label = '添加音符') {
+    return this.insertNotesAt(this.lineIndex, notes, label);
+  }
+
+  insertNotesAt(lineIndex, notes, label = '添加音符') {
     const beforeSelection = this.selectionState();
-    const first = this.notes.length;
-    this.selection = new Set(notes.map((note, index) => first + index));
-    this.updateNotes(label, existing => [...existing, ...notes], beforeSelection);
+    const lines = [...this.chart.judgeLineList];
+    let selected = [];
+    const existing = lines[lineIndex]?.notes ?? [];
+    const first = existing.length;
+    if (!lines[lineIndex]) return false;
+    lines[lineIndex] = { ...lines[lineIndex], notes: [...existing, ...structuredClone(notes)], numOfNotes: first + notes.length };
+    selected = notes.map((note, offset) => first + offset);
+    if (this.multiLineActive && this.multiLineMode === 'notes') {
+      this.multiLineSelection.set(lineIndex, new Set(selected));
+      if (lineIndex === this.lineIndex) this.selection = new Set(selected);
+    } else this.selection = new Set(selected);
+    this.commit(label, { ...this.chart, judgeLineList: lines }, beforeSelection);
+    return true;
   }
 
   deleteSelection() {
@@ -60,12 +143,36 @@ export class EditorSession extends EventTarget {
     const beforeSelection = this.selectionState();
     const selected = this.selection;
     this.selection = new Set();
-    this.updateNotes('删除音符', notes => notes.filter((note, index) => !selected.has(index)), beforeSelection);
+    const lines = [...this.chart.judgeLineList];
+    const notes = lines[this.lineIndex]?.notes ?? [];
+    const remaining = notes.filter((note, noteIndex) => !selected.has(noteIndex));
+    lines[this.lineIndex] = { ...lines[this.lineIndex], notes: remaining, numOfNotes: remaining.length };
+    this.commit('删除音符', { ...this.chart, judgeLineList: lines }, beforeSelection);
   }
 
   transformSelection(label, change) {
     if (!this.selection.size) return;
-    this.updateNotes(label, notes => notes.map((note, index) => this.selection.has(index) ? change(note) : note));
+    const lines = [...this.chart.judgeLineList];
+    const notes = lines[this.lineIndex]?.notes ?? [];
+    lines[this.lineIndex] = { ...lines[this.lineIndex], notes: notes.map((note, noteIndex) => this.selection.has(noteIndex) ? change(note) : note) };
+    this.commit(label, { ...this.chart, judgeLineList: lines });
+  }
+
+  moveSelectionToLine(targetLineIndex) {
+    if (!this.selection.size || !Number.isInteger(targetLineIndex) || targetLineIndex < 0 || targetLineIndex >= this.chart.judgeLineList.length || targetLineIndex === this.lineIndex) return;
+    const beforeSelection = this.selectionState();
+    const lines = [...this.chart.judgeLineList];
+    const source = lines[this.lineIndex];
+    const target = lines[targetLineIndex];
+    const moving = source.notes.filter((note, index) => this.selection.has(index));
+    const remaining = source.notes.filter((note, index) => !this.selection.has(index));
+    const targetNotes = [...(target.notes ?? []), ...structuredClone(moving)];
+    lines[this.lineIndex] = { ...source, notes: remaining, numOfNotes: remaining.length };
+    lines[targetLineIndex] = { ...target, notes: targetNotes, numOfNotes: targetNotes.length };
+    this.lineIndex = targetLineIndex;
+    this.selection = new Set(moving.map((_, index) => target.notes.length + index));
+    this.eventSelection.clear();
+    this.commit('移动音符到判定线', { ...this.chart, judgeLineList: lines }, beforeSelection);
   }
 
   copy() { this.clipboard = structuredClone(this.notes.filter((note, index) => this.selection.has(index))); }
@@ -81,7 +188,12 @@ export class EditorSession extends EventTarget {
     })), '粘贴音符');
   }
 
-  selectLine(index) { this.lineIndex = index; this.selection.clear(); this.eventSelection.clear(); this.notify(); }
+  selectLine(index) {
+    this.lineIndex = index;
+    this.selection = new Set(this.multiLineActive ? (this.multiLineSelection.get(index) ?? []) : []);
+    this.eventSelection = new Set(this.multiLineActive ? (this.multiEventSelection.get(index) ?? []) : []);
+    this.normalizeMultiLine(); this.notify();
+  }
 
   addLine() {
     const beforeSelection = this.selectionState();

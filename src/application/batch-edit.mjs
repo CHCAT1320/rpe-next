@@ -2,7 +2,7 @@ import { assertChart, noteIsAbove } from '../core/chart.mjs';
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { snapPosition, verticalGrid } from '../core/edit-grid.mjs';
 import { alignShaderParameters } from '../core/shader-events.mjs';
-import { chartWithEventLists, eventList, eventKey, selectedEvents } from './event-commands.mjs';
+import { chartWithEventLists, eventList, eventListAt, eventKey, selectedEvents, transformEvents } from './event-commands.mjs';
 
 export const BATCH_ACTIONS = [
   ['MirrorY', '绕 X=0 镜像'], ['MirrorMid', '绕选中音符的横向中心镜像'],
@@ -12,8 +12,17 @@ export const BATCH_ACTIONS = [
 ];
 
 export function captureSelection(session) {
+  const events = session.multiLineActive && session.multiLineMode === 'events'
+    ? [...(session.multiEventSelection ?? new Map())].flatMap(([lineIndex, selection]) => [...selection].map(key => {
+      const [type, indexText] = String(key).split(':'); const index = Number(indexText);
+      return { type, index, lineIndex, event: eventListAt(session, lineIndex, type)?.[index] };
+    })).filter(entry => entry.event)
+    : selectedEvents(session).map(entry => ({ ...entry, lineIndex: session.lineIndex }));
+  const notes = session.multiLineActive && session.multiLineMode === 'notes'
+    ? [...(session.multiLineSelection ?? new Map())].flatMap(([lineIndex, selection]) => [...selection].map(index => ({ lineIndex, index, note: session.chart.judgeLineList?.[lineIndex]?.notes?.[index] }))).filter(entry => entry.note)
+    : [...session.selection].sort((left, right) => left - right).filter(index => session.notes[index]).map(index => ({ lineIndex: session.lineIndex, index, note: session.notes[index] }));
   return { chart: session.chart, lineIndex: session.lineIndex, eventLayer: session.eventLayer, focus: session.focus,
-    shaderAutoAlign: session.shaderAutoAlign, notes: [...session.selection].sort((left, right) => left - right).filter(index => session.notes[index]).map(index => ({ index, note: session.notes[index] })), events: selectedEvents(session) };
+    shaderAutoAlign: session.shaderAutoAlign, notes, events };
 }
 
 function eventSession(chart, lineIndex, eventLayer) {
@@ -26,53 +35,84 @@ export function editCapturedSelection(snapshot, { note = value => value, event =
   const targetIndex = ((sourceIndex + lineOffset) % count + count) % count;
   let chart = snapshot.chart;
   const selection = new Set(); const eventSelection = new Set();
+  const multiLineSelection = new Map();
   if (snapshot.notes.length) {
     const lines = [...chart.judgeLineList];
-    const source = lines[sourceIndex]; const target = lines[targetIndex];
-    const updates = new Map(snapshot.notes.map(entry => [entry.index, note(entry.note)]));
-    let notes;
-    if (sourceIndex === targetIndex) {
-      notes = source.notes.map((item, index) => updates.get(index) ?? item);
-      for (const index of updates.keys()) selection.add(index);
-    } else {
-      const remaining = source.notes.filter((item, index) => !updates.has(index));
-      lines[sourceIndex] = { ...source, notes: remaining, numOfNotes: remaining.length };
-      notes = [...(target.notes ?? []), ...updates.values()];
-      for (let index = notes.length - updates.size; index < notes.length; index++) selection.add(index);
+    const grouped = new Map();
+    for (const entry of snapshot.notes) {
+      const entrySource = Number.isInteger(entry.lineIndex) ? entry.lineIndex : sourceIndex;
+      if (!grouped.has(entrySource)) grouped.set(entrySource, []);
+      grouped.get(entrySource).push(entry);
     }
-    lines[targetIndex] = { ...target, notes, numOfNotes: notes.length };
+    for (const [entrySource, entries] of grouped) {
+      const entryTarget = ((entrySource + lineOffset) % count + count) % count;
+      const source = lines[entrySource]; const target = lines[entryTarget];
+      if (!source || !target) continue;
+      const updates = new Map(entries.map(entry => [entry.index, note(entry.note, entry)]));
+      let nextNotes;
+      const selectedIndices = new Set();
+      if (entrySource === entryTarget) {
+        nextNotes = (source.notes ?? []).map((item, index) => updates.get(index) ?? item);
+        for (const index of updates.keys()) selectedIndices.add(index);
+      } else {
+        const remaining = (source.notes ?? []).filter((item, index) => !updates.has(index));
+        lines[entrySource] = { ...source, notes: remaining, numOfNotes: remaining.length };
+        nextNotes = [...(target.notes ?? []), ...updates.values()];
+        for (let index = nextNotes.length - updates.size; index < nextNotes.length; index++) selectedIndices.add(index);
+      }
+      lines[entryTarget] = { ...target, notes: nextNotes, numOfNotes: nextNotes.length };
+      multiLineSelection.set(entryTarget, selectedIndices);
+      if (entryTarget === sourceIndex || (grouped.size === 1 && entryTarget === targetIndex)) for (const index of selectedIndices) selection.add(index);
+    }
     chart = { ...chart, judgeLineList: lines };
   }
-  const types = new Set(snapshot.events.map(entry => entry.type));
-  const sourceUpdates = new Map(); const targetUpdates = new Map();
-  for (const type of types) {
-    const selected = new Map(snapshot.events.filter(entry => entry.type === type).map(entry => {
-      let next = event(entry.event, type);
-      if (type === 'paintEvents' && snapshot.shaderAutoAlign !== false && beatValue(next.startTime) !== beatValue(entry.event.startTime)) next = alignShaderParameters(next);
-      return [entry.index, next];
-    }));
-    const original = eventList(eventSession(chart, sourceIndex, snapshot.eventLayer), type);
-    if (sourceIndex === targetIndex) {
-      sourceUpdates.set(type, original.map((item, index) => selected.get(index) ?? item));
-      for (const index of selected.keys()) eventSelection.add(eventKey(type, index));
-    } else {
-      sourceUpdates.set(type, original.filter((item, index) => !selected.has(index)));
-      const target = [...eventList(eventSession(chart, targetIndex, snapshot.eventLayer), type)];
-      for (const next of selected.values()) { eventSelection.add(eventKey(type, target.length)); target.push(next); }
-      targetUpdates.set(type, target);
+  const entriesByLine = new Map();
+  for (const entry of snapshot.events) {
+    const lineIndex = Number.isInteger(entry.lineIndex) ? entry.lineIndex : sourceIndex;
+    if (!entriesByLine.has(lineIndex)) entriesByLine.set(lineIndex, []);
+    entriesByLine.get(lineIndex).push(entry);
+  }
+  const sourceUpdatesByLine = new Map(); const targetUpdatesByLine = new Map(); const multiEventSelection = new Map();
+  for (const [entrySource, entries] of entriesByLine) {
+    const entryTarget = ((entrySource + lineOffset) % count + count) % count;
+    const types = new Set(entries.map(entry => entry.type));
+    for (const type of types) {
+      const selected = new Map(entries.filter(entry => entry.type === type).map(entry => {
+        let next = event(entry.event, type, entry);
+        if (type === 'paintEvents' && snapshot.shaderAutoAlign !== false && beatValue(next.startTime) !== beatValue(entry.event.startTime)) next = alignShaderParameters(next);
+        return [entry.index, next];
+      }));
+      const original = eventList(eventSession(chart, entrySource, snapshot.eventLayer), type);
+      if (entrySource === entryTarget) {
+        if (!sourceUpdatesByLine.has(entrySource)) sourceUpdatesByLine.set(entrySource, new Map());
+        sourceUpdatesByLine.get(entrySource).set(type, original.map((item, index) => selected.get(index) ?? item));
+        if (!multiEventSelection.has(entrySource)) multiEventSelection.set(entrySource, new Set());
+        for (const index of selected.keys()) { const key = eventKey(type, index); multiEventSelection.get(entrySource).add(key); if (entrySource === sourceIndex) eventSelection.add(key); }
+      } else {
+        if (!sourceUpdatesByLine.has(entrySource)) sourceUpdatesByLine.set(entrySource, new Map());
+        sourceUpdatesByLine.get(entrySource).set(type, original.filter((item, index) => !selected.has(index)));
+        const target = [...eventList(eventSession(chart, entryTarget, snapshot.eventLayer), type)];
+        if (!targetUpdatesByLine.has(entryTarget)) targetUpdatesByLine.set(entryTarget, new Map());
+        const targetSelection = multiEventSelection.get(entryTarget) ?? new Set();
+        for (const next of selected.values()) { const key = eventKey(type, target.length); targetSelection.add(key); if (entryTarget === sourceIndex || entriesByLine.size === 1) eventSelection.add(key); target.push(next); }
+        targetUpdatesByLine.get(entryTarget).set(type, target); multiEventSelection.set(entryTarget, targetSelection);
+      }
     }
   }
-  if (sourceUpdates.size) chart = chartWithEventLists(chart, sourceIndex, snapshot.eventLayer, sourceUpdates);
-  if (targetUpdates.size) chart = chartWithEventLists(chart, targetIndex, snapshot.eventLayer, targetUpdates);
-  return { chart, lineIndex: targetIndex, eventLayer: snapshot.eventLayer, focus: snapshot.focus, selection, eventSelection };
+  for (const [lineIndex, updates] of sourceUpdatesByLine) if (updates.size) chart = chartWithEventLists(chart, lineIndex, snapshot.eventLayer, updates);
+  for (const [lineIndex, updates] of targetUpdatesByLine) if (updates.size) chart = chartWithEventLists(chart, lineIndex, snapshot.eventLayer, updates);
+  return { chart, lineIndex: entriesByLine.size > 1 ? sourceIndex : targetIndex, eventLayer: snapshot.eventLayer, focus: snapshot.focus, selection, eventSelection, multiEventSelection, multiLineSelection };
 }
 
 export function commitSelectionEdit(session, result, label) {
   if (result.chart === session.chart) return false;
   assertChart(result.chart);
   const beforeSelection = session.selectionState();
-  session.lineIndex = result.lineIndex; session.eventLayer = result.eventLayer; session.focus = result.focus;
+  if (!(session.multiLineActive && ((result.multiEventSelection?.size ?? 0) > 0 || (result.multiLineSelection?.size ?? 0) > 0))) session.lineIndex = result.lineIndex;
+  session.eventLayer = result.eventLayer; session.focus = result.focus;
   session.selection = result.selection; session.eventSelection = result.eventSelection;
+  if (result.multiLineSelection) session.multiLineSelection = new Map([...result.multiLineSelection].map(([line, values]) => [line, new Set(values)]));
+  if (result.multiEventSelection) session.multiEventSelection = new Map([...result.multiEventSelection].map(([line, values]) => [line, new Set(values)]));
   session.commit(label, result.chart, beforeSelection);
   return true;
 }
@@ -135,12 +175,13 @@ export function selectionScaleAnchor(snapshot, anchorMode = 0) {
   return (minimum + maximum) / 2;
 }
 
-export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaX = 0, dragX = 0, anchorMode = 0 } = {}) {
+export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaBeatByLine = null, deltaX = 0, dragX = 0, anchorMode = 0 } = {}) {
+  const beatDelta = entry => deltaBeatByLine?.get(entry.lineIndex) ?? deltaBeat;
   if (kind === 'note-move') {
     const minimum = snapshot.notes.reduce((value, entry) => Math.min(value, entry.note.positionX), Infinity);
     const maximum = snapshot.notes.reduce((value, entry) => Math.max(value, entry.note.positionX), -Infinity);
     deltaX = Math.max(Math.min(0, -675 - minimum), Math.min(Math.max(0, 675 - maximum), deltaX));
-    return editCapturedSelection(snapshot, { note: item => ({ ...shiftedTime(item, deltaBeat), positionX: item.positionX + deltaX }) });
+    return editCapturedSelection(snapshot, { note: (item, entry) => ({ ...shiftedTime(item, beatDelta(entry)), positionX: item.positionX + deltaX }) });
   }
   if (kind === 'note-scale') {
     const ordered = snapshot.notes.toSorted((left, right) => beatValue(left.note.startTime) - beatValue(right.note.startTime));
@@ -160,6 +201,6 @@ export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaX = 0, dr
     return editCapturedSelection(snapshot, { note: item => ({ ...item, positionX: anchor + (item.positionX - anchor) * rate }) });
   }
   if (kind === 'note-line') return editCapturedSelection(snapshot, { lineOffset: controlLineOffset(dragX) });
-  if (kind === 'event-move') return editCapturedSelection(snapshot, { event: item => shiftedTime(item, deltaBeat), lineOffset: controlLineOffset(dragX, true) });
-  return editCapturedSelection(snapshot, { event: item => shiftedTime(item, deltaBeat, kind === 'event-start' ? 'start' : 'end') });
+  if (kind === 'event-move') return editCapturedSelection(snapshot, { event: (item, unusedType, entry) => shiftedTime(item, beatDelta(entry)), lineOffset: controlLineOffset(dragX, true) });
+  return editCapturedSelection(snapshot, { event: (item, unusedType, entry) => shiftedTime(item, beatDelta(entry), kind === 'event-start' ? 'start' : 'end') });
 }

@@ -33,7 +33,9 @@ function hint(root, text) { const paragraph = document.createElement('p'); parag
 export class MultiEditPanel {
   constructor(root, getSession, timeline, { close, invalidate, notify }) {
     this.root = root; this.getSession = getSession; this.timeline = timeline;
-    this.close = close; this.invalidate = invalidate; this.notify = notify; this.active = false;
+    this.close = close; this.invalidate = invalidate; this.notify = notify; this.active = false; this.previewHovered = false;
+    root.addEventListener('pointerenter', () => { this.previewHovered = true; this.invalidate(); });
+    root.addEventListener('pointerleave', () => { this.previewHovered = false; this.invalidate(); });
     this.parameters = new MultiEditParameters(globalThis.localStorage, message => notify(message, 'warning'));
   }
 
@@ -72,6 +74,8 @@ export class MultiEditPanel {
     this.updateHistory();
     hint(root, '在左侧选择物件，调整后先看预览，再应用。虚线为结果，原物件保持不变。');
     const mode = control(root, '编辑模式', 'form', [['form', '原版批量编辑'], ['script', '脚本编辑'], ...(kind === 'events' ? [['clone', '克隆（批量复制）']] : [])]);
+    const isMultiEventEdit = kind === 'events' && this.getSession().multiLineActive && this.getSession().multiLineMode === 'events';
+    const applicationMode = isMultiEventEdit ? control(root, '多线应用', 'per-line', [['per-line', '每条线分别应用'], ['global', '总体按时间顺序应用']]) : null;
     const common = document.createElement('div'); root.append(common);
     const filter = control(common, kind === 'notes' ? '音符种类' : '事件种类', kind === 'notes' ? '0' : 'all', kind === 'notes' ? [[0, '全部'], [1, 'Tap'], [2, 'Hold'], [3, 'Flick'], [4, 'Drag']] : EVENT_BATCH_TYPES);
     const condition = control(common, '筛选条件', ''); condition.placeholder = kind === 'notes' ? '例如 x < 0 && t1 >= 4' : '例如 start != end';
@@ -121,6 +125,7 @@ export class MultiEditPanel {
     const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = '返回谱面工具'; actions.append(this.apply, reset, cancel);
     cancel.onclick = () => this.close();
     this.read = () => ({ ...readDistribution(), mode: mode.value, field: field.value, operation: operation.value,
+      eventApplicationMode: applicationMode?.value ?? 'per-line',
       noteType: kind === 'notes' ? Number(filter.value) : 0, eventType: kind === 'events' ? filter.value : 'all',
       condition: condition.value, script: script.value, seed: this.seed, targets: targets.value, increment: increment.value, retainSource: retainSource.checked,
       division: this.timeline.division, channels: Object.fromEntries([...channels].map(([key, read]) => [key, read()])) });
@@ -128,7 +133,7 @@ export class MultiEditPanel {
       form.hidden = mode.value !== 'form'; scriptBox.hidden = mode.value !== 'script'; clone.hidden = mode.value !== 'clone'; common.hidden = mode.value === 'clone';
     };
     this.load = value => {
-      mode.value = value.mode; field.value = value.field; operation.value = value.operation; filter.value = kind === 'notes' ? value.noteType : value.eventType;
+      mode.value = value.mode; field.value = value.field; operation.value = value.operation; if (applicationMode) applicationMode.value = value.eventApplicationMode ?? 'per-line'; filter.value = kind === 'notes' ? value.noteType : value.eventType;
       condition.value = value.condition; script.value = value.script; this.seed = value.seed; targets.value = value.targets; increment.value = value.increment;
       retainSource.checked = value.retainSource !== false;
       readDistribution.write(value); for (const [key, read] of channels) read.write(value.channels?.[key] ?? {});
@@ -159,7 +164,7 @@ export class MultiEditPanel {
     const inspector = root.closest('.inspector'); if (inspector) inspector.scrollTop = 0;
   }
 
-  hide() { this.active = false; this.result = null; this.invalidate(); }
+  hide() { this.active = false; this.result = null; this.previewHovered = false; this.invalidate(); }
 
   sync() {
     if (!this.active || this.committing) return;
@@ -171,7 +176,8 @@ export class MultiEditPanel {
 
   selectionSignature() {
     const session = this.getSession();
-    return `${session.lineIndex}:${session.eventLayer}:${this.timeline.division}:${[...session.selection]}:${[...session.eventSelection]}`;
+    const multiEvents = [...(session.multiEventSelection ?? new Map())].map(([line, values]) => `${line}:${[...values].sort().join(',')}`).sort().join('|');
+    return `${session.lineIndex}:${session.eventLayer}:${this.timeline.division}:${[...session.selection]}:${[...session.eventSelection]}:${multiEvents}`;
   }
 
   refresh() {
@@ -187,7 +193,7 @@ export class MultiEditPanel {
   }
 
   drawTimeline() {
-    if (!this.active || !this.result || !this.previewEnabled.checked) return;
+    if (!this.active || !this.result || !this.previewEnabled.checked || this.previewHovered === false) return;
     const timeline = this.timeline; const session = this.getSession();
     const canvas = this.kind === 'notes' ? timeline.notesCanvas : timeline.eventsCanvas;
     if (!canvas.clientWidth || this.kind === 'events' && timeline.notesOnly) return;
@@ -195,35 +201,40 @@ export class MultiEditPanel {
     context.beginPath(); context.rect(0, this.kind === 'events' ? 23 : 0, canvas.clientWidth, canvas.clientHeight); context.clip();
     const ranges = new Map();
     if (this.kind === 'events') for (const change of this.result.changes) {
-      if (change.lineIndex !== session.lineIndex) continue;
-      const range = ranges.get(change.type) ?? [Infinity, -Infinity];
-      const chain = timeline.chainRanges?.[timeline.eventTypes.indexOf(change.type)]?.get(change.index);
+      const rangeKey = `${change.lineIndex}:${change.type}`;
+      const range = ranges.get(rangeKey) ?? [Infinity, -Infinity];
+      const chain = change.lineIndex === session.lineIndex ? timeline.chainRanges?.[timeline.eventTypes.indexOf(change.type)]?.get(change.index) : null;
       if (Number.isFinite(chain?.min) && Number.isFinite(chain?.max)) { range[0] = Math.min(range[0], chain.min); range[1] = Math.max(range[1], chain.max); }
       for (const item of [change.before, change.after]) if (Number.isFinite(item.start) && Number.isFinite(item.end)) {
         range[0] = Math.min(range[0], item.start, item.end); range[1] = Math.max(range[1], item.start, item.end);
       }
-      ranges.set(change.type, range);
+      ranges.set(rangeKey, range);
     }
     for (const change of this.result.changes) {
-      if (change.lineIndex !== session.lineIndex) continue;
       const item = change.after;
-      const vertical = beat => change.type === 'paintEvents' ? timeline.eventVertical(beat, change.type) : timeline.vertical(beat);
+      const lineIndex = Number.isInteger(change.lineIndex) ? change.lineIndex : session.lineIndex;
+      const multiArea = session.multiLineActive && session.multiLineMode === this.kind;
+      const width = canvas.clientWidth;
+      const panelWidth = multiArea ? timeline.panelWidth(width, this.kind) : width;
+      const panelOffset = multiArea ? timeline.panelIndex(lineIndex, this.kind) * timeline.panelStride(width, this.kind) - timeline.multiLineViewportOffset(width, this.kind) : 0;
+      const vertical = beat => multiArea ? timeline.verticalForLine(beat, lineIndex, canvas.clientHeight) : change.type === 'paintEvents' ? timeline.eventVertical(beat, change.type) : timeline.vertical(beat);
       const top = vertical(beatValue(item.endTime)); const bottom = vertical(beatValue(item.startTime));
       if (top > canvas.clientHeight || bottom < 0) continue;
       if (this.kind === 'notes') {
         context.strokeStyle = NOTE_COLORS[item.type] ?? '#fff';
-        const width = 68 * timeline.renderNoteScale * Math.min(3, Math.max(0.2, item.size ?? 1));
-        const horizontal = timeline.clampNoteHorizontal(timeline.noteHorizontal(item.positionX), width);
-        if (horizontal != null) context.strokeRect(horizontal - width / 2 - 3, Math.max(-10, top - 7), width + 6, Math.min(canvas.clientHeight + 20, Math.max(14, bottom - Math.max(-10, top) + 14)));
+        const noteWidth = timeline.noteWidth(item);
+        const horizontal = timeline.clampNoteHorizontal(timeline.noteHorizontal(item.positionX, lineIndex), noteWidth, canvas.clientWidth, lineIndex);
+        if (horizontal != null) context.strokeRect(horizontal - noteWidth / 2 - 3, Math.max(-10, top - 7), noteWidth + 6, Math.min(canvas.clientHeight + 20, Math.max(14, bottom - Math.max(-10, top) + 14)));
       } else {
         const column = timeline.eventTypes.indexOf(change.type); if (column < 0) continue;
-        const bounds = timeline.eventColumnBounds(column, canvas.clientWidth);
+        const localBounds = timeline.eventColumnBounds(column, panelWidth);
+        const bounds = { x: panelOffset + localBounds.x, width: localBounds.width };
         context.save(); context.beginPath(); context.rect(bounds.x, 23, bounds.width, canvas.clientHeight); context.clip();
         context.strokeStyle = '#a4b0bd'; context.setLineDash([2, 4]); context.lineWidth = 1;
-        drawEventGhost(context, change.before, bounds.x, bounds.width, vertical, ranges.get(change.type));
+        drawEventGhost(context, change.before, bounds.x, bounds.width, vertical, ranges.get(`${lineIndex}:${change.type}`));
         context.fillStyle = '#67e8c022'; context.fillRect(bounds.x, top, bounds.width, Math.max(2, bottom - top));
         context.strokeStyle = '#8effd0'; context.setLineDash([5, 3]); context.lineWidth = 2.5;
-        drawEventGhost(context, item, bounds.x, bounds.width, vertical, ranges.get(change.type));
+        drawEventGhost(context, item, bounds.x, bounds.width, vertical, ranges.get(`${lineIndex}:${change.type}`));
         context.font = '12px RPE, sans-serif'; context.textAlign = 'center';
         const format = value => Number.isFinite(value) ? Number(value.toFixed(3)).toString() : Array.isArray(value) ? value.join(',') : String(value ?? '');
         if (bottom - top > 24) {

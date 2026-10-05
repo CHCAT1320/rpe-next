@@ -34,15 +34,43 @@ export class BatchControls {
     window.addEventListener('blur', () => this.cancel());
   }
 
-  signature(area, session) { return `${session.lineIndex}:${session.eventLayer}:${[...(area === 'notes' ? session.selection : session.eventSelection)].join(',')}`; }
+  signature(area, session) {
+    const map = area === 'notes' ? session.multiLineSelection : session.multiEventSelection;
+    const multi = [...(map ?? new Map())].map(([line, values]) => `${line}:${[...values].sort().join(',')}`).sort().join('|');
+    return `${session.lineIndex}:${session.eventLayer}:${[...(area === 'notes' ? session.selection : session.eventSelection)].join(',')}:${multi}`;
+  }
+
+  panelBounds(area, lineIndex, canvas) {
+    const width = canvas.clientWidth; const panelWidth = this.timeline.panelWidth(width, area);
+    const left = this.timeline.panelIndex(lineIndex, area) * this.timeline.panelStride(width, area) - this.timeline.multiLineViewportOffset(width, area);
+    return { left, right: left + panelWidth, width: panelWidth };
+  }
+
+  selectionBounds(area, snapshot, canvas) {
+    const entries = area === 'notes' ? snapshot.notes : snapshot.events;
+    const indices = [...new Set(entries.map(entry => Number.isInteger(entry.lineIndex) ? entry.lineIndex : snapshot.lineIndex))];
+    if (!indices.length) return this.panelBounds(area, snapshot.lineIndex, canvas);
+    const bounds = indices.map(index => this.panelBounds(area, index, canvas));
+    return { left: Math.min(...bounds.map(value => value.left)), right: Math.max(...bounds.map(value => value.right)), width: Math.max(...bounds.map(value => value.right)) - Math.min(...bounds.map(value => value.left)) };
+  }
+
+  clampPoint(point, bounds, canvas) {
+    return { x: Math.max(-canvas.clientWidth, Math.min(canvas.clientWidth * 2, point.x)), y: Math.max(-canvas.clientHeight, Math.min(canvas.clientHeight * 2, point.y)) };
+  }
 
   sync() {
     const session = this.getSession();
     if (this.active && (session !== this.active.session || session.chart !== this.active.snapshot.chart || this.signature(this.active.area, session) !== this.active.signature || !this.enabled())) this.cancel();
     const stage = this.stage.getBoundingClientRect();
     for (const [area, group] of this.groups) {
-      const selection = area === 'notes' ? session.selection : session.eventSelection;
-      group.host.hidden = !this.enabled() || selection.size < 2;
+      const multiSelection = area === 'notes'
+        ? [...(session.multiLineSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0)
+        : [...(session.multiEventSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0);
+      const selection = area === 'notes' ? multiSelection + session.selection.size : multiSelection + session.eventSelection.size;
+      const multiMode = session.multiLineActive && ((area === 'notes' && session.multiLineMode === 'notes') || (area === 'events' && session.multiLineMode === 'events'));
+      const multiIntent = session.multiSelectionIntent === area;
+      const canShow = multiMode ? multiSelection > 0 && multiIntent : selection >= 2 || (selection > 0 && multiIntent);
+      group.host.hidden = !this.enabled() || !canShow;
       if (this.active || group.host.hidden) continue;
       const canvas = area === 'notes' ? this.timeline.notesCanvas : this.timeline.eventsCanvas;
       const rectangle = canvas.getBoundingClientRect();
@@ -51,7 +79,9 @@ export class BatchControls {
       if (signature === group.signature) continue;
       group.signature = signature;
       const point = area === 'notes' ? this.timeline.cursor : this.timeline.eventCursor;
-      const horizontal = Math.max(20, Math.min(rectangle.width - 26, (point?.x ?? rectangle.width / 2) + 50));
+      const bounds = this.selectionBounds(area, captureSelection(session), canvas);
+      const requested = Math.max(bounds.left + 20, Math.min(bounds.right - 26, (point?.x ?? (bounds.left + bounds.width / 2)) + 50));
+      const horizontal = Math.max(8, Math.min(rectangle.width - 26, requested));
       const vertical = Math.max(25, Math.min(rectangle.height - 97, (point?.y ?? rectangle.height / 2) - 30));
       group.host.style.left = `${rectangle.left - stage.left + horizontal}px`;
       group.host.style.top = `${rectangle.top - stage.top + vertical}px`;
@@ -62,38 +92,64 @@ export class BatchControls {
     if (event.button !== 0 || this.active || !this.enabled()) return;
     event.preventDefault(); event.stopPropagation();
     const session = this.getSession(); const snapshot = captureSelection(session);
-    if ((area === 'notes' ? snapshot.notes : snapshot.events).length < 2) return;
+    const selectedEntries = area === 'notes' ? snapshot.notes : snapshot.events;
+    const multiMode = session.multiLineActive && ((area === 'notes' && session.multiLineMode === 'notes') || (area === 'events' && session.multiLineMode === 'events'));
+    const multiIntent = session.multiSelectionIntent === area;
+    if (selectedEntries.length < (multiMode ? (multiIntent ? 1 : Number.POSITIVE_INFINITY) : (multiIntent ? 1 : 2))) return;
     if (area === 'notes') snapshot.events = []; else snapshot.notes = [];
     this.timeline.cancelPlacement();
     for (const animation of button.getAnimations()) animation.cancel();
     button.style.transform = '';
     const canvas = area === 'notes' ? this.timeline.notesCanvas : this.timeline.eventsCanvas;
-    const point = this.timeline.point(event, canvas);
-    this.active = { session, snapshot, kind, button, area, signature: this.signature(area, session), pointerId: event.pointerId, start: point, point, canvas,
-      unit: Math.max(0.35, canvas.clientHeight / 1080), factor: session.line.bpmfactor ?? 1,
-      startBeat: this.timeline.snappedBeat(point.y), startX: this.timeline.positionAt(point.x) };
+    const rawPoint = this.timeline.point(event, canvas);
+    const bounds = this.selectionBounds(area, snapshot, canvas);
+    const firstEntry = (area === 'notes' ? snapshot.notes : snapshot.events)[0];
+    const activeLineIndex = Number.isInteger(firstEntry?.lineIndex) ? firstEntry.lineIndex : session.lineIndex;
+    const point = this.clampPoint(rawPoint, bounds, canvas);
+    this.active = { session, snapshot, kind, button, area, lineIndex: activeLineIndex, bounds, signature: this.signature(area, session), pointerId: event.pointerId, start: point, point, canvas,
+      unit: Math.max(0.35, canvas.clientHeight / 1080), factor: session.chart.judgeLineList?.[activeLineIndex]?.bpmfactor ?? 1,
+      startBeat: this.timeline.tempo.beat(this.timeline.tempo.seconds(this.timeline.origin, session.chart.judgeLineList?.[activeLineIndex]?.bpmfactor ?? 1) + (canvas.clientHeight - 42 - point.y) / this.timeline.scale, session.chart.judgeLineList?.[activeLineIndex]?.bpmfactor ?? 1), startX: typeof this.timeline.notePositionAt === 'function' ? this.timeline.notePositionAt(point.x, activeLineIndex) : point.x };
     this.timeline.scaleAxis = kind === 'note-scale' ? selectionScaleAnchor(snapshot, this.anchorMode) : null;
+    this.timeline.scaleAxisLine = kind === 'note-scale' ? activeLineIndex : null;
     button.setPointerCapture(event.pointerId); this.timeline.changed();
   }
 
   move(event) {
     if (!this.active || event.pointerId !== this.active.pointerId) return;
-    event.preventDefault(); this.active.point = this.timeline.point(event, this.active.canvas); this.update();
+    event.preventDefault(); this.active.point = this.clampPoint(this.timeline.point(event, this.active.canvas), this.active.bounds, this.active.canvas); this.update();
   }
 
   update() {
     const active = this.active; if (!active) return;
     const { point, start, kind, snapshot, factor } = active;
     this.timeline.scaleAxis = kind === 'note-scale' ? selectionScaleAnchor(snapshot, this.anchorMode) : null;
+    this.timeline.scaleAxisLine = kind === 'note-scale' ? active.lineIndex : null;
     const deltaX = point.x - start.x; const deltaY = point.y - start.y;
     active.button.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
     const seconds = this.timeline.tempo.seconds(this.timeline.origin, factor) + (active.canvas.clientHeight - 42 - point.y) / this.timeline.scale;
     const deltaBeat = beatValue(snapTime(seconds, this.timeline.division, this.timeline.tempo, factor)) - active.startBeat;
-    const result = controlSelection(snapshot, kind, { deltaBeat, deltaX: this.timeline.positionAt(point.x) - active.startX, dragX: deltaX / active.unit, anchorMode: this.anchorMode });
+    const deltaEntries = active.area === 'notes' ? snapshot.notes : snapshot.events;
+    const deltaBeatByLine = new Map([...new Set(deltaEntries.map(entry => entry.lineIndex))].map(lineIndex => {
+      const lineFactor = typeof this.timeline.factorForLine === 'function'
+        ? this.timeline.factorForLine(lineIndex)
+        : active.factor;
+      const startSeconds = this.timeline.tempo.seconds(this.timeline.origin, lineFactor) + (active.canvas.clientHeight - 42 - start.y) / this.timeline.scale;
+      const currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, lineFactor) + (active.canvas.clientHeight - 42 - point.y) / this.timeline.scale;
+      return [lineIndex, beatValue(snapTime(currentSeconds, this.timeline.division, this.timeline.tempo, lineFactor)) - beatValue(snapTime(startSeconds, this.timeline.division, this.timeline.tempo, lineFactor))];
+    }));
+    const panelWidth = active.area === 'notes'
+      ? (typeof this.timeline.panelWidth === 'function' ? this.timeline.panelWidth(active.canvas.clientWidth, 'notes') : active.canvas.clientWidth)
+      : 0;
+    const inset = active.area === 'notes'
+      ? (typeof this.timeline.noteInset === 'function' ? this.timeline.noteInset(panelWidth) : 0)
+      : 0;
+    const contentWidth = Math.max(1, panelWidth - inset * 2);
+    const logicalDeltaX = active.area === 'notes' ? deltaX / contentWidth * 1350 : 0;
+    const result = controlSelection(snapshot, kind, { deltaBeat, deltaBeatByLine, deltaX: logicalDeltaX, dragX: deltaX / active.unit, anchorMode: this.anchorMode });
     active.result = result;
     const view = Object.create(active.session);
     Object.defineProperty(view, 'chart', { value: result.chart });
-    Object.assign(view, { lineIndex: result.lineIndex, selection: result.selection, eventSelection: result.eventSelection });
+    Object.assign(view, { lineIndex: result.lineIndex, selection: result.selection, eventSelection: result.eventSelection, multiLineSelection: result.multiLineSelection, multiEventSelection: result.multiEventSelection });
     this.timeline.bulkPreview = { ...result, session: view };
     this.groups.get(active.area).hint.textContent = result.lineIndex !== snapshot.lineIndex ? `线 ${snapshot.lineIndex} → ${result.lineIndex}` : kind === 'note-scale' ? '横向缩放' : `Δ ${deltaBeat.toFixed(3)} 拍`;
     this.timeline.changed();
@@ -102,7 +158,7 @@ export class BatchControls {
   end(event) {
     const active = this.active; if (!active || event.pointerId !== active.pointerId) return;
     this.move(event);
-    this.timeline.bulkPreview = null; this.timeline.scaleAxis = null;
+    this.timeline.bulkPreview = null; this.timeline.scaleAxis = null; this.timeline.scaleAxisLine = null;
     try {
       if (Math.hypot(active.point.x - active.start.x, active.point.y - active.start.y) > 3) {
         if (this.getSession() !== active.session || active.session.chart !== active.snapshot.chart || this.signature(active.area, active.session) !== active.signature) throw new Error('选中内容已改变，已取消拖动');
@@ -131,6 +187,6 @@ export class BatchControls {
 
   cancel() {
     const active = this.active; if (!active) return;
-    this.active = null; this.timeline.bulkPreview = null; this.timeline.scaleAxis = null; this.returnBall(active); this.timeline.changed();
+    this.active = null; this.timeline.bulkPreview = null; this.timeline.scaleAxis = null; this.timeline.scaleAxisLine = null; this.returnBall(active); this.timeline.changed();
   }
 }

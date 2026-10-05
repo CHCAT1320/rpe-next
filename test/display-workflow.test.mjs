@@ -50,6 +50,27 @@ test('粒子四个、原时长和指数扩散，定位采样结果确定', () =>
 });
 
 function canvas() { return { clientWidth: 500, clientHeight: 600, style: {}, addEventListener() {}, focus() {}, setPointerCapture() {}, getBoundingClientRect() { return { left: 0, top: 0 }; } }; }
+test('合并多线音符命中绘制在当前线之外的目标线', () => {
+  const chart = createChart(); chart.judgeLineList.push(structuredClone(chart.judgeLineList[0]));
+  chart.judgeLineList[0].notes = [createNote(1, 1, 0)];
+  chart.judgeLineList[1].notes = [createNote(1, 1, 0)];
+  const session = new EditorSession(chart); session.setMultiLineEnabled(true); session.addMultiLine(1); session.selectLine(0);
+  const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {}); timeline.origin = 0; timeline.scale = 144;
+  const hit = timeline.hit({ x: timeline.noteHorizontal(0, 0), y: timeline.verticalForLine(1, 0) });
+  assert.equal(hit.lineIndex, 1);
+});
+
+test('多线框选横向滚动时保留绝对起点', () => {
+  const chart = createChart(); chart.judgeLineList.push(structuredClone(chart.judgeLineList[0]));
+  const session = new EditorSession(chart); session.setMultiLineEnabled(true); session.addMultiLine(1); session.setMultiLineMerge(false);
+  const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {}); timeline.multiLineWidth = 400;
+  const start = { button: 0, shiftKey: true, clientX: 80, clientY: 380 };
+  timeline.down(start); const initial = timeline.drag.startWorldX;
+  timeline.multiLineScroll = 80; timeline.move({ clientX: 300, clientY: 420 });
+  assert.equal(timeline.drag.startWorldX, initial);
+  assert.equal(timeline.drag.currentWorldX, 380);
+});
+
 test('Shift 两次点击框选，左拖轨迹增选、右拖轨迹减选；Y 缩放不依赖 BPM', () => {
   const session = new EditorSession(); session.insertNotes([createNote(1, 2, 0)]); session.selection.clear();
   const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {});
