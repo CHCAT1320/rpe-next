@@ -74,9 +74,32 @@ const programCount = Object.values(manifest.programs).reduce((sum, programs) => 
 if (programCount !== 13) throw new Error(`期望 13 个 program，实际 ${programCount} 个`);
 
 await writeFile(join(output, 'shaders.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+
+// Material tuning values come from the same dump. Transcribing them by hand was already shown to be
+// unreliable — a dozen floats and `_DisplaceDirection` were wrong — so they are generated too. All
+// eight block materials are keyed here by their shader, which is stable, rather than by the scene's
+// `pathID` numbering.
+const SHADER_NAMES = {
+  38: 'ActiveBlock', 40: 'BlockCompose', 39: 'DisabledBlock', 34: 'EdgeMask',
+  32: 'GlowMask', 36: 'ReadyBlock', 35: 'SubtractBlockBlender', 33: 'TouchEffect',
+};
+const params = JSON.parse(await readFile(join(dump, 'block-params.json'), 'utf8'));
+const materials = {};
+for (const material of Object.values(params.materials)) {
+  const name = SHADER_NAMES[material.shader_pathID];
+  if (!name) throw new Error(`未知的 shader pathID ${material.shader_pathID}`);
+  const colors = {};
+  for (const [key, value] of Object.entries(material.colors ?? {})) colors[key] = [value.r, value.g, value.b, value.a];
+  materials[name] = { pathID: material.pathID, shaderPathID: material.shader_pathID, floats: material.floats ?? {}, colors };
+}
+const materialCount = Object.keys(materials).length;
+if (materialCount !== Object.keys(SHADER_NAMES).length) throw new Error(`期望 ${Object.keys(SHADER_NAMES).length} 个材质，实际 ${materialCount} 个`);
+await writeFile(join(output, 'materials.json'), `${JSON.stringify({ source: manifest.source, materials }, null, 2)}\n`);
+manifest.files.push({ path: 'materials.json', materials: Object.keys(materials) });
+
 for (const name of TEXTURES) {
   await copyFile(join(textureSource, name), join(output, name));
   manifest.files.push({ path: name, sha256: createHash('sha256').update(await readFile(join(textureSource, name))).digest('hex') });
 }
 await writeFile(join(output, 'manifest.json'), `${JSON.stringify({ source: manifest.source, files: manifest.files }, null, 2)}\n`);
-console.log(`已提取 ${programCount} 个 program / ${names.length} 个文件，并复制 ${TEXTURES.length} 张贴图到 public/assets/rpe/block/`);
+console.log(`已提取 ${programCount} 个 program / ${names.length} 个文件，${materialCount} 个材质参数，并复制 ${TEXTURES.length} 张贴图到 public/assets/rpe/block/`);

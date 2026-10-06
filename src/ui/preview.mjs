@@ -256,10 +256,13 @@ export class Preview {
   async ensureBlockPipeline() {
     if (this.blockPipeline) return this.blockPipeline;
     const base = `${import.meta.env?.BASE_URL ?? '/'}assets/rpe/block/`;
-    const shaders = await (await fetch(`${base}shaders.json`)).json();
+    const [shaders, materials] = await Promise.all([
+      fetch(`${base}shaders.json`).then((response) => response.json()),
+      fetch(`${base}materials.json`).then((response) => response.json()),
+    ]);
     const canvas = document.createElement('canvas');
     const pipeline = new BlockPipeline();
-    if (!pipeline.ensure(canvas, shaders)) throw new Error(pipeline.lastError || '块管线不可用');
+    if (!pipeline.ensure(canvas, shaders, materials)) throw new Error(pipeline.lastError || '块管线不可用');
     await pipeline.loadImages(base);
     this.blockCanvas = canvas;
     this.blockPipeline = pipeline;

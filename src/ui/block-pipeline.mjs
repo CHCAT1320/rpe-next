@@ -134,41 +134,40 @@ const TEXTURE_ST = {
   TouchEffect: { _DisplaceMap: [0.55, 0.30], _NoiseMap: [1.50, 1.46] },
 };
 
-/** Material scalars read straight out of block-params.json. */
-const MATERIAL_UNIFORMS = {
-  ActiveBlock: {
-    _EdgeColor: [1, 0.33018857, 0.33018857, 1], _EdgeOpacity: 0.8,
-    _FillColor: [0.71320748, 0.23549296, 0.23549296, 1], _FillOpacity: 0.667, _FillStrength: 0.667,
-    _GlowColor: [1, 0.17924517, 0.17924517, 1], _GlowIntensity: 0.8,
-    _SparkTint: [1, 0.28490567, 0.28490567, 1], _SparkMapOpacity: 5.69,
-    _SparkHueShiftAmount: 0, _SparkDisplaceIntensity: 0, _DisplaceBlendIntensity: 0.411,
-    _DisplaceSpeed: 1.5, _DisplaceStrength: 0.15, _DisplaceDirection: [0.5, 0.5, 0, 0],
-    _BackgroundPixelScale: 6, _TouchPosCount: 0, _TouchPosShine: 1,
-    _TouchPosRadius: 0.5, _TouchPosSDFSmoothness: 0.47, _TouchPosSDFFalloff: 0.41,
-    _TouchDisplaceSpeed: 0, _TouchDisplaceStrength: 0,
-    _NoiseEvoSpeed: 0, _NoiseDirChangeSpeed: 60, _NoiseDisplaceStrength: 0, _NoiseRadius: 0.5,
-    _NoiseSmoothness: 0.5, _SDFCellSize: 1, _SDFSmoothness: 0.5, _SDFFalloff: 0.5, _SDFMoveSpeed: 9.3,
-  },
-  DisabledBlock: {
-    _FillColor: [0.497, 0.1377, 0.1377, 1], _FillOpacity: 0.4,
-    _SparkTint: [0.3113, 0.0778, 0.0778, 1], _SparkMapOpacity: 3.5,
-    _DisplaceSpeed: 0, _DisplaceStrength: 0, _SparkDisplaceIntensity: 0,
-    _DisplaceBlendIntensity: 0, _SparkHueShiftAmount: 0, _BackgroundPixelScale: 6,
-  },
-  ReadyBlock: { _ShineColor: [1, 1, 1, 1], _ShineBrightness: 0.12, _ShineSpeed: 37.9 },
-  SubtractBlockBlender: { _ClampThresholdLow: 0.09, _ClampThresholdHigh: 0.12 },
-  TouchEffect: { _DisplaceSpeed: 0, _DisplaceStrength: 0, _DisplaceDirection: [0.5, 0.5, 0, 0], _NoiseEvoSpeed: 1, _NoiseDirChangeSpeed: 60, _NoiseDisplaceStrength: 0, _NoiseRadius: 0.5, _NoiseSmoothness: 0.5, _SDFCellSize: 1, _SDFSmoothness: 0.5, _SDFFalloff: 0.5, _SDFMoveSpeed: 9.3 },
-};
+// Material tuning values are NOT transcribed here. `tools/copy-block-assets.mjs` generates
+// `public/assets/rpe/block/materials.json` straight from the dump's material table, because
+// hand-copying them proved wrong for a dozen floats and for `_DisplaceDirection`.
 
-/** Glow ring weights: `(glowRadius − p)^falloff / Σ`, stopping below the pass threshold. */
-export function glowRingWeights(radius = 6, falloff = 2.65, threshold = 0.01) {
-  const raw = [];
-  for (let pass = 0; pass <= radius; pass++) raw.push((radius - pass) ** falloff);
-  const total = raw.reduce((sum, value) => sum + value, 0);
-  const weights = [];
-  for (const value of raw) {
-    const weight = value / total;
-    if (weight >= threshold) weights.push(weight);
+/**
+ * Port of `GetGlowRingWeight`.
+ *
+ * Its two epsilons are `.rodata` constants, **not** the named tuning fields — the dump's own
+ * erratum corrects an earlier reading of this: `kEpsFalloff = 0.001`, `kEpsSum = 1e-6`. With
+ * `glowRadius = 6` and `glowWeightFalloff = 2.65` the rings weigh
+ * 0.4586 / 0.2829 / 0.1566 / 0.0731 / 0.0249 / 0.0040, so the 0.01 pass threshold cuts the sixth.
+ */
+export function glowRingWeight(passIndex, glowRadius = 6, falloff = 2.65) {
+  const kEpsFalloff = 0.001;
+  const kEpsSum = 1e-6;
+  if (glowRadius < 1) return 0;
+  if (falloff > kEpsFalloff) {
+    let sum = 0;
+    for (let ring = glowRadius; ring > 0; ring--) sum += ring ** falloff;
+    if (sum > kEpsSum) return (glowRadius - passIndex) ** falloff / sum;
+  }
+  return 1 / glowRadius;
+}
+
+/** The rings `RenderEffects` actually issues, i.e. those not below the pass threshold. */
+export function glowRingWeights(glowRadius = 6, falloff = 2.65, threshold = 0.01) {
+  if (glowRadius < 1) return [];
+  const first = glowRingWeight(0, glowRadius, falloff);
+  if (first < threshold) return [];
+  const weights = [first];
+  for (let pass = 1; pass < glowRadius; pass++) {
+    const weight = glowRingWeight(pass, glowRadius, falloff);
+    if (weight < threshold) break;
+    weights.push(weight);
   }
   return weights;
 }
@@ -204,12 +203,19 @@ export class BlockPipeline {
     // fully pinned down, so the passes below stay callable but unwired by default rather than
     // guessed into the frame.
     this.optionalStages = false;
+    // `BlockRender` tuning fields from data.md. The edge dilates one round; the glow is nominally
+    // six, but the sixth ring's weight (0.0040) sits below the pass threshold, so five run.
+    this.edgeSize = 1;
+    this.glowRadius = 6;
+    this.glowWeightFalloff = 2.65;
+    this.glowPassWeightThreshold = 0.01;
   }
 
-  /** Wire up WebGL and compile the vendored programs. Safe to call repeatedly. */
-  ensure(canvas, shaders) {
+  /** Wire up WebGL, compile the vendored programs and take the generated material table. */
+  ensure(canvas, shaders, materials = null) {
     if (this.canvas === canvas && this.gl) return true;
     this.canvas = canvas;
+    this.materials = materials?.materials ?? null;
     let gl = null;
     try {
       gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: true, antialias: false });
@@ -481,20 +487,37 @@ export class BlockPipeline {
 
   applyMaterial(program, material, seconds) {
     const gl = this.gl;
-    gl.uniform4f(program.uniforms.get('_Time'), seconds / 20, seconds, seconds * 2, seconds * 3);
-    gl.uniform4f(program.uniforms.get('_ScreenParams'), this.canvas.width, this.canvas.height, 1 / this.canvas.width, 1 / this.canvas.height);
-    gl.uniform4f(program.uniforms.get('_ProjectionParams'), 1, 0, 0, 0);
-    gl.uniform4f(program.uniforms.get('_EffectRT_TexelSize'),
-      1 / this.targets.get('effectRT').width, 1 / this.targets.get('effectRT').height,
-      this.targets.get('effectRT').width, this.targets.get('effectRT').height);
-    for (const [name, value] of Object.entries(MATERIAL_UNIFORMS[material] ?? {})) {
-      const location = program.uniforms.get(name);
-      if (location == null) continue;
-      if (typeof value === 'number') gl.uniform1f(location, value);
-      else if (value.length === 3) gl.uniform3fv(location, value);
-      else if (value.length === 4) gl.uniform4fv(location, value);
-      else gl.uniform2fv(location, value);
+    const set4f = (name, ...values) => { const location = program.uniforms.get(name); if (location != null) gl.uniform4f(location, ...values); };
+    set4f('_Time', seconds / 20, seconds, seconds * 2, seconds * 3);
+    set4f('_ScreenParams', this.canvas.width, this.canvas.height, 1 / this.canvas.width, 1 / this.canvas.height);
+    set4f('_ProjectionParams', 1, 0, 0, 0);
+    const effect = this.targets.get('effectRT');
+    set4f('_EffectRT_TexelSize', 1 / effect.width, 1 / effect.height, effect.width, effect.height);
+
+    const values = this.materials?.[material];
+    if (values) {
+      for (const [name, value] of Object.entries(values.floats)) {
+        const location = program.uniforms.get(name);
+        if (location != null) gl.uniform1f(location, value);
+      }
+      for (const [name, value] of Object.entries(values.colors)) {
+        const location = program.uniforms.get(name);
+        if (location != null) gl.uniform4fv(location, value);
+      }
     }
+
+    // `UpdateTouchPos` recomputes the shine every frame instead of reading it from the material.
+    const shine = program.uniforms.get('_TouchPosShine');
+    if (shine != null) gl.uniform1f(shine, this.touchShine(seconds));
+  }
+
+  /** `UpdateTouchPos`: `lerp(lowThreshold, 1, 0.5 + 0.5·sin(shineSpeed·t)) · brightness`. */
+  touchShine(seconds) {
+    const floats = this.materials?.ActiveBlock?.floats ?? {};
+    const low = floats._TouchPosLowThreshold ?? 0;
+    const speed = floats._TouchPosShineSpeed ?? 0;
+    const brightness = floats._TouchPosBrightness ?? 1;
+    return (low + (1 - low) * (0.5 + 0.5 * Math.sin(speed * seconds))) * brightness;
   }
 
   /**
@@ -604,55 +627,69 @@ export class BlockPipeline {
    */
   renderEffects(sourceMask, seconds) {
     const gl = this.gl;
-    const edgePasses = this.edgeSize ?? 1;
-    if (edgePasses <= 1) {
-      // edgeSize == 1 short-circuits to a single pass that also subtracts `_ComposeRT`.
-      this.bindTarget('effectRT');
-      gl.enable(gl.BLEND);
-      const program = this.use('EdgeMask', 1);
-      this.applyMaterial(program, 'EdgeMask', seconds);
-      gl.uniform4f(program.uniforms.get('_DilateTexelSize'), 1 / this.targets.get(sourceMask).width, 1 / this.targets.get(sourceMask).height, this.targets.get(sourceMask).width, this.targets.get(sourceMask).height);
-      this.fullscreen(program, { textures: { _MainTex: this.targets.get(sourceMask), _ComposeRT: this.targets.get('composedEnabledBlockRT') } });
-    } else {
-      let from = sourceMask;
-      for (let pass = 0; pass < edgePasses; pass++) {
-        const to = pass === edgePasses - 1 ? 'effectRT' : 'pingA';
-        this.bindTarget(to);
-        gl.enable(gl.BLEND);
-        const program = this.use('EdgeMask', pass === edgePasses - 1 ? 1 : 0);
+    const effect = this.targets.get('effectRT');
+    const compose = this.targets.get(sourceMask);
+    // `RenderEffects` clears its destination up front, and `UpdateDilateTexelSize` derives the
+    // texel size from `effectRT` — not from the source mask, which is the natural but wrong guess.
+    this.clearTarget('effectRT');
+    const dilate = [1 / effect.width, 1 / effect.height, effect.width, effect.height];
+
+    if (this.edgeSize >= 1) {
+      if (this.edgeSize === 1) {
+        // One round short-circuits to pass 1, which also folds in `_ComposeRT`.
+        this.beginPass('effectRT');
+        const program = this.use('EdgeMask', 1);
         this.applyMaterial(program, 'EdgeMask', seconds);
-        const source = this.targets.get(from);
-        gl.uniform4f(program.uniforms.get('_DilateTexelSize'), 1 / source.width, 1 / source.height, source.width, source.height);
-        this.fullscreen(program, { textures: { _MainTex: source, _ComposeRT: this.targets.get('composedEnabledBlockRT') } });
-        from = to;
+        gl.uniform4fv(program.uniforms.get('_DilateTexelSize'), dilate);
+        this.fullscreen(program, { textures: { _MainTex: compose, _ComposeRT: compose } });
+      } else {
+        let from = sourceMask;
+        let to = 'pingA';
+        for (let pass = 0; pass < this.edgeSize; pass++) {
+          const last = pass === this.edgeSize - 1;
+          this.beginPass(last ? 'effectRT' : to);
+          const program = this.use('EdgeMask', last ? 1 : 0);
+          this.applyMaterial(program, 'EdgeMask', seconds);
+          gl.uniform4fv(program.uniforms.get('_DilateTexelSize'), dilate);
+          this.fullscreen(program, { textures: { _MainTex: this.targets.get(from), _ComposeRT: compose } });
+          from = to;
+          to = to === 'pingA' ? 'pingB' : 'pingA';
+        }
       }
     }
 
-    // GlowMask: weighted dilation, ping-ponging between pingA and pingB, then a final `.y`-only
-    // write into effectRT that preserves the edge already there.
-    this.clearTarget('pingA');
-    this.clearTarget('pingB');
-    const weights = glowRingWeights(this.glowRadius ?? 6, 2.65, 0.01);
-    let from = sourceMask;
-    let to = 'pingA';
-    for (const [pass, weight] of weights.entries()) {
-      this.bindTarget(to);
-      gl.enable(gl.BLEND);
-      const program = this.use('GlowMask', 0);
-      this.applyMaterial(program, 'GlowMask', seconds);
-      const source = this.targets.get(from);
-      gl.uniform4f(program.uniforms.get('_DilateTexelSize'), 1 / source.width, 1 / source.height, source.width, source.height);
-      gl.uniform1f(program.uniforms.get('_PassWeight'), weight);
-      gl.uniform1f(program.uniforms.get('_GlowFirstPass'), pass === 0 ? 1 : 0);
-      this.fullscreen(program, { textures: { _MainTex: source, _ComposeRT: this.targets.get('composedEnabledBlockRT') } });
-      from = to;
-      to = to === 'pingA' ? 'pingB' : 'pingA';
+    // GlowMask: weighted dilation ping-ponging between pingA and pingB, then a final `.y`-only write
+    // into `effectRT` that preserves the edge already sitting in `.x`.
+    if (this.glowRadius >= 1) {
+      this.clearTarget('pingA');
+      this.clearTarget('pingB');
+      let weight = glowRingWeight(0, this.glowRadius, this.glowWeightFalloff);
+      // If even the first ring is below the threshold the whole glow stage is skipped.
+      if (weight >= this.glowPassWeightThreshold) {
+        let pass = 1;
+        let from = sourceMask;
+        let to = 'pingA';
+        for (;;) {
+          this.beginPass(to);
+          const program = this.use('GlowMask', 0);
+          this.applyMaterial(program, 'GlowMask', seconds);
+          gl.uniform4fv(program.uniforms.get('_DilateTexelSize'), dilate);
+          gl.uniform1f(program.uniforms.get('_PassWeight'), weight);
+          gl.uniform1f(program.uniforms.get('_GlowFirstPass'), pass === 1 ? 1 : 0);
+          this.fullscreen(program, { textures: { _MainTex: this.targets.get(from), _ComposeRT: compose } });
+          from = to;
+          to = to === 'pingA' ? 'pingB' : 'pingA';
+          if (pass >= this.glowRadius) break;
+          weight = glowRingWeight(pass, this.glowRadius, this.glowWeightFalloff);
+          pass += 1;
+          if (weight < this.glowPassWeightThreshold) break;
+        }
+        this.beginPass('effectRT');
+        const final = this.use('GlowMask', 1);
+        this.applyMaterial(final, 'GlowMask', seconds);
+        this.fullscreen(final, { textures: { _MainTex: this.targets.get(from) } });
+      }
     }
-    this.bindTarget('effectRT');
-    gl.enable(gl.BLEND);
-    const final = this.use('GlowMask', 1);
-    this.applyMaterial(final, 'GlowMask', seconds);
-    this.fullscreen(final, { textures: { _MainTex: this.targets.get(from) } });
   }
 
   /**
@@ -749,7 +786,9 @@ export class BlockPipeline {
     const count = program.uniforms.get('_TouchPosCount');
     if (count != null) gl.uniform1i(count, positions.length);
     for (const [index, position] of positions.slice(0, 10).entries()) {
-      const location = program.uniforms.get(`_TouchPos[${index}]`);
+      // `getActiveUniform` reports array elements as `_TouchPos[0]`, whose location is the base of
+      // the array; consecutive elements follow contiguously.
+      const location = program.uniforms.get(index === 0 ? '_TouchPos' : `_TouchPos[${index}]`);
       if (location != null) gl.uniform2f(location, position.x, position.y);
     }
     this.fullscreen(program, {

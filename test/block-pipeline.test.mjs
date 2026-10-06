@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { BlockPipeline, RENDER_TARGETS, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
+import { BlockPipeline, RENDER_TARGETS, glowRingWeight, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
 import { blockTransform, blockState } from '../src/core/block-area.mjs';
 
 const shaders = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/shaders.json', import.meta.url), 'utf8'));
+const materials = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/materials.json', import.meta.url), 'utf8'));
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/block-area.json', import.meta.url), 'utf8'));
 
 /**
@@ -76,7 +77,7 @@ function stubGl() {
 function makePipeline(gl) {
   const canvas = { width: 1600, height: 900, getContext: () => gl };
   const pipeline = new BlockPipeline();
-  assert.equal(pipeline.ensure(canvas, shaders), true, pipeline.lastError);
+  assert.equal(pipeline.ensure(canvas, shaders, materials), true, pipeline.lastError);
   // Map the GL handle back to `key#index` so pass order is assertable: useProgram is handed the
   // raw handle, which carries no metadata of its own.
   for (const [key, programs] of pipeline.programs) {
@@ -96,11 +97,21 @@ const viewport = { left: 0, top: 0, width: 1600, height: 900 };
 
 test('光晕权重复现文档的 5 圈数值', () => {
   const weights = glowRingWeights(6, 2.65, 0.01);
-  assert.equal(weights.length, 5, '第 6 圈低于阈值应被丢弃');
+  assert.equal(weights.length, 5, '第 6 圈权重低于阈值应被丢弃');
   for (const [index, expected] of [0.4586, 0.2829, 0.1566, 0.0731, 0.0249].entries()) {
     assert.ok(Math.abs(weights[index] - expected) < 5e-5, `第 ${index} 圈: ${weights[index]} != ${expected}`);
   }
-  assert.equal(glowRingWeights(6, 2.65, 0).length, 7, '阈值为 0 时保留全部 7 轮');
+  // `GetGlowRingWeight` itself, including the ring the threshold cuts.
+  for (const [index, expected] of [0.4586, 0.2829, 0.1566, 0.0731, 0.0249, 0.004].entries()) {
+    assert.ok(Math.abs(glowRingWeight(index, 6, 2.65) - expected) < 5e-5, `ring ${index}: ${glowRingWeight(index, 6, 2.65)} != ${expected}`);
+  }
+  // The loop runs passes 0..glowRadius-1, and `glowRadius` itself weighs 0.
+  assert.equal(glowRingWeight(6, 6, 2.65), 0);
+  assert.equal(glowRingWeights(6, 2.65, 0).length, 6, '阈值为 0 时保留 6 轮');
+  assert.deepEqual(glowRingWeights(6, 2.65, 0.5), [], '首圈低于阈值则整段跳过');
+  assert.deepEqual(glowRingWeights(0, 2.65, 0.01), [], 'glowRadius < 1 时无辉光');
+  // Falloff at or below kEpsFalloff degenerates to a uniform 1/glowRadius.
+  assert.equal(glowRingWeight(2, 4, 0.001), 0.25);
 });
 
 test('RT 表与反汇编一致：13 张，掩码 Screen/8、效果 Screen/4、只有 effectRT 用线性过滤', () => {
@@ -295,6 +306,41 @@ test('减法混合器的双阈值常量来自材质资产', () => {
   assert.equal(attribution(0.1), 1, '减块落在两阈值之间');
   assert.equal(attribution(1.0), 0, '普通块高于两阈值');
   assert.equal(attribution(0.05), 0, '空处低于两阈值');
+});
+
+test('材质参数由 dump 生成，不再手抄', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  // `BlockCompose` had no entry at all while these were transcribed by hand, so the liquid
+  // displacement — the shader's entire point — contributed nothing.
+  // The dump stores float32, so compare with a tolerance that reflects that rather than 1e-9.
+  const near = (actual, expected) => Math.abs(actual - expected) < 1e-6;
+  assert.ok(near(pipeline.materials.BlockCompose.floats._DisplaceSpeed, 2.59), String(pipeline.materials.BlockCompose.floats._DisplaceSpeed));
+  assert.ok(near(pipeline.materials.BlockCompose.floats._DisplaceStrength, 0.1));
+  // Values that were simply wrong when hand-copied.
+  const active = pipeline.materials.ActiveBlock.floats;
+  assert.equal(active._NoiseDisplaceStrength, 1);
+  assert.equal(active._NoiseSmoothness, 1);
+  assert.ok(near(active._SDFCellSize, 0.11));
+  assert.ok(near(active._SDFFalloff, 0.34));
+  assert.ok(near(active._SparkDisplaceIntensity, 2.39));
+  assert.ok(near(active._SparkHueShiftAmount, 0.2));
+  assert.ok(near(active._TouchDisplaceSpeed, 2.9));
+  assert.deepEqual(pipeline.materials.ActiveBlock.colors._DisplaceDirection, [1, 1, 0, 0]);
+  assert.ok(near(pipeline.materials.ActiveBlock.colors._EdgeColor[1], 0.3301885724067688));
+  assert.ok(near(pipeline.materials.ActiveBlock.colors._FillColor[0], 0.713207483291626));
+  // All eight materials the pipeline names by hand must exist in the generated table.
+  for (const name of ['ActiveBlock', 'BlockCompose', 'DisabledBlock', 'EdgeMask', 'GlowMask', 'ReadyBlock', 'SubtractBlockBlender', 'TouchEffect']) {
+    assert.ok(pipeline.materials[name], `缺少材质 ${name}`);
+  }
+  assert.ok(near(pipeline.materials.SubtractBlockBlender.floats._ClampThresholdLow, 0.09));
+  assert.ok(near(pipeline.materials.SubtractBlockBlender.floats._ClampThresholdHigh, 0.12));
+  // `UpdateTouchPos` recomputes the shine each frame rather than reading it from the material.
+  const low = active._TouchPosLowThreshold;
+  const expected = (low + (1 - low) * 0.5) * active._TouchPosBrightness;
+  assert.ok(near(pipeline.touchShine(0), expected), `${pipeline.touchShine(0)} != ${expected}`);
+  // At a sine peak the shine saturates at the brightness multiplier.
+  assert.ok(near(pipeline.touchShine(Math.PI / 2 / active._TouchPosShineSpeed), active._TouchPosBrightness));
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {

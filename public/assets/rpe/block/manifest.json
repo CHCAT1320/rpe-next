@@ -38,6 +38,19 @@
       "programs": 1
     },
     {
+      "path": "materials.json",
+      "materials": [
+        "ActiveBlock",
+        "BlockCompose",
+        "DisabledBlock",
+        "EdgeMask",
+        "GlowMask",
+        "ReadyBlock",
+        "SubtractBlockBlender",
+        "TouchEffect"
+      ]
+    },
+    {
       "path": "Block.png",
       "sha256": "68eb562430b8508f014985a342ffc9f43e30a0f13577658c86260df838785d6c"
     },
