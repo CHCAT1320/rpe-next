@@ -39,14 +39,14 @@ const writePng = (file, image) => {
   const header = Buffer.alloc(13); header.writeUInt32BE(image.width, 0); header.writeUInt32BE(image.height, 4); header[8] = 8; header[9] = 6;
   writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows, { level: 9 })), chunk('IEND', Buffer.alloc(0))]));
 };
-const head = (width, height, color, highlight = false) => canvas(width, height, (pixels, w, h) => { rounded(pixels, w, h, w * 0.08, h * 0.22, w * 0.92, h * 0.78, h * 0.28, [255, 255, 255], highlight ? 0.72 : 0.9); rounded(pixels, w, h, w * 0.12, h * 0.3, w * 0.88, h * 0.7, h * 0.2, color, 1); if (highlight) rounded(pixels, w, h, w * 0.2, h * 0.38, w * 0.8, h * 0.62, h * 0.12, [255, 247, 196], 0.8); });
-const holdBody = (width, height, color, highlight = false) => canvas(width, height, (pixels, w, h) => { rounded(pixels, w, h, w * 0.12, 0, w * 0.88, h, w * 0.2, [255, 255, 255], highlight ? 0.3 : 0.2); for (let y = 0; y < h; y++) { const mix = 0.5 + 0.5 * Math.sin(y / h * Math.PI * 5); const tint = color.map((value, index) => Math.round(value * (0.82 + mix * 0.18) + (index === 0 ? 255 : 0) * mix * 0.08)); rounded(pixels, w, h, w * 0.18, y, w * 0.82, y + 2, 1, tint, 0.85); } rounded(pixels, w, h, w * 0.24, h * 0.02, w * 0.76, h * 0.98, w * 0.12, color, 0.42); });
+const head = (width, height, color, highlight = false) => canvas(width, height, (pixels, w, h) => { if (highlight) { rounded(pixels, w, h, w * 0.035, h * 0.08, w * 0.965, h * 0.92, h * 0.38, [255, 204, 66], 0.18); rounded(pixels, w, h, w * 0.065, h * 0.14, w * 0.935, h * 0.86, h * 0.34, [255, 220, 92], 0.28); } rounded(pixels, w, h, w * 0.06, h * 0.12, w * 0.94, h * 0.88, h * 0.34, [255, 255, 255], 0.9); rounded(pixels, w, h, w * 0.12, h * 0.2, w * 0.88, h * 0.8, h * 0.25, color, 1); });
+const holdBody = (width, height, color) => canvas(width, height, (pixels, w, h) => { rounded(pixels, w, h, w * 0.055, 0, w * 0.945, h, w * 0.2, [255, 255, 255], 0.22); for (let y = 0; y < h; y++) { const mix = 0.5 + 0.5 * Math.sin(y / h * Math.PI * 5); const tint = color.map((value, index) => Math.round(value * (0.82 + mix * 0.18) + (index === 0 ? 255 : 0) * mix * 0.08)); rounded(pixels, w, h, w * 0.095, y, w * 0.905, y + 2, 1, tint, 0.9); } rounded(pixels, w, h, w * 0.12, h * 0.02, w * 0.88, h * 0.98, w * 0.12, color, 0.42); });
 const noteAssets = {
-  Tap2: head(1089, 100, [35, 194, 235]), Tap2HL: head(1089, 200, [255, 218, 92], true),
-  Drag2: head(1089, 60, [60, 218, 133]), DragHL: head(1089, 160, [151, 255, 194], true),
-  Flick2: head(1089, 200, [239, 93, 194]), Flick2HL: head(1089, 300, [255, 175, 239], true),
-  Hold: holdBody(989, 1900, [38, 192, 235]), Hold3: holdBody(1089, 1900, [33, 215, 203]), HoldHL: holdBody(1086, 1900, [255, 207, 83], true),
-  HoldHead: head(1089, 50, [38, 192, 235]), HoldHeadHL: head(1086, 99, [255, 207, 83], true), HoldEnd: head(1089, 50, [38, 192, 235]),
+  Tap2: head(1089, 100, [35, 194, 235]), Tap2HL: head(1089, 200, [35, 194, 235], true),
+  Drag2: head(1089, 60, [255, 198, 45]), DragHL: head(1089, 160, [255, 198, 45], true),
+  Flick2: head(1089, 200, [239, 93, 194]), Flick2HL: head(1089, 300, [239, 93, 194], true),
+  Hold: holdBody(989, 1900, [38, 192, 235]), Hold3: holdBody(1089, 1900, [33, 215, 203]), HoldHL: holdBody(1086, 1900, [33, 215, 203]),
+  HoldHead: head(1089, 50, [33, 215, 203]), HoldHeadHL: head(1086, 99, [33, 215, 203], true), HoldEnd: head(1089, 50, [33, 215, 203]),
 };
 for (const [name, image] of Object.entries(noteAssets)) writePng(join(textureRoot, `${name}.png`), image);
 const effectSizes = [24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24];
