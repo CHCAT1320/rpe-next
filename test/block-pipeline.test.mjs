@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { BlockPipeline, RENDER_TARGETS, TEXTURE_ST, adaptFragment, glowRingWeight, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
+import {
+  BlockPipeline, RENDER_TARGETS, TEXTURE_ST, adaptFragment, glowRingWeight, glowRingWeights, blockMatrix,
+  FULLSCREEN_PROJECTION, QUAD_VERTICES,
+} from '../src/ui/block-pipeline.mjs';
 import { blockTransform, blockState } from '../src/core/block-area.mjs';
 
 const shaders = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/shaders.json', import.meta.url), 'utf8'));
@@ -31,6 +34,9 @@ function stubGl() {
     TRIANGLE_STRIP: enumValue('TRISTRIP'), BLEND: enumValue('BLEND'), CULL_FACE: enumValue('CULL'), DEPTH_TEST: enumValue('DEPTH'),
     COLOR_BUFFER_BIT: enumValue('COLORBIT'), TEXTURE0: 1000,
     ZERO: 0, ONE: 1, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303,
+    FLOAT: enumValue('FLOAT'), BOOL: enumValue('BOOL'), INT: enumValue('INT'),
+    FLOAT_VEC2: enumValue('FV2'), FLOAT_VEC3: enumValue('FV3'), FLOAT_VEC4: enumValue('FV4'),
+    FLOAT_MAT4: enumValue('FM4'), SAMPLER_2D: enumValue('S2D'),
     createShader: (type) => ({ handle: nextHandle++, type, source: '' }),
     shaderSource: (shader, source) => { shader.source = source; },
     compileShader: record('compileShader'),
@@ -43,7 +49,11 @@ function stubGl() {
     getProgramParameter: (program, parameter) => (parameter === enumValue('LINK_STATUS') ? true : uniformsOf(program).length),
     getProgramInfoLog: () => '',
     deleteProgram: record('deleteProgram'),
-    getActiveUniform: (program, index) => ({ name: uniformsOf(program)[index] }),
+    // Report the declared type so the pipeline's type dispatch is exercised rather than assumed.
+    getActiveUniform: (program, index) => {
+      const entry = uniformsOf(program)[index];
+      return { name: entry.name, type: gl[entry.type] };
+    },
     getUniformLocation: (program, name) => ({ program, name }),
     createBuffer: () => ({ handle: nextHandle++ }), bindBuffer: record('bindBuffer'), bufferData: record('bufferData'),
     createTexture: () => ({ handle: nextHandle++ }), bindTexture: record('bindTexture'),
@@ -56,19 +66,24 @@ function stubGl() {
     blendFunc: (source, destination) => calls.push({ name: 'blendFunc', args: [source, destination] }),
     colorMask: (...args) => calls.push({ name: 'colorMask', args }),
     drawArrays: record('drawArrays'),
-    getAttribLocation: () => 0,
+    getAttribLocation: (_program, name) => ({ in_POSITION0: 0, in_TEXCOORD0: 1, in_COLOR0: 2 })[name] ?? -1,
     enableVertexAttribArray: record('enableVertexAttribArray'), disableVertexAttribArray: record('disableVertexAttribArray'),
     vertexAttribPointer: record('vertexAttribPointer'), vertexAttrib4f: record('vertexAttrib4f'),
     useProgram: (program) => calls.push({ name: 'useProgram', args: [program] }),
     uniformMatrix4fv: record('uniformMatrix4fv'), uniform1i: record('uniform1i'), uniform1f: record('uniform1f'),
     uniform4f: record('uniform4f'), uniform2fv: record('uniform2fv'), uniform3fv: record('uniform3fv'), uniform4fv: record('uniform4fv'),
   };
+  const GLSL_TYPE_NAMES = { float: 'FLOAT', bool: 'BOOL', int: 'INT', vec2: 'FLOAT_VEC2', vec3: 'FLOAT_VEC3', vec4: 'FLOAT_VEC4', mat4: 'FLOAT_MAT4', sampler2D: 'SAMPLER_2D' };
   const uniformsOf = (program) => {
     const source = program.shaders.map((shader) => shader.source).join('\n');
-    const names = new Set();
-    for (const match of source.matchAll(/^\s*uniform\s+(?:mediump |highp |lowp )?(?:\w+)\s+(\w+)\s*(\[\d+\])?\s*;/gm)) names.add(match[1]);
-    for (const match of source.matchAll(/UNITY_LOCATION\(\d+\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D\s+(\w+)\s*;/g)) names.add(match[1]);
-    return [...names];
+    const found = new Map();
+    for (const match of source.matchAll(/^\s*uniform\s+(?:mediump |highp |lowp )?(\w+)\s+(\w+)\s*(\[\d+\])?\s*;/gm)) {
+      found.set(match[2], GLSL_TYPE_NAMES[match[1]] ?? 'FLOAT');
+    }
+    for (const match of source.matchAll(/UNITY_LOCATION\(\d+\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D\s+(\w+)\s*;/g)) {
+      found.set(match[1], 'SAMPLER_2D');
+    }
+    return [...found].map(([name, type]) => ({ name, type }));
   };
   gl.__calls = calls;
   gl.__programs = new Map();
@@ -375,8 +390,15 @@ test('_ST tiling 与 materials.md 的 m_TexEnvs 表逐项一致', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  const writes = gl.__calls.filter((call) => call.name === 'uniform4f');
-  assert.ok(writes.length > 0);
+  const writes = gl.__calls.filter((call) => /_ST$/.test(call.args[0]?.name ?? ''));
+  assert.ok(writes.length > 0, '_ST tiling 应被写入');
+  // materials.md §3: the mask displacement and the fill/spark displacement are two separate systems
+  // with different tiling, so the compose pass must not inherit ActiveBlock's numbers.
+  const forProgram = (key, name) => gl.__calls.filter((call) => call.args[0]?.name === name && call.args[0]?.program === pipeline.programs.get(key)[0].handle);
+  const compose = forProgram('BlockCompose', '_DisplaceMap_ST');
+  assert.ok(compose.some((call) => Math.abs(call.args[1][0] - 2.13) < 1e-9 && Math.abs(call.args[1][1] - 1.02) < 1e-9), 'compose 位移应为 (2.13, 1.02)');
+  const active = forProgram('ActiveBlock', '_DisplaceMap_ST');
+  assert.ok(active.some((call) => Math.abs(call.args[1][0] - 0.8) < 1e-9 && Math.abs(call.args[1][1] - 0.3) < 1e-9), '填充位移应为 (0.80, 0.30)');
   for (const [material, entries] of Object.entries(TEXTURE_ST)) {
     for (const [name, scale] of Object.entries(entries)) {
       assert.ok(scale[0] !== 1 || scale[1] !== 1, `${material}.${name} 不应是默认 tiling`);
@@ -434,6 +456,73 @@ test('适配 WebGL2：UNITY_LOCATION 必须被中和，否则全部 program 编�
   }
   // A fragment without the guard is passed through unchanged rather than corrupted.
   assert.equal(adaptFragment('void main() {}'), 'void main() {}');
+});
+
+test('逐 program 校验顶点输出与片元输入的类型一致（链接失败的成因）', () => {
+  const parse = (source, keyword) => {
+    const map = new Map();
+    const pattern = new RegExp(`^\\s*${keyword}\\s+(?:(?:highp|mediump|lowp)\\s+)?(\\w+)\\s+(\\w+)\\s*;`, 'gm');
+    for (const match of source.matchAll(pattern)) map.set(match[2], match[1]);
+    return map;
+  };
+  for (const [key, programs] of Object.entries(shaders.programs)) {
+    for (const [index, program] of programs.entries()) {
+      const outs = parse(program.vertex, 'out');
+      for (const [name, type] of parse(program.fragment, 'in')) {
+        assert.ok(outs.has(name), `${key}#${index}: 片元需要 ${name}，但顶点没有输出`);
+        assert.equal(outs.get(name), type, `${key}#${index}: ${name} 类型不一致（顶点 ${outs.get(name)} / 片元 ${type}）`);
+      }
+    }
+  }
+  // The concrete case that broke linking: `vs_TEXCOORDn` numbering is per program, so the same name
+  // is a vec4 screen position in one and a vec2 spark-map UV in another. A single shared vertex
+  // stage is therefore impossible, which is why every program keeps its own.
+  assert.equal(parse(shaders.programs.ActiveBlock[0].fragment, 'in').get('vs_TEXCOORD3'), 'vec4');
+  assert.equal(parse(shaders.programs.DisabledBlock[0].fragment, 'in').get('vs_TEXCOORD3'), 'vec2');
+  assert.equal(parse(shaders.programs.TouchEffect[0].fragment, 'in').get('vs_TEXCOORD3'), 'vec2');
+  // ...and the pipeline really does compile each program's own vertex stage rather than one shared
+  // source.
+  const sources = new Set(Object.values(shaders.programs).map((programs) => programs[0].vertex));
+  assert.ok(sources.size > 1, '各 program 的顶点阶段应各不相同');
+});
+
+test('全屏 pass 覆盖整个目标，而不是右上角四分之一', () => {
+  // The quad buffer spans [0,1], so an identity projection covers a single quadrant. Every
+  // full-screen pass would have drawn into a quarter of its target.
+  const project = (matrix, x, y) => ({
+    x: matrix[0] * x + matrix[4] * y + matrix[12],
+    y: matrix[1] * x + matrix[5] * y + matrix[13],
+  });
+  assert.deepEqual(project(FULLSCREEN_PROJECTION, 0, 0), { x: -1, y: -1 });
+  assert.deepEqual(project(FULLSCREEN_PROJECTION, 1, 1), { x: 1, y: 1 });
+  // And the quad buffer really does span [0,1] in the position columns.
+  assert.deepEqual([...[0, 1, 2, 3].map((i) => QUAD_VERTICES[i * 10])], [0, 1, 0, 1]);
+  assert.deepEqual([...[0, 1, 2, 3].map((i) => QUAD_VERTICES[i * 10 + 1])], [0, 0, 1, 1]);
+});
+
+test('uniform 按反射类型派发：矩阵数组走 uniform4fv，vec3 不走 uniform4fv', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const active = pipeline.programs.get('ActiveBlock')[0];
+  // Unity declares its matrices as `vec4 name[4]`, not `mat4`, so uniformMatrix4fv raises
+  // GL_INVALID_OPERATION on them and they have to be written as 16 flat floats.
+  assert.equal(active.types.get('hlslcc_mtx4x4unity_MatrixVP'), gl.FLOAT_VEC4);
+  assert.equal(active.types.get('u_projection'), undefined, '游戏 program 没有 u_projection');
+  const vpWrites = gl.__calls.filter((call) => call.name === 'uniform4fv' && call.args[0]?.name === 'hlslcc_mtx4x4unity_MatrixVP');
+  assert.ok(vpWrites.length > 0, '矩阵应通过 uniform4fv 写入');
+  assert.equal(vpWrites[0].args[1].length, 16, 'vec4[4] 需要 16 个 float');
+  for (const call of gl.__calls.filter((entry) => entry.name === 'uniformMatrix4fv')) {
+    assert.notEqual(call.args[0]?.name, 'hlslcc_mtx4x4unity_MatrixVP', '不应把矩阵数组当 mat4 写');
+  }
+  // The material's colour table mixes vec3 with vec4; feeding four components to a vec3 raises
+  // "Uniform size does not match uniform method".
+  assert.equal(active.types.get('_SparkTint'), gl.FLOAT_VEC3);
+  assert.equal(active.types.get('_FillColor'), gl.FLOAT_VEC4);
+  assert.ok(gl.__calls.some((call) => call.name === 'uniform3fv'), 'vec3 uniform 应以 uniform3fv 写入');
+  for (const call of gl.__calls.filter((entry) => entry.name === 'uniform4fv')) {
+    assert.notEqual(call.args[1].length, 3, `${call.args[0]?.name} 被当成 vec4 写入`);
+  }
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {

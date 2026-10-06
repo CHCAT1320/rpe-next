@@ -77,48 +77,27 @@ const PASS_STATE = {
 const BLEND_FACTORS = { ZERO: 0, ONE: 1, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303 };
 const MASK_BITS = { R: 0x4000, G: 0x4000 >> 1, B: 0x4000 >> 2, A: 0x4000 >> 3 };
 
-/**
- * Vertex stage shared by every program. The game's own vertex code only computes varyings from the
- * quad UV plus `_ST` uniforms, so this replaces it one-for-one while letting the port supply its
- * own projection. Extra outputs are harmless: GLSL ES 3.00 allows a vertex `out` with no matching
- * fragment `in`.
- */
-const VERTEX_SOURCE = `#version 300 es
-precision highp float;
-in highp vec4 in_POSITION0;
-in highp vec4 in_COLOR0;
-in highp vec2 in_TEXCOORD0;
-uniform mat4 u_projection;
-uniform vec4 _DisplaceMap_ST;
-uniform vec4 _SparkMap_ST;
-uniform vec4 _TouchDisplaceMap_ST;
-uniform vec4 _NoiseMap_ST;
-uniform vec4 _ProjectionParams;
-uniform vec4 _ScreenParams;
-out highp vec2 vs_TEXCOORD0;
-out highp vec2 vs_TEXCOORD1;
-out highp vec2 vs_TEXCOORD2;
-out highp vec4 vs_TEXCOORD3;
-out highp vec2 vs_TEXCOORD4;
-out highp vec2 vs_TEXCOORD5;
-out highp float vs_TEXCOORD6;
-out highp vec4 vs_COLOR0;
-void main() {
-  vs_TEXCOORD0 = in_TEXCOORD0;
-  vs_TEXCOORD1 = in_TEXCOORD0 * _DisplaceMap_ST.xy + _DisplaceMap_ST.zw;
-  vs_TEXCOORD2 = in_TEXCOORD0 * _SparkMap_ST.xy + _SparkMap_ST.zw;
-  vs_TEXCOORD4 = in_TEXCOORD0 * _TouchDisplaceMap_ST.xy + _TouchDisplaceMap_ST.zw;
-  vs_TEXCOORD5 = in_TEXCOORD0 * _NoiseMap_ST.xy + _NoiseMap_ST.zw;
-  vs_COLOR0 = in_COLOR0;
-  vec4 clip = u_projection * in_POSITION0;
-  gl_Position = clip;
-  // Unity's ComputeScreenPos.
-  vec2 projected = (clip.xy * vec2(1.0, _ProjectionParams.x) + clip.ww) * 0.5;
-  vs_TEXCOORD3 = vec4(projected, clip.zw);
-  // The entry-band constant: (8/9) * screenHeight / screenWidth.
-  vs_TEXCOORD6 = _ScreenParams.y * 0.888888896 / _ScreenParams.x;
-}
-`;
+// The vertex stage is the game's own, taken from the same vendored dump rather than hand-written.
+//
+// A shared vertex shader cannot work: `vs_TEXCOORDn` numbering is assigned per program, so
+// `vs_TEXCOORD3` is a `vec4` screen position in ActiveBlock but a `vec2` spark-map UV in
+// DisabledBlock and TouchEffect, and one shader emitting the first fails to link the others with
+// "Types of varying 'vs_TEXCOORD3' differ between VERTEX and FRAGMENT shaders". Compiling each
+// program's own vertex stage keeps the types and the meanings matched by construction.
+//
+// Unity's stage reads `hlslcc_mtx4x4unity_ObjectToWorld` and `hlslcc_mtx4x4unity_MatrixVP`; feeding
+// it the identity and this port's projection needs no rewriting at all — the model transform is
+// already folded into the projection on the CPU.
+
+/** Attribute layout, in floats: position.xyzw, uv.xy, colour.rgba. */
+export const QUAD_VERTICES = new Float32Array([
+  0, 0, 0, 1, 0, 0, 1, 1, 1, 1,
+  1, 0, 0, 1, 1, 0, 1, 1, 1, 1,
+  0, 1, 0, 1, 0, 1, 1, 1, 1, 1,
+  1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
+]);
+const QUAD_STRIDE = 10 * 4;
+const ATTRIBUTE_OFFSET = { in_POSITION0: 0, in_TEXCOORD0: 4 * 4, in_COLOR0: 6 * 4 };
 
 /**
  * Sampler name -> vendored file, with the texture's import settings from materials.md §1.
@@ -252,10 +231,7 @@ export class BlockPipeline {
     this.gl = gl;
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
-    // Unit quad: position.xy in [0,1], uv, and a colour slot filled per draw.
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-      0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1,
-    ]), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, QUAD_VERTICES, gl.STATIC_DRAW);
     // Compile every program before giving up, and report all of them: bailing on the first failure
     // hides whether one shader is broken or a dozen are.
     const failures = [];
@@ -263,7 +239,7 @@ export class BlockPipeline {
       try { this.programs.set(key, programs.map((program, index) => this.buildProgram(key, index, program))); }
       catch (error) { failures.push(String((error && error.message) || error)); }
     }
-    try { this.programs.set('Passthrough', [this.buildProgram('Passthrough', 0, { fragment: PASSTHROUGH_FRAGMENT })]); }
+    try { this.programs.set('Passthrough', [this.buildProgram('Passthrough', 0, { vertex: PASSTHROUGH_VERTEX, fragment: PASSTHROUGH_FRAGMENT })]); }
     catch (error) { failures.push(String((error && error.message) || error)); }
     if (failures.length) {
       this.disabled = true;
@@ -277,7 +253,8 @@ export class BlockPipeline {
 
   buildProgram(key, index, program) {
     const gl = this.gl;
-    const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SOURCE);
+    // Each program keeps its own vertex stage, so the varying types match by construction.
+    const vertex = compile(gl, gl.VERTEX_SHADER, adaptFragment(program.vertex));
     const fragment = compile(gl, gl.FRAGMENT_SHADER, adaptFragment(program.fragment));
     const handle = gl.createProgram();
     gl.attachShader(handle, vertex);
@@ -291,14 +268,17 @@ export class BlockPipeline {
       throw new Error(`${key}#${index} 链接失败: ${log}`);
     }
     const uniforms = new Map();
+    const types = new Map();
     for (let slot = 0; slot < gl.getProgramParameter(handle, gl.ACTIVE_UNIFORMS); slot++) {
       const info = gl.getActiveUniform(handle, slot);
-      uniforms.set(info.name.replace(/\[0\]$/, ''), gl.getUniformLocation(handle, info.name));
+      const name = info.name.replace(/\[0\]$/, '');
+      uniforms.set(name, gl.getUniformLocation(handle, info.name));
+      types.set(name, info.type);
     }
     const state = Array.isArray(PASS_STATE[key]) ? PASS_STATE[key][index] : PASS_STATE[key];
     // `adaptFragment` strips the explicit texture units, so the samplers are plain uniforms and
     // `applyUniforms` fully controls each one's unit — which is why enumerating them is safe here.
-    return { key, index, handle, uniforms, state, source: program };
+    return { key, index, handle, uniforms, types, state, source: program };
   }
 
   createTarget({ key, divisor, linear }) {
@@ -431,10 +411,10 @@ export class BlockPipeline {
     return target;
   }
 
-  /** Full-screen pass: the quad is the clip-space square, so the projection is the identity. */
+  /** Full-screen pass: the projection stretches the unit quad across the whole target. */
   fullscreen(program, { textures = {}, floats = {}, vectors = {} } = {}) {
     const gl = this.gl;
-    gl.uniformMatrix4fv(program.uniforms.get('u_projection'), false, IDENTITY);
+    this.setMatrices(program, FULLSCREEN_PROJECTION);
     this.bindQuad(program);
     this.applyUniforms(program, textures, floats, vectors);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -443,18 +423,16 @@ export class BlockPipeline {
   bindQuad(program, withColor = true) {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
-    const stride = 4 * 4;
-    const position = gl.getAttribLocation(program.handle, 'in_POSITION0');
-    if (position >= 0) { gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 4, gl.FLOAT, false, stride, 0); }
-    const color = gl.getAttribLocation(program.handle, 'in_COLOR0');
-    if (color >= 0) {
-      // Block draws set a constant colour attribute (see drawBlockQuad); full-screen passes feed
-      // the buffer's own colour column.
-      if (withColor) { gl.enableVertexAttribArray(color); gl.vertexAttribPointer(color, 4, gl.FLOAT, false, stride, 0); }
-      else gl.disableVertexAttribArray(color);
+    for (const [name, offset] of Object.entries(ATTRIBUTE_OFFSET)) {
+      const location = gl.getAttribLocation(program.handle, name);
+      if (location < 0) continue;
+      const size = name === 'in_TEXCOORD0' ? 2 : 4;
+      // Block draws set a constant colour attribute (see drawBlockQuad); full-screen passes feed the
+      // buffer's own colour column.
+      if (name === 'in_COLOR0' && !withColor) { gl.disableVertexAttribArray(location); continue; }
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, size, gl.FLOAT, false, QUAD_STRIDE, offset);
     }
-    const uv = gl.getAttribLocation(program.handle, 'in_TEXCOORD0');
-    if (uv >= 0) { gl.enableVertexAttribArray(uv); gl.vertexAttribPointer(uv, 2, gl.FLOAT, false, stride, 2 * 4); }
   }
 
   applyUniforms(program, textures, floats, vectors) {
@@ -489,12 +467,14 @@ export class BlockPipeline {
   }
 
   /** Rasterise one block quad into a layer mask, with the game's `BlockSprite` material. */
-  drawBlockQuad(target, block, transform, coverage) {
+  drawBlockQuad(target, block, transform, coverage, seconds) {
     const gl = this.gl;
     const program = this.use('BlockSprite', 0);
     gl.enable(gl.BLEND);
-    gl.uniformMatrix4fv(program.uniforms.get('u_projection'), false, blockMatrix(transform));
-    gl.uniform4f(program.uniforms.get('_ProjectionParams'), 1, 0, 0, 0);
+    // `_ScreenParams` and `_ProjectionParams` come from the engine, and BlockSprite is drawn without
+    // a material lookup, so they have to be set explicitly here.
+    this.applyEngineUniforms(program, seconds);
+    this.setMatrices(program, blockMatrix(transform));
     this.bindTarget(target);
     this.bindQuad(program, false);
     // `BlockSprite` reads the renderer colour from the vertex colour, not a `_Color` uniform:
@@ -524,40 +504,68 @@ export class BlockPipeline {
 
   /** `_ST` per material; offsets are always 0, only tiling varies. */
   applyTiling(program, material) {
-    const gl = this.gl;
     const st = TEXTURE_ST[material] ?? {};
     for (const name of ['_DisplaceMap_ST', '_SparkMap_ST', '_TouchDisplaceMap_ST', '_NoiseMap_ST']) {
-      const location = program.uniforms.get(name);
-      if (location == null) continue;
       const scale = st[name.replace('_ST', '')] ?? [1, 1];
-      gl.uniform4f(location, scale[0], scale[1], 0, 0);
+      this.setUniform(program, name, [scale[0], scale[1], 0, 0]);
     }
   }
 
-  applyMaterial(program, material, seconds) {
+  /**
+   * Set a uniform using its reflected type.
+   *
+   * Guessing the setter does not work with this shader set: Unity declares its matrices as
+   * `uniform vec4 hlslcc_mtx4x4unity_ObjectToWorld[4]`, an array of four vec4 rather than a `mat4`,
+   * so `uniformMatrix4fv` on it raises GL_INVALID_OPERATION; and the material's colour table mixes
+   * `vec3` (`_SparkTint`, `_NoiseTint`) with `vec4`, so passing four components to all of them
+   * raises "Uniform size does not match uniform method" for the vec3 ones. `uniform4fv` also accepts
+   * the flat 16 floats of a `vec4[4]`, which is how the matrix arrays are written.
+   */
+  setUniform(program, name, value) {
     const gl = this.gl;
-    const set4f = (name, ...values) => { const location = program.uniforms.get(name); if (location != null) gl.uniform4f(location, ...values); };
-    set4f('_Time', seconds / 20, seconds, seconds * 2, seconds * 3);
-    set4f('_ScreenParams', this.canvas.width, this.canvas.height, 1 / this.canvas.width, 1 / this.canvas.height);
-    set4f('_ProjectionParams', 1, 0, 0, 0);
-    const effect = this.targets.get('effectRT');
-    set4f('_EffectRT_TexelSize', 1 / effect.width, 1 / effect.height, effect.width, effect.height);
-
-    const values = this.materials?.[material];
-    if (values) {
-      for (const [name, value] of Object.entries(values.floats)) {
-        const location = program.uniforms.get(name);
-        if (location != null) gl.uniform1f(location, value);
-      }
-      for (const [name, value] of Object.entries(values.colors)) {
-        const location = program.uniforms.get(name);
-        if (location != null) gl.uniform4fv(location, value);
-      }
+    const location = program.uniforms.get(name);
+    if (location == null) return false;
+    const numbers = typeof value === 'number' ? [value] : value;
+    switch (program.types.get(name)) {
+      case gl.FLOAT_MAT4: gl.uniformMatrix4fv(location, false, numbers); return true;
+      case gl.FLOAT_VEC4: gl.uniform4fv(location, numbers); return true;
+      case gl.FLOAT_VEC3: gl.uniform3fv(location, numbers); return true;
+      case gl.FLOAT_VEC2: gl.uniform2fv(location, numbers); return true;
+      case gl.INT: case gl.BOOL: gl.uniform1i(location, numbers[0]); return true;
+      default: gl.uniform1f(location, numbers[0]); return true;
     }
+  }
 
+  /**
+   * Feed the matrices Unity's vertex stages expect.
+   *
+   * `hlslcc_mtx4x4unity_ObjectToWorld` gets the identity because the model transform is folded into
+   * the projection on the CPU; `hlslcc_mtx4x4unity_MatrixVP` gets the combined matrix.
+   */
+  setMatrices(program, matrix) {
+    this.setUniform(program, 'hlslcc_mtx4x4unity_MatrixVP', matrix);
+    this.setUniform(program, 'hlslcc_mtx4x4unity_ObjectToWorld', IDENTITY);
+    this.setUniform(program, 'u_projection', matrix);
+  }
+
+  /** Uniforms the engine supplies rather than the material. */
+  applyEngineUniforms(program, seconds) {
+    const gl = this.gl;
+    this.setUniform(program, '_Time', [seconds / 20, seconds, seconds * 2, seconds * 3]);
+    this.setUniform(program, '_ScreenParams', [this.canvas.width, this.canvas.height, 1 / this.canvas.width, 1 / this.canvas.height]);
+    this.setUniform(program, '_ProjectionParams', [1, 0, 0, 0]);
+    const effect = this.targets.get('effectRT');
+    this.setUniform(program, '_EffectRT_TexelSize', [1 / effect.width, 1 / effect.height, effect.width, effect.height]);
     // `UpdateTouchPos` recomputes the shine every frame instead of reading it from the material.
-    const shine = program.uniforms.get('_TouchPosShine');
-    if (shine != null) gl.uniform1f(shine, this.touchShine(seconds));
+    this.setUniform(program, '_TouchPosShine', this.touchShine(seconds));
+  }
+
+  applyMaterial(program, material, seconds) {
+    this.applyEngineUniforms(program, seconds);
+    const values = this.materials?.[material];
+    if (!values) return;
+    for (const [name, value] of Object.entries(values.floats)) this.setUniform(program, name, value);
+    for (const [name, value] of Object.entries(values.colors)) this.setUniform(program, name, value);
   }
 
   /** `UpdateTouchPos`: `lerp(lowThreshold, 1, 0.5 + 0.5·sin(shineSpeed·t)) · brightness`. */
@@ -594,9 +602,9 @@ export class BlockPipeline {
       const coverage = blockShowCoverage(block, now);
       // Layer cameras render raw masks with `BlockSprite`; the renderer colour rides in as the
       // vertex colour, which is what gives subtract blocks their 0.1 intensity.
-      if (phase.active) this.drawBlockQuad(block.isSubtract ? 'subtractBlockRT' : 'normalBlockRT', block, transform, coverage);
-      else this.drawBlockQuad(block.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT', block, transform, coverage);
-      if (phase.ready) this.drawBlockQuad(block.isSubtract ? 'disabledSubtractReadyBlockRT' : 'disabledNormalReadyBlockRT', block, transform, coverage);
+      if (phase.active) this.drawBlockQuad(block.isSubtract ? 'subtractBlockRT' : 'normalBlockRT', block, transform, coverage, now);
+      else this.drawBlockQuad(block.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT', block, transform, coverage, now);
+      if (phase.ready) this.drawBlockQuad(block.isSubtract ? 'disabledSubtractReadyBlockRT' : 'disabledNormalReadyBlockRT', block, transform, coverage, now);
     }
 
     // The three `SubtractBlockPostProcessor` instances sit on the subtract-family cameras and run
@@ -643,7 +651,8 @@ export class BlockPipeline {
     this.applyMaterial(program, 'ActiveBlock', now);
     this.applyTiling(program, 'ActiveBlock');
     const touchCount = program.uniforms.get('_TouchPosCount');
-    if (touchCount != null) gl.uniform1i(touchCount, 0);
+    this.setUniform(program, '_TouchPosCount', 0);
+    void touchCount;
     this.fullscreen(program, {
       textures: {
         _ComposeRT: this.targets.get('composedEnabledBlockRT'),
@@ -692,7 +701,7 @@ export class BlockPipeline {
         this.beginPass('effectRT');
         const program = this.use('EdgeMask', 1);
         this.applyMaterial(program, 'EdgeMask', seconds);
-        gl.uniform4fv(program.uniforms.get('_DilateTexelSize'), dilate);
+        this.setUniform(program, '_DilateTexelSize', dilate);
         this.fullscreen(program, { textures: { _MainTex: compose, _ComposeRT: compose } });
       } else {
         let from = sourceMask;
@@ -702,7 +711,7 @@ export class BlockPipeline {
           this.beginPass(last ? 'effectRT' : to);
           const program = this.use('EdgeMask', last ? 1 : 0);
           this.applyMaterial(program, 'EdgeMask', seconds);
-          gl.uniform4fv(program.uniforms.get('_DilateTexelSize'), dilate);
+          this.setUniform(program, '_DilateTexelSize', dilate);
           this.fullscreen(program, { textures: { _MainTex: this.targets.get(from), _ComposeRT: compose } });
           from = to;
           to = to === 'pingA' ? 'pingB' : 'pingA';
@@ -725,9 +734,9 @@ export class BlockPipeline {
           this.beginPass(to);
           const program = this.use('GlowMask', 0);
           this.applyMaterial(program, 'GlowMask', seconds);
-          gl.uniform4fv(program.uniforms.get('_DilateTexelSize'), dilate);
-          gl.uniform1f(program.uniforms.get('_PassWeight'), weight);
-          gl.uniform1f(program.uniforms.get('_GlowFirstPass'), pass === 1 ? 1 : 0);
+          this.setUniform(program, '_DilateTexelSize', dilate);
+          this.setUniform(program, '_PassWeight', weight);
+          this.setUniform(program, '_GlowFirstPass', pass === 1 ? 1 : 0);
           this.fullscreen(program, { textures: { _MainTex: this.targets.get(from), _ComposeRT: compose } });
           from = to;
           to = to === 'pingA' ? 'pingB' : 'pingA';
@@ -842,11 +851,13 @@ export class BlockPipeline {
     const program = this.use('TouchEffect', 0);
     this.applyMaterial(program, 'TouchEffect', seconds);
     const count = program.uniforms.get('_TouchPosCount');
-    if (count != null) gl.uniform1i(count, positions.length);
+    this.setUniform(program, '_TouchPosCount', positions.length);
+    void count;
     for (const [index, position] of positions.slice(0, 10).entries()) {
       // `getActiveUniform` reports array elements as `_TouchPos[0]`, whose location is the base of
       // the array; consecutive elements follow contiguously.
-      const location = program.uniforms.get(index === 0 ? '_TouchPos' : `_TouchPos[${index}]`);
+      const name = index === 0 ? '_TouchPos' : `_TouchPos[${index}]`;
+      const location = program.uniforms.get(name);
       if (location != null) gl.uniform2f(location, position.x, position.y);
     }
     this.fullscreen(program, {
@@ -860,6 +871,28 @@ export class BlockPipeline {
 }
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/**
+ * Maps the unit quad's `[0,1]²` onto clip space's `[-1,1]²`, i.e. the whole target.
+ *
+ * The quad buffer spans `[0,1]`, so an identity projection would cover only the upper-right
+ * quadrant — every full-screen pass would draw into a quarter of the target.
+ */
+export const FULLSCREEN_PROJECTION = new Float32Array([
+  2, 0, 0, 0,
+  0, 2, 0, 0,
+  0, 0, 1, 0,
+  -1, -1, 0, 1,
+]);
+/** Vertex stage for this port's own passthrough, which has no counterpart in the dump. */
+const PASSTHROUGH_VERTEX = `#version 300 es
+precision highp float;
+in highp vec4 in_POSITION0;
+in highp vec2 in_TEXCOORD0;
+uniform mat4 u_projection;
+out highp vec2 vs_TEXCOORD0;
+void main() { vs_TEXCOORD0 = in_TEXCOORD0; gl_Position = u_projection * in_POSITION0; }
+`;
 
 /**
  * Straight copy of a bound texture, used to seed the canvas with the scene before the additive
