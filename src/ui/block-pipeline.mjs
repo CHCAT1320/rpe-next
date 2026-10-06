@@ -325,7 +325,10 @@ export class BlockPipeline {
       });
       const gl = this.gl;
       gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      // Unity's UV origin is bottom-left: its importer flips an image vertically so that v = 0 is the
+      // file's *bottom* row, and the quad's v also increases upward. Uploading with the flip off puts
+      // the file's top row at v = 0, which mirrors every noise and displacement texture.
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
       entry.image = image;
     }));
@@ -570,9 +573,12 @@ export class BlockPipeline {
     const width = this.canvas.width;
     const height = this.canvas.height;
     this.setUniform(program, '_ScreenParams', [width, height, 1 + 1 / width, 1 + 1 / height]);
-    // `_ProjectionParams` is (yFlip, near, far, 1/far) and only `.x` is read; every block camera is
-    // orthographic with a 0.3 near plane and a 1000 far plane.
-    this.setUniform(program, '_ProjectionParams', [1, 0.3, 1000, 1 / 1000]);
+    // `_ProjectionParams` is (yFlip, near, far, 1/far). The flip is -1 here because every block
+    // camera renders into a RenderTexture — `BlockRender.Start` sets `forceIntoRenderTexture` on the
+    // main camera too — and Unity flips the projection matrix in that case, which is what
+    // `ComputeScreenPos` reads to orient `vs_TEXCOORD3`. Only the screen-projected varyings depend on
+    // it; the quad's own position comes from the matrices.
+    this.setUniform(program, '_ProjectionParams', [-1, 0.3, 1000, 1 / 1000]);
     const effect = this.targets.get('effectRT');
     this.setUniform(program, '_EffectRT_TexelSize', [1 / effect.width, 1 / effect.height, effect.width, effect.height]);
     // `UpdateTouchPos` recomputes the shine every frame instead of reading it from the material.

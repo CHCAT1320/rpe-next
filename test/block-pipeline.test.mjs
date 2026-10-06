@@ -30,6 +30,7 @@ function stubGl() {
     LINEAR: enumValue('LINEAR'), NEAREST: enumValue('NEAREST'), CLAMP_TO_EDGE: enumValue('CLAMP'),
     REPEAT: enumValue('REPEAT'), MIRRORED_REPEAT: enumValue('MIRROR'),
     RGBA: enumValue('RGBA'), UNSIGNED_BYTE: enumValue('UBYTE'), FRAMEBUFFER: enumValue('FB'),
+    UNPACK_FLIP_Y_WEBGL: enumValue('FLIPY'), UNPACK_PREMULTIPLY_ALPHA_WEBGL: enumValue('PREMUL'),
     COLOR_ATTACHMENT0: enumValue('CA0'), FRAMEBUFFER_COMPLETE: enumValue('FBC'),
     ARRAY_BUFFER: enumValue('ARRAYBUF'), FLOAT: enumValue('FLOAT'), STATIC_DRAW: enumValue('STATIC'),
     TRIANGLE_STRIP: enumValue('TRISTRIP'), BLEND: enumValue('BLEND'), CULL_FACE: enumValue('CULL'), DEPTH_TEST: enumValue('DEPTH'),
@@ -585,6 +586,38 @@ test('块层按设备像素渲染，再贴进视口的 CSS 像素矩形', () => 
   assert.deepEqual(captured.render.sceneView, { left: 200, top: 100, width: 1400, height: 900 }, '场景按视口裁剪');
   // The whole GL canvas is mapped onto the viewport's CSS rectangle.
   assert.deepEqual(captured.drawImage.slice(1), [0, 0, 1400, 900, 100, 50, 700, 450]);
+});
+
+test('贴图按 Unity 约定垂直翻转（v = 0 对应图像底部）', async () => {
+  // Unity's UV origin is bottom-left, so its importer stores textures flipped and the quad's v also
+  // increases upward. Uploading with the flip off puts the file's top row at v = 0, mirroring every
+  // noise and displacement map.
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  const previous = globalThis.Image;
+  globalThis.Image = class { set src(value) { this.href = value; queueMicrotask(() => this.onload?.()); } };
+  try {
+    await pipeline.loadImages('/fake/');
+  } finally {
+    globalThis.Image = previous;
+  }
+  const flips = gl.__calls.filter((call) => call.name === 'pixelStorei' && call.args[0] === gl.UNPACK_FLIP_Y_WEBGL);
+  assert.equal(flips.length, pipeline.textures.size, '每张贴图都应设置翻转');
+  for (const call of flips) assert.equal(call.args[1], true, 'UNPACK_FLIP_Y_WEBGL 应为 true');
+});
+
+test('渲染到 RT 时 _ProjectionParams.x 为 -1', () => {
+  // The block cameras render into RenderTextures and `BlockRender.Start` sets
+  // `forceIntoRenderTexture` on the main camera, where Unity flips the projection matrix.
+  // `ComputeScreenPos` reads that through `_ProjectionParams.x` to orient `vs_TEXCOORD3`, which
+  // `ActiveBlock` uses to sample `_SceneColor`. Only the screen-projected varyings depend on it; the
+  // quad's own position comes from the matrices.
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const writes = gl.__calls.filter((call) => call.args[0]?.name === '_ProjectionParams');
+  assert.ok(writes.length > 0, '_ProjectionParams 应被写入');
+  for (const call of writes) assert.equal(call.args[1][0], -1, 'yFlip 应为 -1');
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
