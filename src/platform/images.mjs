@@ -16,7 +16,7 @@ export function animatedImage(name, bytes) {
 export class ProjectImages {
   constructor(invalidate, report = () => {}) {
     this.invalidate = invalidate; this.report = report; this.images = new Map(); this.records = new Map();
-    this.generation = 0; this.background = null; this.queue = []; this.activeLoads = 0; this.decodedBytes = 0; this.budget = 192 * 1024 ** 2;
+    this.generation = 0; this.background = null; this.queue = []; this.activeLoads = 0; this.decodedBytes = 0; this.budget = 384 * 1024 ** 2;
   }
 
   async load(chart, assets, chartName, info) {

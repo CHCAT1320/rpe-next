@@ -4,7 +4,7 @@ const names = { 1: 'Tap2', 2: 'HoldHead', 3: 'Flick2', 4: 'Drag2' };
 const highlights = { 1: 'Tap2HL', 2: 'HoldHeadHL', 3: 'Flick2HL', 4: 'DragHL' };
 
 export class RpeSkin {
-  constructor(invalidate) { this.images = new Map(); this.tints = new Map(); this.invalidate = invalidate; }
+  constructor(invalidate) { this.images = new Map(); this.tints = new Map(); this.sourceIds = new WeakMap(); this.nextSourceId = 1; this.invalidate = invalidate; }
 
   async load() {
     await Promise.all([...new Set([...Object.values(names), ...Object.values(highlights), 'Hold', 'Hold3', 'HoldHL', 'HoldEnd', 'line', 'Pause', 'Arrow2', ...Array.from({ length: 31 }, (unused, index) => `img-${index + 1}`)])].map(async name => {
@@ -25,6 +25,25 @@ export class RpeSkin {
       const context = canvas.getContext('2d'); context.drawImage(picture, 0, 0);
       context.globalCompositeOperation = 'multiply'; context.fillStyle = `rgb(${rgb.join(',')})`; context.fillRect(0, 0, canvas.width, canvas.height);
       context.globalCompositeOperation = 'destination-in'; context.drawImage(picture, 0, 0);
+      this.tints.set(key, canvas);
+    }
+    return this.tints.get(key);
+  }
+
+  tintedSource(name, source, color) {
+    if (!source) return null;
+    const rgb = color.map(value => Math.round(Math.max(0, Math.min(255, value))));
+    if (rgb.every(value => value === 255)) return source;
+    if (!this.sourceIds.has(source)) this.sourceIds.set(source, this.nextSourceId++);
+    const key = `source:${name}:${this.sourceIds.get(source)}:${rgb.join(',')}`;
+    if (!this.tints.has(key)) {
+      if (this.tints.size >= 192) this.tints.delete(this.tints.keys().next().value);
+      const width = source.naturalWidth ?? source.width; const height = source.naturalHeight ?? source.height;
+      if (!width || !height) return source;
+      const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+      const context = canvas.getContext('2d'); context.drawImage(source, 0, 0);
+      context.globalCompositeOperation = 'multiply'; context.fillStyle = `rgb(${rgb.join(',')})`; context.fillRect(0, 0, width, height);
+      context.globalCompositeOperation = 'destination-in'; context.drawImage(source, 0, 0);
       this.tints.set(key, canvas);
     }
     return this.tints.get(key);

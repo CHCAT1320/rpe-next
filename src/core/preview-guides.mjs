@@ -30,13 +30,15 @@ export function pickGuide(guides, point, selected, radius = 10) {
   return matches[(matches.findIndex(guide => guide.index === selected) + 1) % matches.length].index;
 }
 
-export function formatLineNumbers(indices) {
+export function formatLineNumbers(indices, lines = null) {
   const sorted = [...indices].sort((left, right) => left - right);
   const groups = [];
   for (let index = 0; index < sorted.length; index++) {
     const first = sorted[index]; let last = first;
-    while (sorted[index + 1] === last + 1) last = sorted[++index];
-    groups.push(last === first ? String(first) : `${first}–${last}`);
+    const firstParent = Number(lines?.[first]?.father ?? -1);
+    while (firstParent < 0 && sorted[index + 1] === last + 1 && Number(lines?.[sorted[index + 1]]?.father ?? -1) < 0) last = sorted[++index];
+    const suffix = firstParent >= 0 ? `(${firstParent})` : '';
+    groups.push(last === first ? `${first}${suffix}` : `${first}–${last}`);
   }
   return groups.join(', ');
 }

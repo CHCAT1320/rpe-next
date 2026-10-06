@@ -25,7 +25,7 @@ export class EventInteraction {
     return Math.round(target * this.timeline.division) / this.timeline.division - beatValue(start);
   }
 
-  place(type, beat, easingType) {
+  place(type, beat, easingType, inst = false) {
     const session = this.timeline.getSession();
     if (!session.line) return false;
     const point = this.timeline.eventCursor;
@@ -37,11 +37,11 @@ export class EventInteraction {
     const at = beat ?? this.timeline.eventBeatAt(point.y, eventType, true);
     session.focus = 'events'; session.eventLayer = this.timeline.layer; session.selection.clear();
     if (!this.pending) {
-      this.pending = { type: eventType, beat: at, lineIndex };
+      this.pending = { type: eventType, beat: at, lineIndex, inst };
       session.notify();
     } else {
       let event;
-      try { event = placedEvent(session, this.pending.type, this.pending.beat, at, easingType, this.pending.lineIndex); }
+      try { event = placedEvent(session, this.pending.type, this.pending.beat, at, easingType, this.pending.lineIndex, this.pending.inst); }
       catch (error) { this.timeline.notify?.(error.message, 'error'); return false; }
       if (event) insertEventAt(session, this.pending.lineIndex ?? lineIndex, this.pending.type, event);
       this.pending = null;
@@ -52,6 +52,7 @@ export class EventInteraction {
   down(event) {
     if (![0, 1, 2].includes(event.button)) return;
     event.preventDefault?.();
+    if (event.button === 2) return;
     if (this.timeline.finishRectangle(event)) return;
     const session = this.timeline.getSession(); const point = this.timeline.point(event, this.canvas); const rectangle = this.hit(point);
     if (event.ctrlKey || event.shiftKey || event.button === 1) session.multiSelectionIntent = 'events';
@@ -66,8 +67,7 @@ export class EventInteraction {
       return;
     }
     if (this.pending) {
-      if (event.button === 2) { this.pending = null; this.timeline.changed(); }
-      else try { this.place(); } catch (error) { this.timeline.notify?.(error.message, 'error'); }
+      try { this.place(); } catch (error) { this.timeline.notify?.(error.message, 'error'); }
       return;
     }
     session.focus = 'events'; session.eventLayer = this.timeline.layer;

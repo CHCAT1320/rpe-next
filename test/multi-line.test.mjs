@@ -5,6 +5,7 @@ import { createChart, createLine, createNote } from '../src/core/chart.mjs';
 import { insertEvent, placedEvent, eventListAt, transformEvents } from '../src/application/event-commands.mjs';
 import { copyObjects, pasteObjects, deleteObjects, projectClipboard } from '../src/application/clipboard.mjs';
 import { parseLineExpression, formatLineExpression } from '../src/application/multi-line-edit.mjs';
+import { lineFeatureLabels } from '../src/core/line-groups.mjs';
 import { Timeline } from '../src/ui/timeline.mjs';
 
 function sessionWithLines(count = 3) {
@@ -20,6 +21,18 @@ test('多线模式保持去重排序并在关闭时保留集合', () => {
   assert.deepEqual(session.multiLineIndices, [0, 1, 2]);
   session.removeMultiLine(0); assert.deepEqual(session.multiLineIndices, [1, 2]);
   session.setMultiLineEnabled(false); assert.equal(session.multiLineActive, false); assert.deepEqual(session.multiLineIndices, [1, 2]);
+});
+
+test('多线表达式支持分组名并在完整分组时优先显示分组名', () => {
+  const session = sessionWithLines(4); session.chart.judgeLineGroup = ['Default', 'Verse'];
+  session.chart.judgeLineList[1].Group = 1; session.chart.judgeLineList[2].Group = 1;
+  assert.deepEqual(parseLineExpression('Verse 0', 4, session.chart), [0, 1, 2]);
+  assert.equal(formatLineExpression([0, 1, 2], session.chart), 'Verse 0');
+});
+
+test('判定线列表标出非默认父线、绑定 UI、zOrder 和贴图', () => {
+  assert.deepEqual(lineFeatureLabels({ father: 0, attachUI: 'name', zOrder: 2, Texture: 'custom.png' }), ['父线=0', 'UI=name', 'Z=2', '贴图=custom.png']);
+  assert.deepEqual(lineFeatureLabels({ father: -1, zOrder: 0, Texture: 'line.png' }), []);
 });
 
 test('多线边界按钮按循环线组添加，音符可迁移到指定线', () => {

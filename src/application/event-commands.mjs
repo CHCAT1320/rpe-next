@@ -94,7 +94,7 @@ export function insertEventAt(session, lineIndex, type, event) {
   session.commit('添加事件', chart, beforeSelection);
 }
 
-export function placedEvent(session, type, first, second, easingType, lineIndex = session.lineIndex) {
+export function placedEvent(session, type, first, second, easingType, lineIndex = session.lineIndex, inst = false) {
   const start = Math.min(first, second); const end = Math.max(first, second);
   if (end - start < 0.001) return null;
   const events = eventListAt(session, lineIndex, type);
@@ -103,7 +103,8 @@ export function placedEvent(session, type, first, second, easingType, lineIndex 
   const previous = events.filter(event => beatValue(event.endTime) <= start).sort((left, right) => beatValue(right.startTime) - beatValue(left.startTime))[0];
   const fallback = type === 'alphaEvents' ? 255 : type.startsWith('scale') ? 1 : type === 'speedEvents' ? 10 : type === 'textEvents' ? '' : type === 'colorEvents' ? [255, 255, 255] : 0;
   const value = structuredClone(previous?.end ?? fallback);
-  return { ...createEvent(value, structuredClone(value), start, end), easingType: easingType ?? previous?.easingType ?? 1 };
+  return { ...createEvent(value, structuredClone(value), start, end), easingType: easingType ?? previous?.easingType ?? 1,
+    inst: inst ? 1 : 0, ...(inst ? { end: structuredClone(value) } : {}) };
 }
 
 export function deleteEvents(session) {

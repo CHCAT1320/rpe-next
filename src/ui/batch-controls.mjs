@@ -145,7 +145,7 @@ export class BatchControls {
       : 0;
     const contentWidth = Math.max(1, panelWidth - inset * 2);
     const logicalDeltaX = active.area === 'notes' ? deltaX / contentWidth * 1350 : 0;
-    const result = controlSelection(snapshot, kind, { deltaBeat, deltaBeatByLine, deltaX: logicalDeltaX, dragX: deltaX / active.unit, anchorMode: this.anchorMode });
+    const result = controlSelection(snapshot, kind, { deltaBeat, deltaBeatByLine, deltaX: logicalDeltaX, dragX: deltaX / active.unit, anchorMode: this.anchorMode, snapX: this.timeline.snapX, gridCount: this.timeline.gridCount });
     active.result = result;
     const view = Object.create(active.session);
     Object.defineProperty(view, 'chart', { value: result.chart });

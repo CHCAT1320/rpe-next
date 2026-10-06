@@ -1,6 +1,7 @@
 import { lineOverviewWindow, lineOverviewLayout, stepOverviewLine, LineOverviewIndex } from '../core/line-overview.mjs';
 import { shaderEvents } from '../core/shader-events.mjs';
 import { NOTE_COLORS } from './timeline.mjs';
+import { isDefaultLineGroup, isDefaultLineName, lineFeatureLabels, lineGroupName } from '../core/line-groups.mjs';
 
 export class LineSwitcher {
   constructor(stage, getContext, { select = () => {} } = {}) {
@@ -61,20 +62,21 @@ export class LineSwitcher {
     this.cache.clear(); this.chart = null; this.filterKey = null;
   }
 
-  lineIndex(index, chart, tempo) {
-    if (!this.cache.has(index)) this.cache.set(index, new LineOverviewIndex(chart.judgeLineList[index], tempo, shaderEvents(chart, index)));
-    return this.cache.get(index);
+  lineIndex(index, chart, tempo, layer = 0, extended = false) {
+    const key = `${index}:${layer}:${extended ? 1 : 0}`;
+    if (!this.cache.has(key)) this.cache.set(key, new LineOverviewIndex(chart.judgeLineList[index], tempo, extended ? shaderEvents(chart, index) : [], layer, extended));
+    return this.cache.get(key);
   }
 
-  filteredLines({ chart, tempo, start, end }) {
+  filteredLines({ chart, tempo, start, end, layer = 0, extended = false }) {
     if (chart !== this.chart || tempo !== this.tempo) {
       this.cache.clear(); this.chart = chart; this.tempo = tempo; this.filterKey = null;
     }
-    const key = `${this.notesOnly}:${this.eventsOnly}:${start}:${end}`;
+    const key = `${this.notesOnly}:${this.eventsOnly}:${start}:${end}:${layer}:${extended ? 1 : 0}`;
     if (this.filterKey === key) return this.indices;
     this.filterKey = key;
     this.indices = chart.judgeLineList.map((line, index) => index).filter(index =>
-      !this.notesOnly && !this.eventsOnly || this.lineIndex(index, chart, tempo).matches(start, end, this.notesOnly, this.eventsOnly));
+      !this.notesOnly && !this.eventsOnly || this.lineIndex(index, chart, tempo, layer, extended).matches(start, end, this.notesOnly, this.eventsOnly));
     return this.indices;
   }
 
@@ -107,16 +109,16 @@ export class LineSwitcher {
 
   draw(timestamp) {
     if (!this.active || timestamp - this.lastFrame < 100) return;
-    const { chart, tempo, seconds, selected, start, end, visible } = this.getContext();
+    const { chart, tempo, seconds, selected, start, end, visible, layer = 0, extended = false } = this.getContext();
     if (!visible || !this.enabled || !chart.judgeLineList.length) { this.hide(); return; }
     this.lastFrame = timestamp;
     const changedChart = chart !== this.chart || tempo !== this.tempo;
-    const indices = this.filteredLines({ chart, tempo, start, end });
+    const indices = this.filteredLines({ chart, tempo, start, end, layer, extended });
     const width = this.stage.clientWidth; const height = this.stage.clientHeight;
     const layout = lineOverviewLayout(width, height);
     const resized = JSON.stringify(layout) !== JSON.stringify(this.layout);
     this.layout = layout; const { columns, rows, thumbnailHeight, panelWidth } = layout;
-    this.context = { chart, tempo, seconds, selected, start, end };
+    this.context = { chart, tempo, seconds, selected, start, end, layer, extended: Boolean(extended) };
     this.stride = thumbnailHeight + 26;
     const visibleRows = Math.min(rows, Math.max(1, Math.floor((height - 38) / this.stride)));
     const overview = lineOverviewWindow(indices.indexOf(selected), indices.length, columns, visibleRows, this.browseRow);
@@ -137,7 +139,7 @@ export class LineSwitcher {
 
   renderWindow(refresh = false) {
     if (!this.active || !this.context || !this.layout) return;
-    const { chart, tempo, seconds, selected, start, end } = this.context;
+    const { chart, tempo, seconds, selected, start, end, layer, extended } = this.context;
     const { columns } = this.layout; const rows = this.visibleRows;
     const firstRow = Math.floor(this.viewport.scrollTop / this.stride);
     const first = Math.max(0, firstRow - 1) * columns;
@@ -155,28 +157,35 @@ export class LineSwitcher {
     if (!refresh) return;
     for (const index of indices) {
       const line = chart.judgeLineList[index];
-      const sample = this.lineIndex(index, chart, tempo).sample(seconds, start, end);
-      const { card, title, canvas, info } = this.cards.get(index);
+      const sample = this.lineIndex(index, chart, tempo, layer, extended).sample(seconds, start, end);
+      const { card, title, lineGroup, name, group, canvas, info } = this.cards.get(index);
       card.classList.toggle('selected', index === selected);
       card.setAttribute('aria-current', String(index === selected));
-      title.textContent = `${index === selected ? '▶ ' : ''}${index} · ${line.Name || '未命名'}`;
+      const defaultName = String(line?.Name ?? '').trim() === 'Untitled' || isDefaultLineName(line, index);
+      title.querySelector('.line-switcher-number').textContent = `${index === selected ? '▶ ' : ''}${index}`;
+      name.textContent = defaultName ? '' : ` · ${String(line.Name).trim()}`;
+      lineGroup.textContent = isDefaultLineGroup(chart, line) ? '' : ` · ${lineGroupName(chart, line)}`;
+      group.textContent = lineFeatureLabels(line).map(label => label.replace('父线=', '父=').replace('贴图=', '图=')).join(' · ');
+      group.hidden = !group.textContent;
       info.textContent = `余 ${sample.notesLeft} 音 / ${sample.eventsLeft} 事`;
-      card.setAttribute('aria-label', `${title.textContent}，${info.textContent}，视野内 ${sample.notes.length} 音符、${sample.events.length} 事件`);
+      card.setAttribute('aria-label', `${title.textContent}${lineGroup.textContent}${name.textContent}，${info.textContent}，视野内 ${sample.notes.length} 音符、${sample.events.length} 事件`);
       drawLineThumbnail(canvas, sample, seconds, start, end);
     }
   }
 
   createCard(index) {
     const card = document.createElement('button'); card.type = 'button'; card.className = 'line-switcher-card';
-    const title = document.createElement('strong'); const canvas = document.createElement('canvas');
+    const title = document.createElement('strong'); const number = document.createElement('span'); number.className = 'line-switcher-number'; const lineGroup = document.createElement('span'); lineGroup.className = 'line-switcher-line-group'; const name = document.createElement('span'); name.className = 'line-switcher-line-name'; title.append(number, lineGroup, name);
+    const group = document.createElement('em'); group.className = 'line-switcher-group';
+    const canvas = document.createElement('canvas');
     canvas.width = 240; canvas.height = 90; canvas.setAttribute('aria-hidden', 'true');
-    const info = document.createElement('small'); card.append(title, canvas, info);
+    const info = document.createElement('small'); card.append(title, group, canvas, info);
     card.onclick = event => {
       event.preventDefault(); event.stopPropagation();
       this.browseRow = Math.round(this.viewport.scrollTop / this.stride);
       this.select(index); this.lastFrame = -Infinity; this.draw(performance.now());
     };
-    return { card, title, canvas, info };
+    return { card, title, lineGroup, name, group, canvas, info };
   }
 }
 

@@ -1,12 +1,16 @@
+import { groupLineIndices, groupNames } from '../core/line-groups.mjs';
+
 export function normalizeLineIndices(indices, lineCount) {
   return [...new Set((indices ?? []).filter(index => Number.isInteger(index) && index >= 0 && index < lineCount))].sort((a, b) => a - b);
 }
 
-export function parseLineExpression(text, lineCount) {
+export function parseLineExpression(text, lineCount, chart = null) {
   const values = [];
+  const groups = new Map(groupNames(chart).map((name, index) => [name, index]));
   for (const token of String(text ?? '').trim().split(/\s+/).filter(Boolean)) {
     const range = token.split(':');
-    if (range.length === 1 && /^[-+]?\d+$/.test(token)) values.push(Number(token));
+    if (range.length === 1 && groups.has(token)) values.push(...groupLineIndices(chart, groups.get(token)));
+    else if (range.length === 1 && /^[-+]?\d+$/.test(token)) values.push(Number(token));
     else if (range.length === 2 && /^[-+]?\d+$/.test(range[0]) && /^[-+]?\d+$/.test(range[1])) {
       const start = Number(range[0]); const end = Number(range[1]);
       if (start > end) throw new Error(`线号范围无效：${token}`);
@@ -16,14 +20,21 @@ export function parseLineExpression(text, lineCount) {
   return normalizeLineIndices(values, lineCount);
 }
 
-export function formatLineExpression(indices) {
+export function formatLineExpression(indices, chart = null) {
   const values = normalizeLineIndices(indices, Number.MAX_SAFE_INTEGER);
   const tokens = [];
-  for (let index = 0; index < values.length;) {
+  const remaining = new Set(values);
+  if (chart) for (const [groupIndex, name] of groupNames(chart).entries()) {
+    if (groupIndex === 0 || !name || /\s/.test(name)) continue;
+    const members = groupLineIndices(chart, groupIndex);
+    if (members.length && members.every(index => remaining.has(index))) { tokens.push(name); members.forEach(index => remaining.delete(index)); }
+  }
+  const numeric = [...remaining].sort((left, right) => left - right);
+  for (let index = 0; index < numeric.length;) {
     let end = index;
-    while (end + 1 < values.length && values[end + 1] === values[end] + 1) end++;
+    while (end + 1 < numeric.length && numeric[end + 1] === numeric[end] + 1) end++;
     const length = end - index + 1;
-    tokens.push(length >= 3 ? `${values[index]}:${values[end]}` : values.slice(index, end + 1).join(' '));
+    tokens.push(length >= 3 ? `${numeric[index]}:${numeric[end]}` : numeric.slice(index, end + 1).join(' '));
     index = end + 1;
   }
   return tokens.join(' ');

@@ -13,7 +13,8 @@ import { migratePreferences, shortcutAction, shortcutReleased, shortcutMatches, 
 import { directoryEntries, uploadedEntries, scanMigration } from '../platform/migration.mjs';
 import { readProject, readPreferences, storePreferences, storeProject, readClipboardHistory, storeClipboardHistory } from '../platform/library.mjs';
 import { migrationDialog } from './migration-dialog.mjs';
-import { manageLines } from './line-dialog.mjs';
+import { LinePanel } from './line-panel.mjs';
+import { AssetLibraryPanel } from './asset-library.mjs';
 import { HELP_TEXT } from './help.mjs';
 import { download } from '../platform/files.mjs';
 import { RpeSkin } from './skin.mjs';
@@ -42,7 +43,7 @@ import { ProjectHome } from './home.mjs';
 import { createSettingsPanel } from './settings.mjs';
 import { AutoSaveClock } from '../application/autosave.mjs';
 import { SPECIAL_TRACKS, MAX_BASE_LAYERS } from '../core/editor-display.mjs';
-import { UI_BINDINGS } from '../core/game-ui.mjs';
+import { lineGroupName, isDefaultLineGroup, lineDisplayLabel } from '../core/line-groups.mjs';
 import { isPlaybackSpace, isTextEntry, isTypingText, releaseShortcutFocus } from './keyboard.mjs';
 import { setRatioOptions, applyViewControls } from './view-controls.mjs';
 import { generateCurveNotes } from '../core/curve-notes.mjs';
@@ -66,6 +67,8 @@ const displayFields = [
 const settingsDialog = createSettingsPanel();
 let session = new EditorSession();
 let assets = new Map();
+let assetFolders = new Set();
+let assetDirty = false;
 let chartName = 'chart.json';
 let recoveryId = crypto.randomUUID();
 let tempo = new TempoMap(session.chart.BPMList);
@@ -105,7 +108,7 @@ realtimePreview.applyShaders = false;
 realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
-const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error));
+const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error), openTimelineContextMenu);
 timeline.multiLineLabels = element('#multi-line-labels');
 timeline.multiLineScrollElement = element('#multi-line-scroll');
 timeline.multiLineScrollElement.addEventListener('input', event => {
@@ -144,10 +147,30 @@ const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, ti
   close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
 });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
+const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => images.load(session.chart, assets, chartName) });
+const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
+  notify,
+  onChange: (nextAssets, nextFolders) => {
+    assets = nextAssets; assetFolders = new Set(nextFolders ?? []); images.load(session.chart, assets, chartName); assetDirty = true; status('素材库已修改，请保存谱面以保留资源'); renderSession();
+  },
+  onTexture: (oldName, newName = oldName) => {
+    const lines = [...session.chart.judgeLineList];
+    if (newName !== oldName) {
+      let changed = false; for (let index = 0; index < lines.length; index++) if (lines[index]?.Texture === oldName) { lines[index] = { ...lines[index], Texture: newName }; changed = true; }
+      if (changed) session.commit('同步重命名判定线贴图', { ...session.chart, judgeLineList: lines });
+      images.load(session.chart, assets, chartName);
+      return;
+    }
+    const index = session.lineIndex; if (!lines[index]) return;
+    lines[index] = { ...lines[index], Texture: newName }; session.commit('更改判定线贴图', { ...session.chart, judgeLineList: lines });
+    images.load(session.chart, assets, chartName);
+  },
+});
 const clipboardHistory = new ClipboardHistory();
 const selectionOverlay = new SelectionOverlay(element('.stage'), timeline);
 const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
   chart: session.chart, tempo, seconds: chartSeconds(), selected: session.lineIndex,
+  layer: timeline.layer, extended: timeline.extended,
   start: timeline.timeAt(timeline.viewHeight()), end: timeline.timeAt(0),
   visible: hasDocument && !atHome && !preview.visible && !dialogOpen(),
 }), { select: index => selectOverviewLine(index) });
@@ -163,26 +186,46 @@ const pasteGesture = new PasteGesture({
   valid: context => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
 });
 window.addEventListener('blur', () => pasteGesture.cancel());
+let stripCache;
+function createStripCanvas(width, height) {
+  const canvas = document.createElement('canvas'); const ratio = globalThis.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(width * ratio)); canvas.height = Math.max(1, Math.round(height * ratio));
+  const context = canvas.getContext('2d'); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
+  return { canvas, context, width, height };
+}
 function drawTimelineStrips() {
-  const height = timeline.notesCanvas.clientHeight; if (!height) return;
-  const noteFrame = prepareCanvas(element('#note-density')); const historyFrame = prepareCanvas(element('#history-strip'));
+  const height = timeline.notesCanvas.clientHeight; const densityCanvas = element('#note-density'); const historyCanvas = element('#history-strip');
+  const width = densityCanvas.clientWidth; if (!height || !width) return;
   timelineActivity.compile(session.chart, tempo);
-  const duration = audio.duration > 0 ? audio.duration : timelineActivity.duration;
-  const { bins, noteBins, eventBins, maximum } = timelineActivity.density(session.lineIndex, timeline.layer, timeline.extended, duration, height);
+  const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : timelineActivity.duration);
   const historyEntries = session.recentEdits ?? [];
-  for (let index = 0; index < bins; index++) {
-    const y = height - (index + 1) * height / bins; const barHeight = Math.max(1, height / bins - 1); const half = Math.max(1, noteFrame.width / 2 - 2);
-    const noteValue = noteBins[index] ? Math.log1p(noteBins[index]) / Math.log1p(maximum) : 0;
-    const eventValue = eventBins[index] ? Math.log1p(eventBins[index]) / Math.log1p(maximum) : 0;
-    if (noteValue) { noteFrame.context.fillStyle = '#56b9d4'; noteFrame.context.globalAlpha = noteValue; noteFrame.context.fillRect(2, y, half, barHeight); }
-    if (eventValue) { noteFrame.context.fillStyle = '#d39b55'; noteFrame.context.globalAlpha = eventValue; noteFrame.context.fillRect(noteFrame.width - half - 2, y, half, barHeight); }
+  const historySignature = `${historyEntries.length}:${historyEntries.at(-1)?.start ?? ''}:${historyEntries.at(-1)?.end ?? ''}:${historyEntries.at(-1)?.label ?? ''}`;
+  const key = { chart: session.chart, line: session.lineIndex, layer: timeline.layer, extended: timeline.extended, duration, width, historyWidth: historyCanvas.clientWidth, height, historySignature };
+  if (!stripCache || Object.keys(key).some(name => stripCache[name] !== key[name])) {
+    const noteFrame = createStripCanvas(width, height); const historyFrame = createStripCanvas(historyCanvas.clientWidth, height);
+    const { bins, noteBins, eventBins, maximum } = timelineActivity.density(session.lineIndex, timeline.layer, timeline.extended, duration, height);
+    const logarithm = Math.log1p(maximum); const half = Math.max(1, width / 2 - 2);
+    for (let index = 0; index < bins; index++) {
+      const y = height - (index + 1) * height / bins; const barHeight = Math.max(1, height / bins - 1);
+      const noteValue = noteBins[index] ? Math.log1p(noteBins[index]) / logarithm : 0;
+      const eventValue = eventBins[index] ? Math.log1p(eventBins[index]) / logarithm : 0;
+      if (noteValue) { noteFrame.context.fillStyle = '#56b9d4'; noteFrame.context.globalAlpha = noteValue; noteFrame.context.fillRect(2, y, half, barHeight); }
+      if (eventValue) { noteFrame.context.fillStyle = '#d39b55'; noteFrame.context.globalAlpha = eventValue; noteFrame.context.fillRect(width - half - 2, y, half, barHeight); }
+    }
+    const historyWidth = historyCanvas.clientWidth;
+    historyEntries.forEach((command, index) => {
+      const start = Math.max(0, Math.min(duration, command.start)); const end = Math.max(start, Math.min(duration, command.end));
+      const y1 = height - end / duration * height; const y2 = height - start / duration * height;
+      historyFrame.context.globalAlpha = Math.max(0.25, (index + 1) / Math.max(1, historyEntries.length)); historyFrame.context.fillStyle = '#c69b55';
+      historyFrame.context.fillRect(2, Math.min(y1, y2) - 1, historyWidth - 4, Math.max(2, Math.abs(y2 - y1) + 2));
+    });
+    stripCache = { ...key, note: noteFrame.canvas, history: historyFrame.canvas };
   }
-  historyEntries.forEach((command, index) => {
-    const start = Math.max(0, Math.min(duration, command.start)); const end = Math.max(start, Math.min(duration, command.end)); const y1 = height - end / duration * height; const y2 = height - start / duration * height;
-    const alpha = Math.max(0.25, (index + 1) / historyEntries.length); historyFrame.context.globalAlpha = alpha; historyFrame.context.fillStyle = '#c69b55'; historyFrame.context.fillRect(2, Math.min(y1, y2) - 1, historyFrame.width - 4, Math.max(2, Math.abs(y2 - y1) + 2));
-  });
+  const noteFrame = prepareCanvas(densityCanvas); const historyFrame = prepareCanvas(historyCanvas);
+  noteFrame.context.drawImage(stripCache.note, 0, 0, width, height);
+  historyFrame.context.drawImage(stripCache.history, 0, 0, historyCanvas.clientWidth, height);
   const markerY = height - Math.max(0, Math.min(duration, chartSeconds())) / duration * height;
-  for (const frame of [noteFrame, historyFrame]) { frame.context.globalAlpha = 1; frame.context.strokeStyle = '#f5e59a'; frame.context.lineWidth = 1; frame.context.beginPath(); frame.context.moveTo(0, markerY + .5); frame.context.lineTo(frame.width, markerY + .5); frame.context.stroke(); }
+  for (const frame of [noteFrame, historyFrame]) { frame.context.strokeStyle = '#f5e59a'; frame.context.lineWidth = 1; frame.context.beginPath(); frame.context.moveTo(0, markerY + .5); frame.context.lineTo(frame.width, markerY + .5); frame.context.stroke(); }
 }
 function seekFromStrip(event) {
   const rect = event.currentTarget.getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
@@ -265,7 +308,7 @@ setInterval(rotateTip, 10000);
 const offsetSeconds = () => Number(session.chart.META.offset ?? 0) / 1000;
 const chartSeconds = () => audio.time - offsetSeconds();
 const resetEditClock = chart => {
-  editTimeSeconds = Number.isFinite(Number(chart?.chartTime)) ? Math.max(0, Number(chart.chartTime)) : 0;
+  editTimeSeconds = 0;
   editClockTick = performance.now();
 };
 const advanceEditClock = timestamp => {
@@ -282,8 +325,8 @@ const playback = new EditorPlayback(audio, hitSounds, () => {
 });
 timeline.onDragScroll = seconds => playback.seek(audio.time + seconds);
 const autoSave = new AutoSaveClock(async () => {
-  const current = session; const snapshot = { ...current.chart, chartTime: editTimeSeconds };
-  await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, [...assets], editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit, { lineIndex: current.lineIndex, seconds: audio.time });
+  const current = session; const snapshot = { ...current.chart }; delete snapshot.chartTime;
+  await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, [...assets], editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit, { lineIndex: current.lineIndex });
   if (current === session) { lastDraftDocument = current.chart; status('自动备份已保存（包含音乐、曲绘与编辑位置）'); notify('自动备份已保存', 'success'); }
 }, error => status(`自动保存失败：${error.message}，请手动保存或导出 PEZ`));
 timeline.onWheel = event => {
@@ -330,7 +373,7 @@ const home = new ProjectHome(async id => {
 
 function setHome(visible) {
   atHome = visible;
-  if (visible) lineSwitcher.reset();
+  if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element('#mute-current-line')?.classList.remove('active'); }
   if (visible) { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); }
   element('#document-name').textContent = visible ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
   element('#home').hidden = !visible;
@@ -342,10 +385,60 @@ function setHome(visible) {
   invalidate();
 }
 
+let pendingTimelineMenu = null;
+function timelineMarkers() {
+  return Array.isArray(session.chart?.markers)
+    ? session.chart.markers.filter(marker => Number.isFinite(Number(marker?.time)) && String(marker?.name ?? '').trim())
+    : [];
+}
+function renderTimelineMarkers() {
+  const root = element('#timeline-markers'); if (!root) return;
+  root.replaceChildren();
+  const width = root.clientWidth || element('#scrubber')?.clientWidth || 1;
+  const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : timelineActivity.duration || 1);
+  for (const [index, marker] of timelineMarkers().entries()) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'timeline-marker'; button.textContent = String(marker.name).trim();
+    const ratio = Math.max(0, Math.min(1, Number(marker.time) / duration));
+    button.style.left = `${ratio * width}px`; button.style.width = 'max-content'; button.style.maxWidth = '160px'; button.style.whiteSpace = 'nowrap'; button.title = `${marker.name} · ${Number(marker.time).toFixed(3)} s`;
+    button.onclick = () => playback.seek(Number(marker.time) + offsetSeconds());
+    button.oncontextmenu = event => { event.preventDefault(); event.stopPropagation(); openTimelineContextMenu(event, null, index); };
+    root.append(button);
+  }
+}
+function openTimelineContextMenu(event, canvas = null, markerIndex = null) {
+  const menu = element('#timeline-context-menu'); if (!menu) return;
+  const point = canvas ? timeline.point(event, canvas) : null;
+  pendingTimelineMenu = { time: point ? timeline.timeAt(point.y) : null, markerIndex };
+  element('#timeline-add-marker').hidden = !canvas;
+  element('#timeline-delete-marker').hidden = markerIndex === null;
+  menu.style.left = `${Math.max(4, Math.min(window.innerWidth - 190, event.clientX))}px`;
+  menu.style.top = `${Math.max(4, Math.min(window.innerHeight - 90, event.clientY))}px`;
+  menu.hidden = false;
+}
+function closeTimelineContextMenu() { const menu = element('#timeline-context-menu'); if (menu) menu.hidden = true; pendingTimelineMenu = null; }
+function addTimelineMarker() {
+  const pending = pendingTimelineMenu; closeTimelineContextMenu(); if (!pending || !Number.isFinite(pending.time)) return;
+  const content = showDialog('添加时间标记', `将在 ${pending.time.toFixed(3)} 秒处添加标记。`);
+  const input = document.createElement('input'); input.type = 'text'; input.placeholder = '例如：副歌开始'; input.setAttribute('aria-label', '标记名称'); content.append(input);
+  const apply = element('#modal-apply'); apply.hidden = false; apply.onclick = () => {
+    const name = String(input.value ?? '').trim(); if (!name) { element('#modal-error').textContent = '请输入标记名称'; return; }
+    const markers = [...timelineMarkers(), { time: pending.time, name }].sort((left, right) => left.time - right.time);
+    session.commit('添加时间标记', { ...session.chart, markers }); element('#modal').close();
+  }; input.focus();
+}
+function deleteTimelineMarker() {
+  const pending = pendingTimelineMenu; closeTimelineContextMenu(); if (!pending || pending.markerIndex === null) return;
+  const markers = timelineMarkers().filter((unused, index) => index !== pending.markerIndex);
+  session.commit('删除时间标记', { ...session.chart, markers });
+}
+window.addEventListener('pointerdown', event => { const menu = element('#timeline-context-menu'); if (menu && !menu.contains(event.target)) closeTimelineContextMenu(); }, true);
+element('#timeline-add-marker').addEventListener('click', addTimelineMarker);
+element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarker);
+
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'compact' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
@@ -359,6 +452,7 @@ for (const button of document.querySelectorAll('[data-pane]')) button.onclick = 
   const pane = button.dataset.pane;
   if (['notes', 'events'].includes(pane)) session.focus = pane;
   activatePane(pane);
+  if (pane === 'lines') linePanel.render();
 };
 function openMultiLinePanel() { activatePane('multi-line'); multiLinePanel.render(); }
 element('#multi-line-tool').addEventListener('click', openMultiLinePanel);
@@ -470,6 +564,7 @@ function renderSession() {
   session.eventWheelSteps = Object.fromEntries(['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents', 'scaleXEvents', 'scaleYEvents'].flatMap((key, index) => Number.isFinite(preferences.originalSettings.scrollValueIncrement?.[index]) ? [[key, preferences.originalSettings.scrollValueIncrement[index]]] : []));
   timeline.origin = currentBeat();
   element('#document-name').textContent = atHome ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
+  renderTimelineMarkers();
   element('#note-count').textContent = `${session.notes.length} notes`;
   const countEvents = line => [...(line.eventLayers ?? []), line.extended ?? {}].reduce((total, layer) => total + Object.entries(layer ?? {}).filter(([type, events]) => type !== 'paintEvents' && Array.isArray(events)).reduce((count, [, events]) => count + events.length, 0), 0) + shaderEvents(session.chart, session.chart.judgeLineList?.indexOf(line) ?? -1).length;
   const totalLines = session.chart.judgeLineList?.length ?? 0;
@@ -488,21 +583,14 @@ function renderSession() {
   element('#undo').disabled = !session.history.undoStack.length;
   element('#redo').disabled = !session.history.redoStack.length;
   element('#batch-run').disabled = !session.selection.size;
-  const lineList = element('#line-list');
-  const scrollPosition = lineList.scrollTop;
-  lineList.replaceChildren();
   element('#line-select').replaceChildren();
   (session.chart.judgeLineList ?? []).forEach((line, index) => {
-    const button = document.createElement('button');
-    button.textContent = `${String(index).padStart(2, '0')}  ${line.Name || '未命名'}`;
-    button.classList.toggle('active', index === session.lineIndex);
-    button.onclick = () => { session.selectLine(index); };
-    lineList.append(button);
-    const option = document.createElement('option'); option.value = index; option.textContent = `${index} · ${line.Name || '未命名'}`; element('#line-select').append(option);
+    const option = document.createElement('option'); option.value = index; option.textContent = lineDisplayLabel(session.chart, index); element('#line-select').append(option);
   });
   element('#line-select').value = session.lineIndex;
   element('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
   element('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
+  element('#notes-only').disabled = session.multiLineActive;
   element('#multi-line-count').textContent = session.multiLineActive ? session.multiLineIndices.length : 0;
   element('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
   element('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
@@ -512,11 +600,9 @@ function renderSession() {
   element('#multi-line-prev-remove').disabled = !hasLines;
   element('#multi-line-next-remove').disabled = !hasLines;
   element('#line-next').disabled = element('#line-previous').disabled = session.chart.judgeLineList.length < 2;
-  const binding = session.line?.attachUI ?? '';
-  element('#attach-ui').replaceChildren(new Option('不绑定', ''), ...UI_BINDINGS.map(([key, label]) => new Option(label, key)));
-  if (binding && !UI_BINDINGS.some(([key]) => key === binding)) element('#attach-ui').append(new Option(`保留未知绑定：${binding}`, binding));
-  element('#attach-ui').value = binding;
-  lineList.scrollTop = scrollPosition;
+  const lineGroup = element('#line-group-label');
+  if (lineGroup) { const line = session.line; lineGroup.textContent = line && !isDefaultLineGroup(session.chart, line) ? lineGroupName(session.chart, line) : ''; lineGroup.title = lineGroup.textContent ? `当前判定线分组：${lineGroup.textContent}` : ''; }
+  if (activePaneName === 'lines') linePanel.render();
   updateLayerButtons();
   const liveIssues = diagnose(session.chart);
   const liveSignature = liveIssues.map(issue => `${issue.severity}:${issue.path}:${issue.message}`).sort().join('|');
@@ -556,7 +642,7 @@ function renderSession() {
     else if (activePaneName === 'clipboard') renderClipboardPanel();
     else if (selectionCount > 1) { activatePane('multi'); multiEdit.open(session.focus === 'events' ? 'events' : 'notes'); }
     else if (selectionCount === 1) activatePane(session.focus === 'events' ? 'events' : 'notes');
-    else if (activePaneName !== 'multi-line') activatePane('chart');
+    else if (!['multi-line', 'lines', 'assets'].includes(activePaneName)) activatePane('chart');
   }
   const limits = previewLimitations(session.chart);
   element('#compatibility').textContent = '已使用原 RPE 音符素材与打击音；支持封面、静态纹理、多线与控制曲线。尚需原版逐帧对照。' + (limits.length ? `需进一步验证：${limits.join('、')}。` : '');
@@ -565,11 +651,11 @@ function renderSession() {
 
 session.addEventListener('change', renderSession);
 
-function replaceChart(chart, name, nextAssets = new Map()) {
+function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   assertChart(chart);
   lineSwitcher.reset();
   playback.pause(); audio.clear();
-  hitSounds.stop(); images.clear(); libraryProject = null;
+  hitSounds.stop(); hitSounds.onlyCurrentLine = false; element('#mute-current-line').setAttribute('aria-pressed', 'false'); element('#mute-current-line').classList.remove('active'); images.clear(); libraryProject = null;
   session.removeEventListener('change', renderSession);
   session = new EditorSession(chart);
   clipboardHistory.attach(session);
@@ -582,6 +668,8 @@ function replaceChart(chart, name, nextAssets = new Map()) {
   autoSave.reset(performance.now());
   heldPreview = null; curveStart = null; curveEnd = null; curveAnchorMode = null; curveEditorOpen = false; loop = null; element('#loop-enabled').checked = false;
   assets = nextAssets;
+  assetFolders = new Set(nextFolders ?? []);
+  assetDirty = false;
   chartName = name;
   resetEditClock(chart);
   hitSounds.setProject(chart, assets, name);
@@ -599,13 +687,13 @@ function replaceChart(chart, name, nextAssets = new Map()) {
 }
 
 function guardReplace(action) {
-  if (session.history.dirty) confirmAction('切换谱面？', action);
+  if (session.history.dirty || assetDirty) confirmAction('切换谱面？', action);
   else action();
 }
 
 async function loadCandidate(candidate, nextAssets) {
   attachExternalEffects([candidate], nextAssets);
-  replaceChart(candidate.chart, candidate.name, nextAssets);
+  replaceChart(candidate.chart, candidate.name, nextAssets, candidate.project?.assetFolders ?? []);
   libraryProject = candidate.project ?? null;
   images.load(candidate.chart, assets, chartName, candidate.info);
   const references = resourceReferences(candidate.chart, assets, chartName, candidate.info);
@@ -615,7 +703,6 @@ async function loadCandidate(candidate, nextAssets) {
   if (session.chart === candidate.chart && candidate.project?.viewState) {
     const view = candidate.project.viewState;
     if (Number.isInteger(view.lineIndex) && session.chart.judgeLineList?.[view.lineIndex]) session.selectLine(view.lineIndex);
-    if (Number.isFinite(view.seconds)) playback.seek(view.seconds);
   }
 }
 
@@ -628,6 +715,7 @@ async function loadMusic(bytes, name, updateMetadata = true) {
   assets.set(name, bytes);
   element('#music-name').textContent = name;
   element('#scrubber').max = audio.duration;
+  renderTimelineMarkers();
   if (updateMetadata) session.commit('选择音乐', { ...session.chart, META: { ...session.chart.META, song: name } });
   playback.seek(chartPosition + offsetSeconds());
 }
@@ -647,17 +735,17 @@ async function save(packageMode = false, exportOnly = false) {
   if (!packageMode && !exportOnly) {
     if (saving) return;
     saving = true;
-    const savingSession = session; const snapshot = { ...session.chart, chartTime: editTimeSeconds };
+    const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
     const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
-      chart: snapshot, chartName, assets: [...assets], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex, seconds: audio.time } };
+      chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
     try {
       await storeProject(project);
       savingSession.history.markSaved(savingSession.chart);
-      if (session === savingSession) { libraryProject = project; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
+      if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
     } finally { saving = false; }
     return;
   }
-  const snapshot = { ...session.chart, chartTime: editTimeSeconds };
+  const snapshot = { ...session.chart }; delete snapshot.chartTime;
   if (packageMode) exportPackage(snapshot, assets, chartName);
   else exportChart(snapshot, chartName);
   status(packageMode ? '已发起 PEZ 下载；包含当前载入的附属资源' : '已发起 JSON 下载；音乐和图片请另行保留');
@@ -819,6 +907,13 @@ listen('#line-next', () => switchLine(1));
 listen('#line-previous', () => switchLine(-1));
 element('#hit-volume').addEventListener('input', event => { hitSounds.setVolume(Number(event.target.value)); persistEditor(); });
 element('#hit-enabled').addEventListener('change', event => { hitSounds.enabled = event.target.checked; hitSounds.stop(); persistEditor(); });
+element('#mute-current-line').addEventListener('click', () => {
+  hitSounds.onlyCurrentLine = !hitSounds.onlyCurrentLine;
+  const button = element('#mute-current-line');
+  button.setAttribute('aria-pressed', String(hitSounds.onlyCurrentLine));
+  button.classList.toggle('active', hitSounds.onlyCurrentLine);
+  hitSounds.stop(); invalidate();
+});
 element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
 element('#realtime-alpha').addEventListener('input', event => { realtimePreview.opacity = Number(event.target.value); persistEditor(); invalidate(); });
 for (const selector of ['#loop-start', '#loop-end', '#loop-enabled']) element(selector).addEventListener('change', () => {
@@ -849,6 +944,7 @@ listen('#curve-notes', openCurvePanel);
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
+  if (session.multiLineActive) return;
   timeline.cancelPlacement(); timeline.hoverArea = 'notes'; session.focus = 'notes';
   activatePane('notes');
   editorPreferences.notesOnly = !timeline.notesOnly;
@@ -885,10 +981,6 @@ element('#toolbar-mode').onclick = () => {
   editorPreferences.toolbarMode = modes[(modes.indexOf(current) + 1) % modes.length];
   applyDisplaySettings(); persistEditor();
 };
-element('#attach-ui').onchange = event => {
-  const value = event.target.value;
-  session.updateLine('绑定游戏 UI', line => ({ ...line, attachUI: value }));
-};
 function copySelection() {
   const count = copyObjects(session);
   if (count) { clipboardHistory.remember(session); status(`已复制 ${count} 个物件`); }
@@ -914,9 +1006,9 @@ listen('#mirror', () => {
   if (session.focus === 'events') transformEvents(session, '镜像 X / 旋转事件', (event, type) => ['moveXEvents', 'rotateEvents'].includes(type) ? { ...event, start: -event.start, end: -event.end } : event);
   else session.transformSelection('镜像音符', note => ({ ...note, positionX: -note.positionX }));
 });
-listen('#manage-lines', () => { timeline.cancelPlacement(); manageLines(session); });
 listen('#metadata', () => { activatePane('metadata'); renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); }); });
 listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); }); });
+listen('#assets', () => { activatePane('assets'); assetLibrary.render(); });
 function renderHistoryPanel() {
   const host = element('#history-results'); if (!host) return;
   host.replaceChildren();
@@ -929,15 +1021,6 @@ function renderHistoryPanel() {
   }
 }
 listen('#history-panel', () => { activatePane('history'); renderHistoryPanel(); });
-listen('#line-properties', () => {
-  if (!session.line) throw new Error('请先添加判定线');
-  const { notes, eventLayers, extended, ...properties } = session.line;
-  editJson('判定线属性', '保留未编辑字段。父子线和控制曲线已接入预览；自定义纹理等仍待完成。', properties, next => {
-    const lines = [...session.chart.judgeLineList];
-    lines[session.lineIndex] = { ...next, notes, eventLayers, extended };
-    validateCommit('判定线属性', { ...session.chart, judgeLineList: lines });
-  });
-});
 listen('#clear-clipboard', () => { clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
 const clipboardButton = document.createElement('button'); clipboardButton.id = 'clipboard-history'; clipboardButton.textContent = '剪贴板历史'; clipboardButton.title = '长按 Ctrl+V';
 element('[data-panel="chart"] .action-grid').append(clipboardButton);
@@ -1162,7 +1245,7 @@ window.addEventListener('keydown', async event => {
     else if (action === 'SwitchMultiLineMode' && session.multiLineActive) session.setMultiLineMode(session.multiLineMode === 'events' ? 'notes' : 'events');
     else if (action === 'CurveBegin' || action === 'CurveEnd') captureCurve(action === 'CurveEnd');
     else if (preview.visible && ['AddTap', 'AddDrag', 'AddFlick', 'AddHold', 'AddEvent'].includes(action)) handled = false;
-    else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place();
+    else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place(undefined, undefined, undefined, action === 'AddTap');
     else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) handled = timeline.addAtCursor({ AddTap: 1, AddDrag: 4, AddFlick: 3, AddHold: 2 }[action]);
     else if (action === 'Delete') deleteSelection();
     else if (action === 'QuickDelete' && session.selection.size + session.eventSelection.size + [...(session.multiLineSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) + [...(session.multiEventSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) > 1) deleteSelection();
@@ -1187,10 +1270,12 @@ window.addEventListener('keyup', event => {
 }, true);
 window.addEventListener('blur', () => { if (heldPreview) { togglePreview(false); heldPreview = null; } });
 
-window.addEventListener('beforeunload', event => { if (session.history.dirty) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', event => { if (session.history.dirty || assetDirty) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('resize', invalidate);
 element('#modal').addEventListener('close', () => { if (atHome) home.refresh().catch(reportError); });
-new ResizeObserver(invalidate).observe(element('.canvases'));
+const markerResizeObserver = new ResizeObserver(() => { renderTimelineMarkers(); invalidate(); });
+markerResizeObserver.observe(element('.stage'));
+markerResizeObserver.observe(element('.scrubber-wrap'));
 let lastPaint = 0;
 let lastInfoTick = 0;
 let lastFrameTime = 0;
@@ -1216,7 +1301,7 @@ function frame(timestamp) {
     editorPreferences.autoSaveSeconds ?? preferences.settings.autoSaveSeconds, session.history.dirty && session.chart !== lastDraftDocument);
   if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
-  hitSounds.tick(session.chart, tempo);
+  hitSounds.tick(session.chart, tempo, session.lineIndex);
   if (!atHome && (audio.playing || dirtyFrame) && timestamp - lastFrameTime >= 1000 / preferences.settings.fpsLimit) {
     lastFrameTime = timestamp;
     const start = performance.now();
@@ -1333,13 +1418,13 @@ element('#directory-input').addEventListener('change', async event => {
 listen('#library', () => {
   if (atHome) return;
   playback.pause();
-  if (!session.history.dirty) { setHome(true); return; }
+  if (!session.history.dirty && !assetDirty) { setHome(true); return; }
   choose('返回主界面前保存修改？', '保存会更新谱面库及资源；不保存会丢弃本次未保存修改。', ['保存并返回', '不保存并返回'], value => value, async value => {
     if (value === '保存并返回') {
       await save();
-      if (session.history.dirty) throw new Error('仍有未保存修改，请等待保存结束后重试');
+      if (session.history.dirty || assetDirty) throw new Error('仍有未保存修改，请等待保存结束后重试');
     }
-    else { hasDocument = false; session.history.markSaved(); }
+    else { hasDocument = false; session.history.markSaved(); assetDirty = false; }
     setHome(true);
   });
 });
@@ -1374,7 +1459,7 @@ function applyDisplaySettings() {
   preview.aspectRatio = realtimePreview.aspectRatio = ratioWidth / ratioHeight;
   applyViewControls({ ...editorPreferences, showGameUI: editorPreferences.showGameUI ?? preferences.settings.showGameUI }, timeline, [preview, realtimePreview]);
   for (const renderer of [preview, realtimePreview]) for (const key of ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines']) renderer[key] = editorPreferences[key] ?? true;
-  const toolbarMode = editorPreferences.toolbarMode ?? 'compact';
+  const toolbarMode = editorPreferences.toolbarMode ?? 'icons';
   element('.editor-toolbar').classList.remove('mode-compact', 'mode-icons', 'mode-wide');
   element('.editor-toolbar').classList.add(`mode-${toolbarMode}`);
   element('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;

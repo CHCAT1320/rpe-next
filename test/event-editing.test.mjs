@@ -91,6 +91,18 @@ test('打击音不重复调度，seek 和暂停取消旧声音，倍速换算启
   assert.equal(scheduled[1].stopped, true); assert.equal(sounds.sources.size, 0);
 });
 
+test('高密度打击音限制瞬时声部，避免集中调度拖垮音频线程', () => {
+  const chart = createChart(); chart.judgeLineList[0].notes = Array.from({ length: 500 }, () => createNote(1, 2, 0));
+  const scheduled = [];
+  const transport = { playing: true, time: 0.95, rate: 1, playRevision: 1, context: { currentTime: 10, createBufferSource() {
+    const source = { connect() {}, disconnect() {}, start(at) { this.at = at; scheduled.push(this); }, stop() {} }; return source;
+  } } };
+  const sounds = new HitSounds(transport); sounds.gain = {}; sounds.buffers.set('tap', {});
+  sounds.tick(chart, new TempoMap(chart.BPMList));
+  assert.equal(scheduled.length, sounds.maxSameTime);
+  assert.ok(scheduled.length <= sounds.maxBurst);
+});
+
 test('原版显示和音效设置转换为实际参数且保留原值', () => {
   const settings = { SEVolume: 0.4, NoteSize: 200, LineScale: 2, GridlineCount: 21, ScrollSpeed: 8, Alpha: 80, unhandled: true };
   const result = migratePreferences(JSON.stringify(settings));

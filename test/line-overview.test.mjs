@@ -142,6 +142,10 @@ test('附近线索引按真实秒对齐 BPM 倍率，统计跨屏 Hold、各层�
   assert.equal(sample.notes.find(entry => entry.item.type === 4).start, seconds);
   assert.equal(index.sample(100, 100, 110).notes.length, 0);
   assert.equal(index.sample(100, 100, 110).eventsLeft, 0);
+  const layerOnly = new LineOverviewIndex(line, tempo, [], 1, false);
+  assert.equal(layerOnly.sample(0, 0, 20).events.length, 1);
+  const extendedOnly = new LineOverviewIndex(line, tempo, [], 0, true);
+  assert.equal(extendedOnly.sample(0, 0, 20).events.length, 1);
 });
 
 test('旧热键配置缺项和无效项不阻塞其他快捷键；输入法 Process 按物理键识别', () => {

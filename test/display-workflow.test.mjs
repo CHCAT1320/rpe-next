@@ -71,7 +71,7 @@ test('多线框选横向滚动时保留绝对起点', () => {
   assert.equal(timeline.drag.currentWorldX, 380);
 });
 
-test('Shift 两次点击框选，左拖轨迹增选、右拖轨迹减选；Y 缩放不依赖 BPM', () => {
+test('Shift 框选和左拖轨迹生效，右键保留给上下文菜单；Y 缩放不依赖 BPM', () => {
   const session = new EditorSession(); session.insertNotes([createNote(1, 2, 0)]); session.selection.clear();
   const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {});
   timeline.scale = 144;
@@ -79,10 +79,7 @@ test('Shift 两次点击框选，左拖轨迹增选、右拖轨迹减选；Y 缩
   timeline.down(start); timeline.up(start); assert.equal(timeline.drag.kind, 'rectangle'); assert.equal(session.selection.size, 0);
   timeline.down({ button: 0, clientX: 400, clientY: 500 }); assert.equal(session.selection.size, 1);
   session.selection.clear(); timeline.down({ button: 0, clientX: 50, clientY: 400 }); timeline.move({ clientX: 400, clientY: 450 }); timeline.up({ clientX: 400, clientY: 450 }); assert.equal(session.selection.size, 1);
-  timeline.down({ button: 2, clientX: 50, clientY: 400 }); timeline.move({ clientX: 400, clientY: 450 }); timeline.up({ clientX: 400, clientY: 450 }); assert.equal(session.selection.size, 0);
-  const right = { button: 2, clientX: 100, clientY: 380 };
-  timeline.down(right); timeline.up(right); assert.equal(timeline.drag.kind, 'rectangle');
-  timeline.down({ button: 2, clientX: 400, clientY: 500 }); assert.equal(session.selection.size, 1);
+  timeline.down({ button: 2, clientX: 50, clientY: 400 }); timeline.up({ button: 2, clientX: 400, clientY: 450 }); assert.equal(session.selection.size, 1);
   timeline.scale = 333;
   for (const bpm of [60, 120, 240]) { timeline.tempo = new TempoMap([{ bpm, startTime: [0, 0, 1] }]); assert.equal(timeline.vertical(0) - timeline.vertical(bpm / 60), 333); }
 });
@@ -90,8 +87,9 @@ test('Shift 两次点击框选，左拖轨迹增选、右拖轨迹减选；Y 缩
 test('自动保存固定间隔而非输入防抖，并隔离并发写入', async () => {
   let saved = 0; let finish; const clock = new AutoSaveClock(() => { saved++; return new Promise(resolve => { finish = resolve; }); }, assert.fail);
   clock.reset(0); await clock.tick(59000, true, 60, true); assert.equal(saved, 0);
-  const pending = clock.tick(60000, true, 60, true); await clock.tick(120000, true, 60, true); assert.equal(saved, 1);
-  finish(); await pending; const next = clock.tick(120000, true, 60, true); assert.equal(saved, 2); finish(); await next;
+  const pending = clock.tick(60000, true, 60, true); assert.equal(saved, 0); await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(saved, 1);
+  await clock.tick(120000, true, 60, true); assert.equal(saved, 1);
+  finish(); await pending; const next = clock.tick(120000, true, 60, true); await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(saved, 2); finish(); await next;
 });
 
 test('资源回退处理大小写、相对路径、过期 META 及同名文件歧义', () => {

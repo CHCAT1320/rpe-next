@@ -27,6 +27,7 @@ export class Preview {
 
   draw(chart, tempo, seconds, selectedLine) {
     if (!this.visible) return;
+    this.chart = chart;
     if (this.scene.chart !== chart || this.scene.tempo !== tempo) {
       this.scene.compile(chart, tempo); this.simultaneous = simultaneousNotes(chart, tempo);
       this.completionTimes = this.scene.lines.flatMap(runtime => runtime.notes.filter(entry => !entry.note.isFake).map(entry => entry.note.type === 2 ? entry.end : entry.start)).sort((left, right) => left - right);
@@ -56,8 +57,10 @@ export class Preview {
       const runtime = this.scene.lines[index];
       const state = states[index];
       if (!runtime) continue;
-      if (pass.kind === 'line' && !runtime.line.extended?.textEvents?.length && runtime.line.Texture && runtime.line.Texture !== 'line.png') {
-        const texture = this.images?.describe?.(runtime.line.Texture) ?? this.images?.images.get(runtime.line.Texture);
+      if (pass.kind === 'line' && !runtime.line.extended?.textEvents?.length) {
+        const texture = runtime.line.Texture && runtime.line.Texture !== 'line.png'
+          ? this.images?.describe?.(runtime.line.Texture) ?? this.images?.images.get(runtime.line.Texture)
+          : { naturalWidth: DEFAULT_LINE_WIDTH, naturalHeight: DEFAULT_LINE_HEIGHT };
         if (!texture || texture.naturalWidth && !textureInViewport(texture, runtime.line, state, width, height, scale, viewport)) continue;
       }
       context.save();
@@ -165,7 +168,7 @@ export class Preview {
       context.fillStyle = selected ? '#00c800' : '#fff';
       if (this.lineNumbers) {
         context.font = `${30 * scale}px RPEGame, sans-serif`; context.textAlign = 'center'; context.textBaseline = 'top';
-        const text = formatLineNumbers(group.indices);
+        const text = formatLineNumbers(group.indices, this.chart.judgeLineList);
         context.fillText(text, 0, 4 * scale);
       }
       if (this.lineArrows && selected) {
@@ -191,13 +194,25 @@ export class Preview {
       context.fillText(state.text, 0, 0);
     } else {
       const defaultLine = !line.Texture || line.Texture === 'line.png';
-      const texture = defaultLine ? this.skin?.tinted('line', state.color) : this.images?.texture ? this.images.texture(line.Texture, scale * Math.max(Math.abs(state.scaleX), Math.abs(state.scaleY)) * (devicePixelRatio || 1)) : this.images?.images.get(line.Texture);
+      const descriptor = !defaultLine ? this.images?.describe?.(line.Texture) : null;
+      const stateScale = scale * Math.max(Math.abs(state.scaleX), Math.abs(state.scaleY)) * (devicePixelRatio || 1);
+      const maxViewportScale = descriptor?.naturalWidth && descriptor?.naturalHeight
+        ? Math.min(2700 / descriptor.naturalWidth, 1800 / descriptor.naturalHeight)
+        : Infinity;
+      const decodeCap = Number.isFinite(maxViewportScale) && maxViewportScale < 1
+        ? 2 ** Math.floor(Math.log2(Math.max(1 / 64, maxViewportScale)))
+        : 1;
+      const viewportScale = Math.min(stateScale, decodeCap);
+      const rawTexture = defaultLine ? null : this.images?.texture ? this.images.texture(line.Texture, viewportScale) : this.images?.images.get(line.Texture);
+      const source = rawTexture?.source ?? rawTexture;
+      const texture = defaultLine ? this.skin?.tinted('line', state.color) : this.skin?.tintedSource(`line:${line.Texture}`, source, state.color);
       if (defaultLine) {
         if (texture) context.drawImage(texture, -DEFAULT_LINE_WIDTH * scale / 2, -DEFAULT_LINE_HEIGHT * scale / 2, DEFAULT_LINE_WIDTH * scale, DEFAULT_LINE_HEIGHT * scale);
         else context.fillRect(-DEFAULT_LINE_WIDTH * scale / 2, -DEFAULT_LINE_HEIGHT * scale / 2, DEFAULT_LINE_WIDTH * scale, DEFAULT_LINE_HEIGHT * scale);
-      } else if (texture) {
+      } else if (texture && rawTexture) {
         const anchor = line.anchor ?? [0.5, 0.5];
-        context.drawImage(texture.source ?? texture, -texture.naturalWidth * anchor[0] * scale, -texture.naturalHeight * (1 - anchor[1]) * scale, texture.naturalWidth * scale, texture.naturalHeight * scale);
+        const width = rawTexture.naturalWidth ?? rawTexture.width; const height = rawTexture.naturalHeight ?? rawTexture.height;
+        context.drawImage(texture, -width * anchor[0] * scale, -height * (1 - anchor[1]) * scale, width * scale, height * scale);
       }
     }
     context.restore();

@@ -92,6 +92,7 @@ test('判定线编号按距离及方向合并，重合线点击可循环选择',
   assert.equal(pickGuide(guides, { x: 50, y: 20 }, 1), 0);
   assert.equal(pickGuide(guides, { x: 300, y: 300 }, 0), null);
   assert.equal(formatLineNumbers([3, 1, 0, 5]), '0–1, 3, 5');
+  assert.equal(formatLineNumbers([0, 1], [{ father: -1 }, { father: 0 }]), '0, 1(0)');
 });
 
 test('直接切换空事件层后可添加事件，不引入稀疏层或覆盖其他层', () => {

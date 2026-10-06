@@ -1,4 +1,5 @@
 import { formatLineExpression, parseLineExpression } from '../application/multi-line-edit.mjs';
+import { groupLineIndices, groupNames, lineFeatureLabels, lineNameLabel } from '../core/line-groups.mjs';
 
 export class MultiLinePanel {
   constructor(host, getSession, { activate = () => {}, render = () => {}, notify = () => {}, timeline = null, persist = () => {} } = {}) {
@@ -56,19 +57,19 @@ export class MultiLinePanel {
     }
     this.host.append(actions);
     const expressionField = document.createElement('label'); expressionField.className = 'field multi-line-expression-field'; expressionField.append('线号');
-    const expression = document.createElement('input'); expression.type = 'text'; expression.inputMode = 'text'; expression.placeholder = '例如 0 2:4 8'; expression.value = formatLineExpression(session.multiLineIndices); expression.title = '空格分隔线号；x:y 表示包含两端的连续线号'; expressionField.append(expression); this.host.append(expressionField);
+    const expression = document.createElement('input'); expression.type = 'text'; expression.inputMode = 'text'; expression.placeholder = '例如 0 2:4 GroupA'; expression.value = formatLineExpression(session.multiLineIndices, session.chart); expression.title = '空格分隔线号；x:y 表示连续线号；输入分组名表示该组全部判定线'; expressionField.append(expression); this.host.append(expressionField);
     const applyExpression = () => {
       const previous = [...session.multiLineIndices];
       try {
-        const indices = parseLineExpression(expression.value, session.chart.judgeLineList?.length ?? 0);
+        const indices = parseLineExpression(expression.value, session.chart.judgeLineList?.length ?? 0, session.chart);
         if (!indices.length) throw new Error('至少需要一条有效判定线');
         session.multiLineIndices = indices; session.multiLineEnabled = true; session.normalizeMultiLine(); session.notify(); this.renderSession();
-      } catch (error) { expression.value = formatLineExpression(previous); this.notify(error.message, 'warning'); }
+      } catch (error) { expression.value = formatLineExpression(previous, session.chart); this.notify(error.message, 'warning'); }
     };
     expression.addEventListener('change', applyExpression); expression.addEventListener('blur', applyExpression); expression.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); applyExpression(); } });
     const list = document.createElement('div'); list.className = 'multi-line-list';
     list.addEventListener('scroll', () => { this.listScrollTop = list.scrollTop; }, { passive: true });
-    const syncExpression = () => { expression.value = formatLineExpression(session.multiLineIndices); };
+    const syncExpression = () => { expression.value = formatLineExpression(session.multiLineIndices, session.chart); };
     const setRow = (index, selected) => {
       const values = new Set(session.multiLineIndices);
       if (selected) values.add(index); else values.delete(index);
@@ -80,14 +81,26 @@ export class MultiLinePanel {
         row.classList.toggle('selected', active); const checkbox = row.querySelector('input'); if (checkbox) checkbox.checked = active;
       });
     };
-    const lines = session.chart.judgeLineList ?? [];
-    for (const [index, line] of lines.entries()) {
+    const lines = session.chart.judgeLineList ?? []; const names = groupNames(session.chart);
+    const createRow = (index, line) => {
       const row = document.createElement('label'); row.className = 'multi-line-row'; row.dataset.lineIndex = index;
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = session.isTargetLine(index); checkbox.disabled = !session.multiLineEnabled && index !== session.lineIndex;
       checkbox.onchange = () => { setRow(index, checkbox.checked); session.notify(); this.renderSession(); };
-      const label = document.createElement('span'); label.textContent = `${String(index).padStart(2, '0')} · ${line.Name || '未命名'}`;
+      const label = document.createElement('span'); label.className = 'multi-line-name'; const name = document.createElement('span'); name.className = 'multi-line-line-name'; name.textContent = lineNameLabel(line, index); const features = lineFeatureLabels(line); const featureText = document.createElement('small'); featureText.className = 'multi-line-features'; featureText.textContent = features.join(' · '); featureText.hidden = !features.length; label.append(name, featureText);
       const stats = document.createElement('small'); const events = [...(line.eventLayers ?? []), line.extended ?? {}].reduce((sum, layer) => sum + Object.values(layer ?? {}).reduce((total, value) => total + (Array.isArray(value) ? value.length : 0), 0), 0); stats.textContent = `${line.notes?.length ?? 0} 音符 · ${events} 事件`;
-      row.classList.toggle('current', index === session.lineIndex); row.classList.toggle('selected', checkbox.checked); row.append(checkbox, label, stats); list.append(row);
+      row.classList.toggle('current', index === session.lineIndex); row.classList.toggle('selected', checkbox.checked); row.append(checkbox, label, stats); return row;
+    };
+    const hasNamedGroups = names.slice(1).some((unused, groupIndex) => groupLineIndices(session.chart, groupIndex + 1).length > 0);
+    if (hasNamedGroups) {
+      for (const [groupIndex, groupName] of names.entries()) {
+        const group = document.createElement('details'); group.className = 'multi-line-group'; group.open = true;
+        const summary = document.createElement('summary'); const label = document.createElement('span'); label.className = 'multi-line-group-name'; label.textContent = groupName; const count = document.createElement('small'); count.textContent = `${groupLineIndices(session.chart, groupIndex).length} 条`; summary.append(label, count); group.append(summary);
+        const rows = document.createElement('div'); rows.className = 'multi-line-group-rows';
+        for (const index of groupLineIndices(session.chart, groupIndex)) rows.append(createRow(index, lines[index]));
+        group.append(rows); list.append(group);
+      }
+    } else {
+      for (const [index, line] of lines.entries()) list.append(createRow(index, line));
     }
     const finishDrag = () => { if (!this.drag) return; this.listScrollTop = list.scrollTop; this.drag = null; session.normalizeMultiLine(); session.notify(); this.renderSession(); };
     list.addEventListener('pointerdown', event => {

@@ -175,12 +175,19 @@ export function selectionScaleAnchor(snapshot, anchorMode = 0) {
   return (minimum + maximum) / 2;
 }
 
-export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaBeatByLine = null, deltaX = 0, dragX = 0, anchorMode = 0 } = {}) {
+export function controlSelection(snapshot, kind, { deltaBeat = 0, deltaBeatByLine = null, deltaX = 0, dragX = 0, anchorMode = 0, snapX = false, gridCount = 11 } = {}) {
   const beatDelta = entry => deltaBeatByLine?.get(entry.lineIndex) ?? deltaBeat;
   if (kind === 'note-move') {
     const minimum = snapshot.notes.reduce((value, entry) => Math.min(value, entry.note.positionX), Infinity);
     const maximum = snapshot.notes.reduce((value, entry) => Math.max(value, entry.note.positionX), -Infinity);
-    deltaX = Math.max(Math.min(0, -675 - minimum), Math.min(Math.max(0, 675 - maximum), deltaX));
+    const spacing = verticalGrid(gridCount).spacing;
+    if (snapX && Number.isFinite(spacing) && spacing > 0) deltaX = Math.round(deltaX / spacing) * spacing;
+    let lower = -675 - minimum; let upper = 675 - maximum;
+    if (snapX && Number.isFinite(spacing) && spacing > 0) {
+      lower = Math.ceil(lower / spacing) * spacing;
+      upper = Math.floor(upper / spacing) * spacing;
+    }
+    deltaX = Math.max(lower, Math.min(upper, deltaX));
     return editCapturedSelection(snapshot, { note: (item, entry) => ({ ...shiftedTime(item, beatDelta(entry)), positionX: item.positionX + deltaX }) });
   }
   if (kind === 'note-scale') {

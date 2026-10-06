@@ -105,6 +105,14 @@ test('控制球预览不修改原谱和历史，移动整体约束边界，跨�
   assert.deepEqual([74, 75, 124, 125].map(delta => controlLineOffset(delta, true)), [0, 1, 1, 2]);
 });
 
+test('音符整体移动吸附时只量化位移，不改变各音符的相对横坐标', () => {
+  const snapshot = captureSelection(fixture());
+  const snapped = controlSelection(snapshot, 'note-move', { deltaX: 210, snapX: true, gridCount: 11 });
+  assert.deepEqual(snapped.chart.judgeLineList[0].notes.map(note => note.positionX), [70, 370]);
+  const unsnapped = controlSelection(snapshot, 'note-move', { deltaX: 70, snapX: false, gridCount: 11 });
+  assert.deepEqual(unsnapped.chart.judgeLineList[0].notes.map(note => note.positionX), [-130, 170]);
+});
+
 test('缩放球使用中心轴，按 1/2 固定首尾音符，向内拖可翻转且约束边界', () => {
   const snapshot = captureSelection(fixture());
   const positions = options => controlSelection(snapshot, 'note-scale', options).chart.judgeLineList[0].notes.map(note => note.positionX);

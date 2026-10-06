@@ -34,18 +34,32 @@ export function lineOverviewLayout(width, height) {
 }
 
 export class LineOverviewIndex {
-  constructor(line, tempo, shaders = line.extended?.paintEvents ?? []) {
+  constructor(line, tempo, shaders = [], layer = undefined, extended = false) {
     const factor = line.bpmfactor ?? 1;
     const timing = item => ({ item, start: tempo.seconds(item.startTime, factor), end: tempo.seconds(item.endTime, factor) });
     const notes = (line.notes ?? []).map(timing);
     const events = [];
-    (line.eventLayers ?? []).forEach((layer, layerIndex) => EVENT_TYPES.forEach((type, channel) => {
-      for (const event of layer?.[type] ?? []) events.push({ ...timing(event), channel, layer: layerIndex });
-    }));
-    for (const [type, list] of Object.entries(line.extended ?? {})) if (type !== 'paintEvents' && Array.isArray(list)) {
-      for (const event of list) if (event?.startTime && event?.endTime) events.push({ ...timing(event), channel: 5 });
+    if (extended) {
+      const extendedTypes = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents'];
+      for (const [type, list] of Object.entries(line.extended ?? {})) {
+        const channel = extendedTypes.indexOf(type);
+        if (channel < 0 || !Array.isArray(list)) continue;
+        for (const event of list) if (event?.startTime && event?.endTime) events.push({ ...timing(event), channel, layer: 0 });
+      }
+      for (const event of shaders) events.push({ ...timing(event), channel: 3, layer: 0 });
+    } else {
+      const layers = layer === undefined ? (line.eventLayers ?? []) : [line.eventLayers?.[layer] ?? {}];
+      layers.forEach((currentLayer, layerIndex) => EVENT_TYPES.forEach((type, channel) => {
+        for (const event of currentLayer[type] ?? []) events.push({ ...timing(event), channel, layer: layer === undefined ? layerIndex : layer });
+      }));
+      if (layer === undefined) for (const [type, list] of Object.entries(line.extended ?? {})) {
+        if (type === 'paintEvents' || !Array.isArray(list)) continue;
+        for (const event of list) if (event?.startTime && event?.endTime) events.push({ ...timing(event), channel: 5, layer: 0 });
+      }
+      // Preserve the direct-constructor API used by diagnostics and plugins.
+      // The line switcher passes an empty shader list for ordinary layers.
+      for (const event of shaders) events.push({ ...timing(event), channel: 5, layer });
     }
-    for (const event of shaders) events.push({ ...timing(event), channel: 5 });
     this.notes = new IntervalIndex(notes, entry => entry.start, entry => entry.end);
     this.events = new IntervalIndex(events, entry => entry.start, entry => entry.end);
     this.noteEnds = notes.map(entry => entry.end).sort((left, right) => left - right);

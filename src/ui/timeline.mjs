@@ -10,8 +10,10 @@ import { TempoMap } from '../core/tempo.mjs';
 import { snapPosition, snapTime, verticalGrid, placementRange } from '../core/edit-grid.mjs';
 import { SPECIAL_TRACKS, eventChains, simultaneousNotes, strokeIntersects } from '../core/editor-display.mjs';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.mjs';
+import { lineDisplayLabel } from '../core/line-groups.mjs';
 
 export const NOTE_COLORS = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
+const isHookedEvent = event => event?.inst === true || Number(event?.inst) === 1;
 const labels = ['X', 'Y', '旋转', '透明', '速度'];
 const extendedLabels = SPECIAL_TRACKS.map(track => track.label);
 
@@ -28,12 +30,13 @@ export function prepareCanvas(canvas) {
 }
 
 export class Timeline {
-  constructor(notesCanvas, eventsCanvas, getSession, onEvent, changed, reportError = console.error) {
+  constructor(notesCanvas, eventsCanvas, getSession, onEvent, changed, reportError = console.error, onContextMenu = () => {}) {
     this.notesCanvas = notesCanvas;
     this.eventsCanvas = eventsCanvas;
     this.getSession = () => this.bulkPreview?.session ?? getSession();
     this.onEvent = onEvent;
     this.changed = changed;
+    this.onContextMenu = onContextMenu;
     this.origin = 0;
     this.scale = 500;
     this.division = 4;
@@ -66,7 +69,7 @@ export class Timeline {
         this.onWheel(event);
         changed();
       }, { passive: false });
-      canvas.addEventListener('contextmenu', event => event.preventDefault());
+      canvas.addEventListener('contextmenu', event => { event.preventDefault(); this.onContextMenu(event, canvas); });
     }
     notesCanvas.addEventListener('pointermove', event => this.move(event));
     notesCanvas.addEventListener('pointerleave', () => { if (!this.drag) this.cursor = null; changed(); });
@@ -187,10 +190,12 @@ export class Timeline {
     return snap ? beatValue(snapTime(this.timeAt(vertical), this.division, this.tempo, factor)) : this.tempo.beat(this.timeAt(vertical), factor);
   }
   get renderNoteScale() {
+    const session = this.getSession();
     const width = this.panelWidth(this.notesCanvas.clientWidth, 'notes');
     const gap = this.columnGap ?? 24;
     const baseWidth = this.originalPanelWidth || this.notesCanvas.clientWidth || width;
-    return this.noteScale * (width / Math.max(1, baseWidth)) * (this.notesOnly ? width / Math.max(1, (width - gap) / 2) : 1);
+    const notesViewOnly = this.notesOnly;
+    return this.noteScale * (width / Math.max(1, baseWidth)) * (notesViewOnly ? width / Math.max(1, (width - gap) / 2) : 1);
   }
   horizontal(position) { return this.noteHorizontal(position); }
   noteInset(width = this.panelWidth(this.notesCanvas.clientWidth, 'notes')) { return Math.min(48 * this.renderNoteScale, Math.max(0, width / 2 - 1)); }
@@ -236,7 +241,7 @@ export class Timeline {
     this.multiLineLabels.replaceChildren();
     if (!showLabels) return;
     const panelWidth = this.panelWidth(width, area); const stride = this.panelStride(width, area); const offset = this.multiLineViewportOffset(width, area);
-    const lines = this.panelCount(area) === 1 ? [{ index: session.targetLineIndices[0], text: session.multiLineMerge && area === 'notes' ? '多线合并' : session.targetLineIndices.map(index => `线 ${index}`).join(' · ') }] : session.targetLineIndices.map(index => ({ index, text: `线 ${index}` }));
+    const lines = this.panelCount(area) === 1 ? [{ index: session.targetLineIndices[0], text: session.multiLineMerge && area === 'notes' ? `多线合并 · ${session.targetLineIndices.map(index => lineDisplayLabel(session.chart, index)).join(' / ')}` : session.targetLineIndices.map(index => lineDisplayLabel(session.chart, index)).join(' · ') }] : session.targetLineIndices.map(index => ({ index, text: lineDisplayLabel(session.chart, index) }));
     for (const [panel, line] of lines.entries()) { const label = document.createElement('span'); label.textContent = line.text; label.style.width = `${panelWidth}px`; label.style.transform = `translateX(${panel * stride - offset}px)`; this.multiLineLabels.append(label); }
   }
 
@@ -341,6 +346,7 @@ export class Timeline {
   down(event) {
     if (![0, 1, 2].includes(event.button)) return;
     event.preventDefault?.();
+    if (event.button === 2) return;
     if (this.finishRectangle(event)) return;
     this.notesCanvas.focus();
     this.notesCanvas.setPointerCapture(event.pointerId);
@@ -708,8 +714,9 @@ export class Timeline {
           if (!group || group.entries.length < 2) continue;
           const lineSelection = session.multiEventSelection?.get(lineIndex) ?? (lineIndex === session.lineIndex ? session.eventSelection : new Set());
           const hasSelected = group.entries.some(entry => lineSelection.has(eventKey(type, entry.index)));
-          const linked = group.entries.some(entry => Number(entry.event.linkgroup ?? 0) > 0);
-          if (hasSelected || linked) continue;
+          const bound = group.entries.some(entry => Number(entry.event.linkgroup ?? 0) > 0);
+          const hooked = group.entries.some(entry => isHookedEvent(entry.event));
+          if (hasSelected || bound || hooked) continue;
           seamlessGroups.add(group);
           const first = group.entries[0].event; const last = group.entries.at(-1).event;
           const top = Math.max(23, this.verticalForLine(beatValue(last.endTime), lineIndex, height));
@@ -723,11 +730,11 @@ export class Timeline {
           this.eventRects.push(rectangle);
           const lineSelection = session.multiEventSelection?.get(lineIndex) ?? (lineIndex === session.lineIndex ? session.eventSelection : new Set());
           const selected = lineSelection.has(eventKey(type, index));
-          const linked = Number(event.linkgroup ?? 0) > 0;
+          const hooked = isHookedEvent(event);
           const seamless = seamlessGroups.has(ranges.get(index));
           context.globalAlpha = this.eventOpacity ?? 0.25;
-          context.fillStyle = type === 'paintEvents' ? '#c6a1ff' : selected ? '#ffe091' : linked ? '#ffe044' : '#e58d24'; if (!seamless) context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-          context.globalAlpha = 1; context.strokeStyle = selected ? '#fff2bd' : type === 'paintEvents' ? '#c6a1ff' : linked ? '#ffe044' : '#ffa334'; context.lineWidth = selected ? 2 : 1; if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+          context.fillStyle = type === 'paintEvents' ? '#c6a1ff' : selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24'; if (!seamless) context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+          context.globalAlpha = 1; context.strokeStyle = selected ? '#fff2bd' : type === 'paintEvents' ? '#c6a1ff' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1; if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
            if (type !== 'paintEvents' && channelWidth >= (this.eventCurveThreshold ?? 24) && Number.isFinite(event.start) && Number.isFinite(event.end)) {
             const group = ranges.get(index); context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip(); context.lineWidth = 1.5; context.strokeStyle = selected ? '#fff4c2' : '#ffe0a3'; context.beginPath();
             for (let step = 0; step <= 24; step++) { const progress = step / 24; const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1); const value = event.start + (event.end - event.start) * amount; const normalized = group.max - group.min > 0.01 ? (value - group.min) / (group.max - group.min) : 0.5; const x = rectangle.x + 4 + normalized * Math.max(1, rectangle.width - 8); const y = bottom - progress * (bottom - top); if (!step) context.moveTo(x, y); else context.lineTo(x, y); }
@@ -846,8 +853,8 @@ export class Timeline {
         if (!group || group.entries.length < 2) continue;
         const linkedSelection = group.entries.some(candidate => {
           const selected = this.getSession().eventSelection.has(eventKey(type, candidate.index));
-          const linked = Number(candidate.event.linkgroup ?? 0) > 0;
-          return selected || linked;
+          const bound = Number(candidate.event.linkgroup ?? 0) > 0;
+          return selected || bound || isHookedEvent(candidate.event);
         });
         if (linkedSelection) continue;
         seamlessGroups.add(group);
@@ -866,14 +873,14 @@ export class Timeline {
         const rectangle = { x: barX, y: Math.max(0, vertical), width: barWidth, height: Math.max(2, Math.min(height, bottom) - Math.max(0, vertical)), index: entry.index, type };
         this.eventRects.push(rectangle);
         const selected = this.getSession().eventSelection.has(eventKey(type, entry.index));
-        const linked = Number(entry.item.linkgroup ?? 0) > 0;
+        const hooked = isHookedEvent(entry.item);
         const chain = ranges.get(entry.index);
         const seamless = seamlessGroups.has(chain);
         context.globalAlpha = this.eventOpacity ?? 0.25;
-        context.fillStyle = selected ? '#ffe091' : linked ? '#ffe044' : '#e58d24';
+        context.fillStyle = selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24';
         if (!seamless) context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-        context.strokeStyle = selected ? '#fff2bd' : linked ? '#ffe044' : '#ffa334'; context.lineWidth = selected ? 2 : 1;
-        if (linked) context.setLineDash([4, 3]);
+        context.strokeStyle = selected ? '#fff2bd' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1;
+        if (hooked) context.setLineDash([4, 3]);
         if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
         context.setLineDash([]);
         context.globalAlpha = 1;
