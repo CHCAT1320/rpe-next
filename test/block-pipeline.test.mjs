@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { BlockPipeline, RENDER_TARGETS, TEXTURE_ST, glowRingWeight, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
+import { BlockPipeline, RENDER_TARGETS, TEXTURE_ST, adaptFragment, glowRingWeight, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
 import { blockTransform, blockState } from '../src/core/block-area.mjs';
 
 const shaders = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/shaders.json', import.meta.url), 'utf8'));
@@ -401,33 +401,39 @@ test('贴图 Wrap 按 materials.md §1：噪声镜像、PointNoise 平铺、Bloc
   assert.equal(pipeline.textures.size, 5);
 });
 
-test('sampler 按着色器声明的 layout location 绑定，而不是调用方的枚举顺序', () => {
+test('每个 sampler 拿到互不重复的 texture unit', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
-  const active = pipeline.programs.get('ActiveBlock')[0];
-  // Declaration order is not the order the caller passes them in. Binding by enumeration crossed
-  // _SceneColor, _TouchDisplaceMap and _NoiseMap: unit 8 got the noise texture where the shader
-  // expects the scene colour.
-  assert.equal(active.samplerUnits.get('_ComposeRT'), 0);
-  assert.equal(active.samplerUnits.get('_SparkMap'), 7);
-  assert.equal(active.samplerUnits.get('_SceneColor'), 8);
-  assert.equal(active.samplerUnits.get('_TouchDisplaceMap'), 9);
-  assert.equal(active.samplerUnits.get('_NoiseMap'), 10);
-  assert.equal(active.samplerUnits.size, 11);
-  // Every vendored sampler carries an explicit unit, so nothing silently falls back to counting.
-  // Count only real declarations — `UNITY_LOCATION(` also appears in the macro's own definition.
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  // With the location qualifier neutralised, only `uniform1i` decides where each sampler reads
+  // from, so the units have to be distinct within a pass. ActiveBlock binds eleven and runs last.
+  const units = gl.__calls.filter((call) => call.name === 'activeTexture').map((call) => call.args[0] - gl.TEXTURE0);
+  assert.ok(units.length >= 11, `activeTexture 调用过少: ${units.length}`);
+  assert.deepEqual(units.slice(-11), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 'ActiveBlock 的 11 个 sampler 应各占一个 unit');
+  const bound = gl.__calls.filter((call) => call.name === 'uniform1i');
+  assert.ok(bound.length >= 11, '每个 sampler 都应设置 uniform');
+});
+
+test('适配 WebGL2：UNITY_LOCATION 必须被中和，否则全部 program 编译失败', () => {
+  // GLSL ES 3.00 rejects `layout(location = ...)` on a uniform, and HLSLCC stamps every sampler
+  // with it through this macro. Unity's own no-uniform-location branch is empty, so flipping the
+  // guard is the whole fix.
+  const source = shaders.programs.ActiveBlock[0].fragment;
+  assert.match(source, /#define\s+UNITY_SUPPORTS_UNIFORM_LOCATION\s+1/, 'dump 原文应为 1');
+  const adapted = adaptFragment(source);
+  assert.match(adapted, /#define\s+UNITY_SUPPORTS_UNIFORM_LOCATION\s+0/);
+  // Everything else must survive untouched, and no layout(location) may remain on a uniform.
+  assert.equal(adapted.length, source.length, '只应改动那一个字符');
+  const leftovers = adapted.split('\n').filter((line) => /layout\s*\(\s*location/.test(line) && !/(^|\s)(out|in)\s/.test(line) && !/^\s*#define/.test(line));
+  assert.deepEqual(leftovers, [], '仍有 uniform 使用 layout(location)');
+  // The same guard exists in every vendored fragment, so the rewrite must apply to all of them.
   for (const [key, programs] of Object.entries(shaders.programs)) {
     for (const [index, program] of programs.entries()) {
-      const built = pipeline.programs.get(key)[index];
-      const declared = (program.fragment.match(/UNITY_LOCATION\(\s*\d+\s*\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D/g) ?? []).length;
-      assert.ok(declared > 0, `${key}#${index} 应有 sampler 声明`);
-      assert.equal(built.samplerUnits.size, declared, `${key}#${index} 有未解析的 sampler unit`);
+      assert.match(adaptFragment(program.fragment), /#define\s+UNITY_SUPPORTS_UNIFORM_LOCATION\s+0/, `${key}#${index} 未被适配`);
     }
   }
-  // And the units actually issued to GL follow the declarations.
-  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  const units = new Set(gl.__calls.filter((call) => call.name === 'activeTexture').map((call) => call.args[0] - gl.TEXTURE0));
-  for (const unit of [0, 7, 8, 9, 10]) assert.ok(units.has(unit), `未绑定 unit ${unit}`);
+  // A fragment without the guard is passed through unchanged rather than corrupted.
+  assert.equal(adaptFragment('void main() {}'), 'void main() {}');
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {

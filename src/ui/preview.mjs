@@ -250,12 +250,16 @@ export class Preview {
 
   /** Kick off the one-time load of the vendored shaders and textures. */
   requestBlockPipeline() {
-    if (this.blockPipeline || this.blockPipelinePending || typeof document === 'undefined') return;
+    // A failure must not be retried every frame: each attempt allocates another canvas and another
+    // WebGL context, which is how the earlier compile failure produced "Too many active WebGL
+    // contexts" instead of one clear message. `setBlockRenderer` clears the flag for a manual retry.
+    if (this.blockPipeline || this.blockPipelinePending || this.blockPipelineFailed || typeof document === 'undefined') return;
     this.blockPipelinePending = true;
     this.ensureBlockPipeline()
       .then(() => { this.blockPipelinePending = false; this.invalidate?.(); })
       .catch((error) => {
         this.blockPipelinePending = false;
+        this.blockPipelineFailed = true;
         // Swallowing this used to make a dead pipeline indistinguishable from "the shaders were
         // never applied", with nothing to go on. Surface it instead: which program failed to
         // compile is the whole diagnosis.

@@ -185,6 +185,23 @@ export function glowRingWeights(glowRadius = 6, falloff = 2.65, threshold = 0.01
   return weights;
 }
 
+/**
+ * Make a vendored fragment stage acceptable to WebGL2.
+ *
+ * HLSLCC emits `#define UNITY_LOCATION(x) layout(location = x)` and stamps every sampler with it.
+ * GLSL ES 3.00 — and so WebGL2 — rejects `layout(location = ...)` on anything but a program input or
+ * output, so all thirteen programs failed to compile with
+ * `'location' : invalid layout qualifier: only valid on program inputs and outputs`.
+ *
+ * The file already carries an empty definition for platforms without uniform locations, behind
+ * `UNITY_SUPPORTS_UNIFORM_LOCATION`; flipping that guard to 0 selects it. That is the whole fix:
+ * the samplers become plain uniforms, still bound by name, and `applyUniforms` hands each one a
+ * distinct texture unit. Nothing else is rewritten, so the vendored JSON stays byte-faithful.
+ */
+export function adaptFragment(source) {
+  return source.replace(/^([ \t]*#define[ \t]+UNITY_SUPPORTS_UNIFORM_LOCATION[ \t]+)1[ \t]*$/m, '$10');
+}
+
 function compile(gl, type, source) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
@@ -261,7 +278,7 @@ export class BlockPipeline {
   buildProgram(key, index, program) {
     const gl = this.gl;
     const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SOURCE);
-    const fragment = compile(gl, gl.FRAGMENT_SHADER, program.fragment);
+    const fragment = compile(gl, gl.FRAGMENT_SHADER, adaptFragment(program.fragment));
     const handle = gl.createProgram();
     gl.attachShader(handle, vertex);
     gl.attachShader(handle, fragment);
@@ -279,15 +296,9 @@ export class BlockPipeline {
       uniforms.set(info.name.replace(/\[0\]$/, ''), gl.getUniformLocation(handle, info.name));
     }
     const state = Array.isArray(PASS_STATE[key]) ? PASS_STATE[key][index] : PASS_STATE[key];
-    // The vendored fragments declare their samplers as `UNITY_LOCATION(n) uniform sampler2D name`,
-    // i.e. with an explicit texture unit. Binding by enumeration order silently crossed three of
-    // ActiveBlock's samplers, because the declaration order is not the order the caller passes them
-    // in. Read the declared units and bind to those.
-    const samplerUnits = new Map();
-    for (const match of program.fragment.matchAll(/UNITY_LOCATION\(\s*(\d+)\s*\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D\s+(\w+)\s*;/g)) {
-      samplerUnits.set(match[2], Number(match[1]));
-    }
-    return { key, index, handle, uniforms, state, samplerUnits, source: program };
+    // `adaptFragment` strips the explicit texture units, so the samplers are plain uniforms and
+    // `applyUniforms` fully controls each one's unit — which is why enumerating them is safe here.
+    return { key, index, handle, uniforms, state, source: program };
   }
 
   createTarget({ key, divisor, linear }) {
@@ -448,15 +459,14 @@ export class BlockPipeline {
 
   applyUniforms(program, textures, floats, vectors) {
     const gl = this.gl;
-    let fallback = 0;
+    let unit = 0;
     for (const [name, target] of Object.entries(textures)) {
       const location = program.uniforms.get(name);
       if (location == null) continue;
-      // Prefer the shader's own declared unit; only fall back to counting when it has none.
-      const unit = program.samplerUnits.get(name) ?? fallback++;
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, target.texture ?? target);
       gl.uniform1i(location, unit);
+      unit += 1;
     }
     for (const [name, value] of Object.entries(floats)) {
       const location = program.uniforms.get(name);
@@ -501,14 +511,14 @@ export class BlockPipeline {
 
   applySamplers(program, textures) {
     const gl = this.gl;
-    let fallback = 0;
+    let unit = 0;
     for (const [name, entry] of Object.entries(textures)) {
       const location = program.uniforms.get(name);
       if (location == null || !entry) continue;
-      const unit = program.samplerUnits.get(name) ?? fallback++;
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, entry.texture);
       gl.uniform1i(location, unit);
+      unit += 1;
     }
   }
 

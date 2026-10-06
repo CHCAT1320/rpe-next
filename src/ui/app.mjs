@@ -927,9 +927,14 @@ element('#block-optional').addEventListener('change', event => { setBlockOptiona
 function setBlockRenderer(mode) {
   preview.blockRenderer = realtimePreview.blockRenderer = mode;
   element('#block-pipeline').checked = mode === 'block';
-  // A dead pipeline must not look like the shaders were simply never applied.
-  preview.onBlockError = realtimePreview.onBlockError = (message) => status(`块管线不可用，已回退简化绘制：${message}`);
-  if (mode === 'block') { preview.requestBlockPipeline(); realtimePreview.requestBlockPipeline(); }
+  for (const instance of [preview, realtimePreview]) {
+    // A dead pipeline must not look like the shaders were simply never applied.
+    instance.onBlockError = (message) => status(`块管线不可用，已回退简化绘制：${message}`);
+    // Re-enabling the toggle is an explicit retry, so clear the latch that otherwise stops the
+    // per-frame attempt loop after one failure.
+    if (mode === 'block' && instance.blockPipelineFailed) { instance.blockPipelineFailed = false; instance.blockPipeline = null; }
+    if (mode === 'block') instance.requestBlockPipeline();
+  }
 }
 
 /**
