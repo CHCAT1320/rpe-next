@@ -1,13 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 
-const root = new URL('../', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\');
+const outputIndex = process.argv.indexOf('--output');
+const root = outputIndex >= 0 ? process.argv[outputIndex + 1] : fileURLToPath(new URL('../', import.meta.url));
+const notesOnly = process.argv.includes('--notes-only');
 const textureRoot = join(root, 'assets', 'rpe', 'Texture');
 const soundRoot = join(root, 'assets', 'rpe', 'SE');
+mkdirSync(textureRoot, { recursive: true });
 const clamp = value => Math.max(0, Math.min(1, value));
 const blend = (pixels, index, red, green, blue, alpha) => {
   const sourceAlpha = clamp(alpha); if (!sourceAlpha) return;
@@ -39,18 +43,50 @@ const writePng = (file, image) => {
   const header = Buffer.alloc(13); header.writeUInt32BE(image.width, 0); header.writeUInt32BE(image.height, 4); header[8] = 8; header[9] = 6;
   writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows, { level: 9 })), chunk('IEND', Buffer.alloc(0))]));
 };
-const head = (width, height, color, highlight = false) => canvas(width, height, (pixels, w, h) => { if (highlight) { rounded(pixels, w, h, w * 0.035, h * 0.08, w * 0.965, h * 0.92, h * 0.38, [255, 204, 66], 0.18); rounded(pixels, w, h, w * 0.065, h * 0.14, w * 0.935, h * 0.86, h * 0.34, [255, 220, 92], 0.28); } rounded(pixels, w, h, w * 0.06, h * 0.12, w * 0.94, h * 0.88, h * 0.34, [255, 255, 255], 0.9); rounded(pixels, w, h, w * 0.12, h * 0.2, w * 0.88, h * 0.8, h * 0.25, color, 1); });
-const holdBody = (width, height, color) => canvas(width, height, (pixels, w, h) => { rounded(pixels, w, h, w * 0.055, 0, w * 0.945, h, w * 0.2, [255, 255, 255], 0.22); for (let y = 0; y < h; y++) { const mix = 0.5 + 0.5 * Math.sin(y / h * Math.PI * 5); const tint = color.map((value, index) => Math.round(value * (0.82 + mix * 0.18) + (index === 0 ? 255 : 0) * mix * 0.08)); rounded(pixels, w, h, w * 0.095, y, w * 0.905, y + 2, 1, tint, 0.9); } rounded(pixels, w, h, w * 0.12, h * 0.02, w * 0.88, h * 0.98, w * 0.12, color, 0.42); });
+const head = (width, height, color, bodyHeight, highlight = false, hold = false) => canvas(width, height, (pixels, canvasWidth, canvasHeight) => {
+  const top = hold ? 0 : (canvasHeight - bodyHeight) / 2;
+  const bottom = top + bodyHeight;
+  const radius = hold ? 0 : bodyHeight * 0.3;
+  if (highlight) {
+    const centerX = canvasWidth / 2; const centerY = (top + bottom) / 2;
+    const halfX = canvasWidth * 0.44 - radius; const halfY = bodyHeight / 2 - radius;
+    for (let vertical = 0; vertical < canvasHeight; vertical++) for (let horizontal = 0; horizontal < canvasWidth; horizontal++) {
+      const deltaX = Math.abs(horizontal - centerX) - halfX;
+      const deltaY = Math.abs(vertical - centerY) - halfY;
+      const distance = Math.hypot(Math.max(deltaX, 0), Math.max(deltaY, 0)) + Math.min(Math.max(deltaX, deltaY), 0) - radius;
+      if (distance > 0 && distance < 42) blend(pixels, (vertical * canvasWidth + horizontal) * 4, 255, 205, 65, 0.75 * Math.exp(-distance * distance / 250));
+    }
+  }
+  rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.06, top, canvasWidth * 0.94, bottom, radius, [255, 255, 255], 1);
+  const inset = hold ? 7 : 9;
+  rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.12, top + inset, canvasWidth * 0.88, bottom - inset, hold ? 0 : bodyHeight * 0.2, color, 1);
+});
+const holdBody = (width, height, color) => canvas(width, height, (pixels, canvasWidth, canvasHeight) => {
+  rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.06, -1, canvasWidth * 0.94, canvasHeight + 1, 0, [255, 255, 255], 0.7);
+  rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.12, -1, canvasWidth * 0.88, canvasHeight + 1, 0, color, 0.9);
+});
 const noteAssets = {
-  Tap2: head(1089, 100, [35, 194, 235]), Tap2HL: head(1089, 200, [35, 194, 235], true),
-  Drag2: head(1089, 60, [255, 198, 45]), DragHL: head(1089, 160, [255, 198, 45], true),
-  Flick2: head(1089, 200, [239, 93, 194]), Flick2HL: head(1089, 300, [239, 93, 194], true),
-  Hold: holdBody(989, 1900, [38, 192, 235]), Hold3: holdBody(1089, 1900, [33, 215, 203]), HoldHL: holdBody(1086, 1900, [33, 215, 203]),
-  HoldHead: head(1089, 50, [33, 215, 203]), HoldHeadHL: head(1086, 99, [33, 215, 203], true), HoldEnd: head(1089, 50, [33, 215, 203]),
+  Tap2: head(1089, 100, [35, 194, 235], 84), Tap2HL: head(1089, 200, [35, 194, 235], 84, true),
+  Drag2: head(1089, 100, [255, 198, 45], 76), DragHL: head(1089, 200, [255, 198, 45], 76, true),
+  Flick2: head(1089, 200, [239, 93, 194], 152), Flick2HL: head(1089, 300, [239, 93, 194], 152, true),
+  Hold: holdBody(989, 1900, [33, 215, 203]), Hold3: holdBody(1089, 1900, [33, 215, 203]), HoldHL: holdBody(1089, 1900, [33, 215, 203]),
+  HoldHead: head(1089, 50, [33, 215, 203], 50, false, true), HoldHeadHL: head(1089, 99, [33, 215, 203], 50, true, true), HoldEnd: head(1089, 50, [33, 215, 203], 50, false, true),
 };
 for (const [name, image] of Object.entries(noteAssets)) writePng(join(textureRoot, `${name}.png`), image);
+if (notesOnly) {
+  const manifestFile = join(root, 'assets', 'rpe', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+  for (const entry of manifest.files) {
+    if (!Object.keys(noteAssets).some(name => entry.path === `Texture/${name}.png`)) continue;
+    const bytes = readFileSync(join(root, 'assets', 'rpe', entry.path));
+    entry.bytes = bytes.length;
+    entry.sha256 = createHash('sha256').update(bytes).digest('hex');
+  }
+  writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+  process.exit(0);
+}
 const effectSizes = [24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24];
-for (let frame = 1; frame <= 31; frame++) {
+for (let frame = 1; !notesOnly && frame <= 31; frame++) {
   const width = frame >= 25 && frame <= 30 ? 259 : frame === 31 ? 169 : 255; const height = frame === 31 ? 169 : 256; const progress = (frame - 1) / 30; const image = canvas(width, height, (pixels, w, h) => {
     const centerX = w / 2; const centerY = h / 2; const radius = 14 + progress * Math.min(w, h) * 0.42; const ringWidth = Math.max(3, 18 * (1 - progress));
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const distance = Math.hypot(x - centerX, y - centerY); const ring = clamp(1 - Math.abs(distance - radius) / ringWidth); const glow = clamp(1 - distance / (radius + 36)) * 0.16; if (ring > 0 || glow > 0) blend(pixels, (y * w + x) * 4, 255, 220 - Math.round(progress * 50), 120 + Math.round(progress * 90), Math.max(ring * (0.85 - progress * 0.35), glow)); }

@@ -3,63 +3,63 @@
   "files": [
     {
       "path": "Texture/Tap2.png",
-      "bytes": 2344,
-      "sha256": "ee034e615f996bef0663b0390868639e6e57919e44360050777155823ae0fdcb"
+      "bytes": 1921,
+      "sha256": "91f653981d96e8483d4e0505ae886533f72ea9b704bc15d356f9a8aace782b63"
     },
     {
       "path": "Texture/Tap2HL.png",
-      "bytes": 7554,
-      "sha256": "12bde9c6b40802630b3885b941659223ebd26127a82ddd11fce990f9741a26c3"
+      "bytes": 12496,
+      "sha256": "d2a3c543f4684682955e37137394aca9eb67b9318f95271fb3e4830e3cd65261"
     },
     {
       "path": "Texture/Drag2.png",
-      "bytes": 1391,
-      "sha256": "7ebffc16d4657505ce6f74489fa8c1fd5180035fa1505e1ce2edbff68bb92cee"
+      "bytes": 1758,
+      "sha256": "43c55f7c5b00a8d9dea172bd033584d963a730a343b6ff6899540de52febaa83"
     },
     {
       "path": "Texture/DragHL.png",
-      "bytes": 6091,
-      "sha256": "24762d5f9dee02ab1570224822cb082ab27a22381dc928f12992655ae7b4ac04"
+      "bytes": 11683,
+      "sha256": "76f6bf5277a2630872563ceb9aa1d7725898001f6a5e307a6b1532874e307345"
     },
     {
       "path": "Texture/Flick2.png",
-      "bytes": 4645,
-      "sha256": "741cd8a7bb397d24799b0d53e1c55da18f8fcaf79c2bfed77a417b9116f339c1"
+      "bytes": 3571,
+      "sha256": "c0fa58c8669c7046fafc46c6e568afd5fc2f3b6b4e615def07f926d4b8a93a7b"
     },
     {
       "path": "Texture/Flick2HL.png",
-      "bytes": 11348,
-      "sha256": "b015bdfa0e97bcc9b2563d139f28a6bec926581741a61049249a62a9b10057aa"
+      "bytes": 18347,
+      "sha256": "ac2faac478668ce39067aebaebe5ce70df8daa00d163a44042df916d7c464adf"
     },
     {
       "path": "Texture/Hold.png",
-      "bytes": 32568,
-      "sha256": "313e9615a2ae0cd22fc196912ef4fa5422a289e7c53de05a9b5893323ef7fe3f"
+      "bytes": 17988,
+      "sha256": "e7282b15df2a7471ac0e4315f4d150be46df5b042c617a122fc088831c8da283"
     },
     {
       "path": "Texture/Hold3.png",
-      "bytes": 36268,
-      "sha256": "6e6a02b36e35ed6cc6922c5234835a41a313e26ea228d03efb41bdaeb38fe488"
+      "bytes": 20266,
+      "sha256": "acbfaf6dffcd3b2a746a6b73354631517626f4f0cabf9486a2ab7ff25edd152f"
     },
     {
       "path": "Texture/HoldHL.png",
-      "bytes": 34901,
-      "sha256": "ad0c48c2e873fd25a4bedc998dbaa02a50cda06145c41f6fd0ec21353b6b5000"
+      "bytes": 20266,
+      "sha256": "acbfaf6dffcd3b2a746a6b73354631517626f4f0cabf9486a2ab7ff25edd152f"
     },
     {
       "path": "Texture/HoldHead.png",
-      "bytes": 1244,
-      "sha256": "5d822a68cf7b118fe6e4e760c6b48c86a3af4ef5f787dd297e498300c6a903ab"
+      "bytes": 643,
+      "sha256": "a145b2b31e314b117eac8298a98291dfdc91c8d43cf426b77c4fc83e831f214b"
     },
     {
       "path": "Texture/HoldHeadHL.png",
-      "bytes": 3865,
-      "sha256": "ec719d3f5c45adccec20106180a03cfdefb4f5c01a5f67f79099881753b9543b"
+      "bytes": 3431,
+      "sha256": "c9cfcfbd4d8eaca096176b3138b7bca9a7ed6a5ae0da4f255a1206ee7c18b954"
     },
     {
       "path": "Texture/HoldEnd.png",
-      "bytes": 1244,
-      "sha256": "5d822a68cf7b118fe6e4e760c6b48c86a3af4ef5f787dd297e498300c6a903ab"
+      "bytes": 643,
+      "sha256": "a145b2b31e314b117eac8298a98291dfdc91c8d43cf426b77c4fc83e831f214b"
     },
     {
       "path": "Texture/line.png",
