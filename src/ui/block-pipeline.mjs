@@ -692,9 +692,23 @@ export class BlockPipeline {
    * rasterised, an empty `composedEnabledBlockRT` means the compose pass found nothing, and a
    * populated `effectRT` with an empty canvas means the final composite discarded everywhere.
    */
-  diagnose(now = 0) {
+  diagnose(now = 0, blocks = []) {
     const gl = this.gl;
     const report = { now, disabled: this.disabled, lastError: this.lastError, targets: {} };
+    // An all-zero readback is exactly what an empty frame should look like, so report whether there
+    // was anything to draw before anyone concludes the pipeline is broken.
+    if (blocks.length) {
+      const appear = Math.min(...blocks.map((block) => block.appearTime));
+      const disappear = Math.max(...blocks.map((block) => block.disappearTime));
+      report.blocks = {
+        total: blocks.length,
+        visibleAtNow: blocks.filter((block) => blockState(block, now)).length,
+        range: [appear, disappear],
+        hint: now < appear || now >= disappear ? `该时刻没有块，请把播放头移到 ${appear}–${disappear} s` : null,
+      };
+    } else {
+      report.blocks = { total: 0, hint: '当前谱面没有判定块（blockAreas 为空）' };
+    }
     for (const [key, target] of this.targets) {
       this.bindTarget(key);
       const pixels = new Uint8Array(target.width * target.height * 4);

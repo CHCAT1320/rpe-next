@@ -312,7 +312,7 @@ export class Preview {
     // Expose a readback diagnostic rather than making anyone describe a blank frame: the first
     // question is always whether the mask targets were written at all.
     if (typeof window !== 'undefined' && !window.__rpeBlockDiagnose) {
-      window.__rpeBlockDiagnose = () => this.blockPipeline.diagnose(this.lastBlockSeconds);
+      window.__rpeBlockDiagnose = () => this.blockPipeline.diagnose(this.lastBlockSeconds, this.chart?.blockAreas ?? []);
     }
     context.drawImage(this.blockCanvas, viewport.left, viewport.top, viewport.width, viewport.height,
       viewport.left, viewport.top, viewport.width, viewport.height);
