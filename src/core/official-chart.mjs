@@ -7,6 +7,11 @@ export function parseOfficialChart(original) {
   chart.BPMList = [{ bpm: baseBpm, startTime: [0, 0, 1] }];
   chart.META.offset = (original.offset ?? 0) * 1000;
   chart.rpeNextLegacySource = { format: 'phigros-v3', document: original };
+  // `blockAreaList` is Phigros' private extension and lives only in the official document, so it
+  // has to be lifted into the editable model explicitly. Clone rather than reference: the legacy
+  // source is kept as the untouched original, and sharing the array would let later edits rewrite
+  // that evidence. Times stay in seconds here — see the note in block-area.mjs.
+  chart.blockAreas = structuredClone(original.blockAreaList ?? []);
   const beat = ticks => Math.max(-100, Math.floor(ticks + 0.1)) / 32;
   chart.judgeLineList = original.judgeLineList.map((source, index) => {
     const line = createLine(`Line ${index + 1}`);

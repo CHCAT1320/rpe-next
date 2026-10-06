@@ -1,4 +1,5 @@
 import { SceneRuntime } from '../core/scene.mjs';
+import { blockScreen, blockState, blockTransform, blockShowCoverage } from '../core/block-area.mjs';
 import { prepareCanvas, NOTE_COLORS } from './timeline.mjs';
 import { DEFAULT_LINE_WIDTH, DEFAULT_LINE_HEIGHT, HIT_DURATION, hitFrame } from '../core/visual-constants.mjs';
 import { previewViewport, simultaneousNotes, hitParticles } from '../core/editor-display.mjs';
@@ -16,7 +17,7 @@ export class Preview {
   constructor(canvas) {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
     this.backgroundFrame = new PreviewBackground();
-    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
+    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true; this.showBlocks = true;
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]]) {
@@ -47,6 +48,7 @@ export class Preview {
       this.backgroundFrame.draw(context, background, width, height, scale, this.backgroundBlur, devicePixelRatio || 1, this.images.backgroundAnimated);
       context.globalAlpha = 1;
     } else this.backgroundFrame.clear();
+    if (this.showBlocks) this.drawBlocks(context, seconds, viewport);
     const states = this.scene.sample(seconds);
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.viewport = viewport; this.selectedLine = selectedLine;
@@ -149,6 +151,94 @@ export class Preview {
       this.overlayCanvas.style.visibility = 'visible';
     } else if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
     this.images?.trim?.();
+  }
+
+  // BlockArea lives in its own screen space: blocks are anchored to screen percentages, not to any
+  // judge line, so they must not inherit a line's translate/rotate. Drawn under the notes because
+  // they read as a region of the play field rather than an object in it.
+  drawBlocks(context, seconds, viewport) {
+    const blocks = this.chart?.blockAreas;
+    if (!blocks?.length) return;
+    // Match the viewport's own aspect so world -> pixel stays uniform and rotation is not skewed.
+    const aspect = viewport.width / viewport.height;
+    const screen = blockScreen(aspect);
+    const toX = (world) => viewport.left + (world / screen.x + 0.5) * viewport.width;
+    const toY = (world) => viewport.top + (0.5 - world / screen.y) * viewport.height;
+    const pixelPerWorldX = viewport.width / screen.x;
+    const pixelPerWorldY = viewport.height / screen.y;
+    for (const block of blocks) {
+      const state = blockState(block, seconds);
+      if (!state) continue;
+      const { center, size, rotation } = blockTransform(block, seconds, aspect);
+      const width = Math.abs(size.x) * pixelPerWorldX;
+      const height = Math.abs(size.y) * pixelPerWorldY;
+      if (!(width > 0) || !(height > 0)) continue;
+      context.save();
+      context.translate(toX(center.x), toY(center.y));
+      // World space is y-up with counter-clockwise angles; the canvas is y-down, so negate.
+      context.rotate(-rotation * Math.PI / 180);
+      this.drawBlockBody(context, block, state, width, height, viewport.height, seconds);
+      context.restore();
+    }
+  }
+
+  drawBlockBody(context, block, state, width, height, viewportHeight, seconds) {
+    const left = -width / 2;
+    const top = -height / 2;
+    // The game folds this into `renderer.color.a`; subtract blocks are near invisible in play and
+    // rely on a scene-colour post-process this preview does not reproduce.
+    const tint = block.isSubtract ? 0.1 : 1;
+    const coverage = blockShowCoverage(block, seconds);
+    context.save();
+    if (state.active) {
+      // Interior uses plain alpha. The game blends premultiplied (`One, OneMinusSrcAlpha`) while its
+      // shader does not premultiply — the two cannot both hold, so this is the documented
+      // compromise; the ring and halo below stay additive.
+      context.globalAlpha = tint;
+      context.fillStyle = 'rgba(182,60,60,0.667)';
+      context.fillRect(left, top, width, height);
+      context.globalCompositeOperation = 'lighter';
+      // Ring: one effect texel outward (effectRT is a quarter of the screen height).
+      const ring = Math.max(1, 0.0037 * viewportHeight);
+      const ringLeft = left - ring / 2;
+      const ringTop = top - ring / 2;
+      const ringWidth = width + ring;
+      const ringHeight = height + ring;
+      context.strokeStyle = 'rgba(255,84,84,0.8)';
+      context.lineWidth = ring;
+      context.strokeRect(ringLeft, ringTop, ringWidth, ringHeight);
+      // Halo: the same ring blurred, reaching roughly 1.85% of the screen height.
+      context.shadowColor = 'rgba(255,46,46,0.8)';
+      context.shadowBlur = 0.0185 * viewportHeight;
+      context.strokeRect(ringLeft, ringTop, ringWidth, ringHeight);
+    } else {
+      // Disabled look: flat additive dark red, no edge, no glow. `coverage` reproduces the 0.5 s
+      // colour fade that starts at appearTime. (Subtract blocks also fade magenta -> white over
+      // that window; not modelled, as it runs at alpha 0.1.)
+      context.globalCompositeOperation = 'lighter';
+      context.globalAlpha = tint * coverage;
+      context.fillStyle = 'rgba(127,35,35,0.4)';
+      context.fillRect(left, top, width, height);
+      if (state.ready) {
+        // Ready adds a breathing overlay: 37.9 rad/s => ~6.03 Hz, multiplier range 0.5..1.5.
+        // The game drives it from `_Time.y`; the playhead is used here so the preview is
+        // deterministic and scrubbing shows the state at that instant.
+        const pulse = Math.sin(seconds * 37.9) * 0.5 + 1;
+        context.fillStyle = `rgba(255,255,255,${(0.12 * pulse).toFixed(4)})`;
+        context.fillRect(left, top, width, height);
+      }
+    }
+    context.restore();
+    // Editor affordance rather than game behaviour: at alpha 0.1 a subtract block would otherwise
+    // be almost impossible to see or reason about.
+    if (block.isSubtract) {
+      context.save();
+      context.setLineDash([4, 3]);
+      context.lineWidth = 1;
+      context.strokeStyle = 'rgba(255,120,255,0.85)';
+      context.strokeRect(left, top, width, height);
+      context.restore();
+    }
   }
 
   pick(clientX, clientY) {
