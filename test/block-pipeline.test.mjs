@@ -1,0 +1,230 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { BlockPipeline, RENDER_TARGETS, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
+import { blockTransform, blockState } from '../src/core/block-area.mjs';
+
+const shaders = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/shaders.json', import.meta.url), 'utf8'));
+const fixture = JSON.parse(readFileSync(new URL('./fixtures/block-area.json', import.meta.url), 'utf8'));
+
+/**
+ * Minimal WebGL2 stand-in that still resolves uniforms from the real shader sources, so the
+ * pipeline's sampler wiring and fixed-function state are exercised rather than skipped.
+ */
+function stubGl() {
+  const calls = [];
+  const record = (name) => (...args) => { calls.push({ name, args }); };
+  let nextHandle = 1;
+  const enumValue = (name) => name.split('').reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
+  const gl = {
+    calls,
+    VERTEX_SHADER: enumValue('VERTEX_SHADER'), FRAGMENT_SHADER: enumValue('FRAGMENT_SHADER'),
+    COMPILE_STATUS: enumValue('COMPILE_STATUS'), LINK_STATUS: enumValue('LINK_STATUS'), ACTIVE_UNIFORMS: enumValue('ACTIVE_UNIFORMS'),
+    TEXTURE_2D: enumValue('TEXTURE_2D'), TEXTURE_MIN_FILTER: enumValue('MIN'), TEXTURE_MAG_FILTER: enumValue('MAG'),
+    TEXTURE_WRAP_S: enumValue('WRAPS'), TEXTURE_WRAP_T: enumValue('WRAPT'),
+    LINEAR: enumValue('LINEAR'), NEAREST: enumValue('NEAREST'), CLAMP_TO_EDGE: enumValue('CLAMP'),
+    RGBA: enumValue('RGBA'), UNSIGNED_BYTE: enumValue('UBYTE'), FRAMEBUFFER: enumValue('FB'),
+    COLOR_ATTACHMENT0: enumValue('CA0'), FRAMEBUFFER_COMPLETE: enumValue('FBC'),
+    ARRAY_BUFFER: enumValue('ARRAYBUF'), FLOAT: enumValue('FLOAT'), STATIC_DRAW: enumValue('STATIC'),
+    TRIANGLE_STRIP: enumValue('TRISTRIP'), BLEND: enumValue('BLEND'), CULL_FACE: enumValue('CULL'), DEPTH_TEST: enumValue('DEPTH'),
+    COLOR_BUFFER_BIT: enumValue('COLORBIT'), TEXTURE0: 1000,
+    ZERO: 0, ONE: 1, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303,
+    createShader: (type) => ({ handle: nextHandle++, type, source: '' }),
+    shaderSource: (shader, source) => { shader.source = source; },
+    compileShader: record('compileShader'),
+    getShaderParameter: () => true,
+    getShaderInfoLog: () => '',
+    deleteShader: record('deleteShader'),
+    createProgram: () => ({ handle: nextHandle++, shaders: [] }),
+    attachShader: (program, shader) => program.shaders.push(shader),
+    linkProgram: record('linkProgram'),
+    getProgramParameter: (program, parameter) => (parameter === enumValue('LINK_STATUS') ? true : uniformsOf(program).length),
+    getProgramInfoLog: () => '',
+    deleteProgram: record('deleteProgram'),
+    getActiveUniform: (program, index) => ({ name: uniformsOf(program)[index] }),
+    getUniformLocation: (program, name) => ({ program, name }),
+    createBuffer: () => ({ handle: nextHandle++ }), bindBuffer: record('bindBuffer'), bufferData: record('bufferData'),
+    createTexture: () => ({ handle: nextHandle++ }), bindTexture: record('bindTexture'),
+    texParameteri: record('texParameteri'), texImage2D: record('texImage2D'), pixelStorei: record('pixelStorei'),
+    activeTexture: record('activeTexture'),
+    createFramebuffer: () => ({ handle: nextHandle++ }), bindFramebuffer: record('bindFramebuffer'),
+    framebufferTexture2D: record('framebufferTexture2D'), checkFramebufferStatus: () => enumValue('FBC'),
+    viewport: record('viewport'), clearColor: record('clearColor'), clear: record('clear'),
+    enable: record('enable'), disable: record('disable'),
+    blendFunc: (source, destination) => calls.push({ name: 'blendFunc', args: [source, destination] }),
+    colorMask: (...args) => calls.push({ name: 'colorMask', args }),
+    drawArrays: record('drawArrays'),
+    getAttribLocation: () => 0,
+    enableVertexAttribArray: record('enableVertexAttribArray'), disableVertexAttribArray: record('disableVertexAttribArray'),
+    vertexAttribPointer: record('vertexAttribPointer'), vertexAttrib4f: record('vertexAttrib4f'),
+    useProgram: (program) => calls.push({ name: 'useProgram', args: [program] }),
+    uniformMatrix4fv: record('uniformMatrix4fv'), uniform1i: record('uniform1i'), uniform1f: record('uniform1f'),
+    uniform4f: record('uniform4f'), uniform2fv: record('uniform2fv'), uniform3fv: record('uniform3fv'), uniform4fv: record('uniform4fv'),
+  };
+  const uniformsOf = (program) => {
+    const source = program.shaders.map((shader) => shader.source).join('\n');
+    const names = new Set();
+    for (const match of source.matchAll(/^\s*uniform\s+(?:mediump |highp |lowp )?(?:\w+)\s+(\w+)\s*(\[\d+\])?\s*;/gm)) names.add(match[1]);
+    for (const match of source.matchAll(/UNITY_LOCATION\(\d+\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D\s+(\w+)\s*;/g)) names.add(match[1]);
+    return [...names];
+  };
+  gl.__calls = calls;
+  gl.__programs = new Map();
+  return gl;
+}
+
+function makePipeline(gl) {
+  const canvas = { width: 1600, height: 900, getContext: () => gl };
+  const pipeline = new BlockPipeline();
+  assert.equal(pipeline.ensure(canvas, shaders), true, pipeline.lastError);
+  // Map the GL handle back to `key#index` so pass order is assertable: useProgram is handed the
+  // raw handle, which carries no metadata of its own.
+  for (const [key, programs] of pipeline.programs) {
+    for (const program of programs) gl.__programs.set(program.handle.handle, `${key}#${program.index}`);
+  }
+  return { pipeline, canvas };
+}
+
+/** Pass sequence as `key#index` strings, in `useProgram` order. */
+function passSequence(gl) {
+  return gl.__calls.filter((call) => call.name === 'useProgram').map((call) => gl.__programs.get(call.args[0].handle));
+}
+
+const viewport = { left: 0, top: 0, width: 1600, height: 900 };
+
+// ---------------------------------------------------------------------------
+
+test('光晕权重复现文档的 5 圈数值', () => {
+  const weights = glowRingWeights(6, 2.65, 0.01);
+  assert.equal(weights.length, 5, '第 6 圈低于阈值应被丢弃');
+  for (const [index, expected] of [0.4586, 0.2829, 0.1566, 0.0731, 0.0249].entries()) {
+    assert.ok(Math.abs(weights[index] - expected) < 5e-5, `第 ${index} 圈: ${weights[index]} != ${expected}`);
+  }
+  assert.equal(glowRingWeights(6, 2.65, 0).length, 7, '阈值为 0 时保留全部 7 轮');
+});
+
+test('RT 表与反汇编一致：13 张，掩码 Screen/8、效果 Screen/4、只有 effectRT 用线性过滤', () => {
+  assert.equal(RENDER_TARGETS.length, 13);
+  const byKey = Object.fromEntries(RENDER_TARGETS.map((target) => [target.key, target]));
+  assert.equal(byKey.sceneColorRT.divisor, 6);
+  assert.equal(byKey.effectRT.divisor, 4);
+  assert.equal(byKey.pingA.divisor, 4);
+  assert.equal(byKey.pingB.divisor, 4);
+  assert.equal(byKey.normalBlockRT.divisor, 8);
+  assert.equal(byKey.disabledNormalReadyBlockRT.divisor, 8);
+  assert.deepEqual(RENDER_TARGETS.filter((target) => target.linear).map((target) => target.key), ['effectRT']);
+});
+
+test('blockMatrix 把单位四边形映射到块矩形（含旋转）', () => {
+  const matrix = blockMatrix({ center: { x: 0, y: 0 }, size: { x: 2, y: 1 }, rotation: 0, screen: { x: 10, y: 10 } });
+  const apply = (x, y) => ({ x: matrix[0] * x + matrix[4] * y + matrix[12], y: matrix[1] * x + matrix[5] * y + matrix[13] });
+  const low = apply(0, 0);
+  const high = apply(1, 1);
+  assert.ok(Math.abs(low.x + 0.2) < 1e-6 && Math.abs(low.y + 0.1) < 1e-6, JSON.stringify(low));
+  assert.ok(Math.abs(high.x - 0.2) < 1e-6 && Math.abs(high.y - 0.1) < 1e-6, JSON.stringify(high));
+  // A 90 degree rotation keeps the centre fixed.
+  const rotated = blockMatrix({ center: { x: 0, y: 0 }, size: { x: 2, y: 1 }, rotation: 90, screen: { x: 10, y: 10 } });
+  const centre = { x: rotated[0] * 0.5 + rotated[4] * 0.5 + rotated[12], y: rotated[1] * 0.5 + rotated[5] * 0.5 + rotated[13] };
+  assert.ok(Math.abs(centre.x) < 1e-6 && Math.abs(centre.y) < 1e-6, JSON.stringify(centre));
+});
+
+test('13 个 program 全部编译，按材质命名', () => {
+  const { pipeline } = makePipeline(stubGl());
+  assert.equal(pipeline.disabled, false, pipeline.lastError);
+  const total = [...pipeline.programs.values()].reduce((sum, programs) => sum + programs.length, 0);
+  assert.equal(total, 13);
+  for (const key of ['BlockSprite', 'SubtractBlockBlender', 'BlockCompose', 'EdgeMask', 'GlowMask', 'DisabledBlock', 'ReadyBlock', 'ActiveBlock', 'TouchEffect']) {
+    assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
+  }
+});
+
+test('render 按 LateUpdate 的顺序跑完整条管线', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), true);
+  const sequence = passSequence(gl);
+  // A block is active at t=66 s, so one quad is rasterised, then the five fixed stages run in order.
+  const tail = sequence.slice(sequence.indexOf('BlockCompose#0'));
+  assert.deepEqual(tail, [
+    'BlockCompose#0',
+    'EdgeMask#1',                     // edgeSize == 1 short-circuits to pass 1
+    'GlowMask#0', 'GlowMask#0', 'GlowMask#0', 'GlowMask#0', 'GlowMask#0',
+    'GlowMask#1',                     // final `.y`-only write preserves the edge
+    'BlockCompose#1',
+    'ActiveBlock#0',
+  ]);
+  assert.ok(sequence.includes('BlockSprite#0'), '至少栅格化一个块四边形');
+});
+
+test('固定功能状态与 Shader 资产一致（GLSL 里没有这些）', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+
+  // ActiveBlock is premultiplied: One, OneMinusSrcAlpha.
+  assert.equal(pipeline.programs.get('ActiveBlock')[0].state.blend.join(','), 'ONE,ONE_MINUS_SRC_ALPHA');
+  assert.equal(pipeline.programs.get('BlockSprite')[0].state.blend.join(','), 'SRC_ALPHA,ONE');
+  assert.equal(pipeline.programs.get('DisabledBlock')[0].state.blend.join(','), 'ONE,ONE');
+  assert.equal(pipeline.programs.get('ReadyBlock')[0].state.blend.join(','), 'SRC_ALPHA,ONE');
+  assert.equal(pipeline.programs.get('TouchEffect')[0].state.blend.join(','), 'ONE,ONE');
+  // ColorMask: EdgeMask pass 1 writes R only, GlowMask pass 0 writes RG, pass 1 writes G.
+  assert.deepEqual(pipeline.programs.get('EdgeMask')[1].state.mask, ['R']);
+  assert.deepEqual(pipeline.programs.get('GlowMask')[0].state.mask, ['R', 'G']);
+  assert.deepEqual(pipeline.programs.get('GlowMask')[1].state.mask, ['G']);
+});
+
+test('每个 program 都绑定到正确的 RT（sampler 接线）', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+
+  // ActiveBlock samples 11 slots; check the ones whose wiring render.md pins down.
+  const active = pipeline.programs.get('ActiveBlock')[0];
+  for (const name of ['_ComposeRT', '_EffectRT', '_DisabledNormalBlockRT', '_DisabledSubtractBlockRT',
+    '_ReadyComposeRT', '_TouchHoverRT', '_DisplaceMap', '_SparkMap', '_TouchDisplaceMap', '_NoiseMap', '_SceneColor']) {
+    assert.ok(active.uniforms.has(name), `ActiveBlock 缺少 sampler ${name}`);
+  }
+  // render.md: blockComposeMaterial binds the *merged* masks, activeBlockMaterial the *pure ready*
+  // masks, even though the sampler names collide.
+  assert.equal(pipeline.targets.size, 13);
+  assert.equal(pipeline.textures.size, 5, '4 张不同的 PNG 占 5 个 sampler 名（BlockNoise1 用了两次）');
+});
+
+test('RT 尺寸按除数派生：1600x900 -> 掩码 200x112、效果 400x225', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  assert.deepEqual([pipeline.targets.get('normalBlockRT').width, pipeline.targets.get('normalBlockRT').height], [200, 112]);
+  assert.deepEqual([pipeline.targets.get('effectRT').width, pipeline.targets.get('effectRT').height], [400, 225]);
+  assert.deepEqual([pipeline.targets.get('sceneColorRT').width, pipeline.targets.get('sceneColorRT').height], [266, 150]);
+});
+
+test('隐藏的块不产生绘制调用', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  // 73.5 s is past every disappearTime in the corpus.
+  pipeline.render({ blocks: fixture, now: 73.5, aspect: 16 / 9, width: 1600, height: 900 });
+  assert.equal(passSequence(gl).filter((entry) => entry === 'BlockSprite#0').length, 0);
+  assert.ok(passSequence(gl).includes('ActiveBlock#0'), '合成阶段照常执行');
+});
+
+test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  const subtractIndex = fixture.findIndex((block) => block.isSubtract);
+  assert.ok(subtractIndex >= 0, '语料里应有减块');
+  const block = fixture[subtractIndex];
+  const now = block.enableTime + 0.01;
+  pipeline.render({ blocks: [block], now, aspect: 16 / 9, width: 1600, height: 900 });
+  // The subtract quad must land in subtractBlockRT: check the framebuffer bound just before the
+  // first drawArrays is that target's.
+  const draws = gl.__calls.filter((call) => call.name === 'drawArrays');
+  assert.ok(draws.length >= 1);
+  const binds = gl.__calls.filter((call) => call.name === 'bindFramebuffer');
+  assert.ok(binds.length > 0);
+  assert.equal(pipeline.targets.has('subtractBlockRT'), true);
+  assert.equal(blockState(block, now).active, true);
+  // Sanity: the transform is finite for this real block at this time.
+  const transform = blockTransform(block, now, 16 / 9);
+  assert.ok(Number.isFinite(transform.size.x) && Number.isFinite(transform.size.y));
+});

@@ -438,7 +438,7 @@ element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarke
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
@@ -915,6 +915,19 @@ element('#mute-current-line').addEventListener('click', () => {
   hitSounds.stop(); invalidate();
 });
 element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
+element('#block-pipeline').addEventListener('change', event => { setBlockRenderer(event.target.checked ? 'block' : 'canvas'); persistEditor(); invalidate(); });
+
+/**
+ * Choose between the ported GL pipeline and the Canvas2D approximation.
+ *
+ * The GL path needs WebGL2 plus the vendored shaders and textures, so it loads lazily; if anything
+ * fails, the draw path silently falls back to Canvas2D rather than showing nothing.
+ */
+function setBlockRenderer(mode) {
+  preview.blockRenderer = realtimePreview.blockRenderer = mode;
+  element('#block-pipeline').checked = mode === 'block';
+  if (mode === 'block') { preview.requestBlockPipeline(); realtimePreview.requestBlockPipeline(); }
+}
 element('#realtime-alpha').addEventListener('input', event => { realtimePreview.opacity = Number(event.target.value); persistEditor(); invalidate(); });
 for (const selector of ['#loop-start', '#loop-end', '#loop-enabled']) element(selector).addEventListener('change', () => {
   try {
@@ -1368,6 +1381,7 @@ function applyPreferences(next) {
   element('#grid-count').value = timeline.gridCount; element('#division').value = timeline.division; element('#y-scale').value = timeline.scale; element('#snap-x').checked = timeline.snapX;
   element('#y-scale-slider').value = timeline.scale;
   realtimePreview.visible = editorPreferences.realtime ?? true;
+  setBlockRenderer(editorPreferences.blockPipeline === false ? 'canvas' : 'block');
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
   realtimePreview.opacity = Number(element('#realtime-alpha').value);

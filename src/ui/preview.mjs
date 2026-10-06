@@ -1,5 +1,6 @@
 import { SceneRuntime } from '../core/scene.mjs';
 import { blockScreen, blockState, blockTransform, blockShowCoverage } from '../core/block-area.mjs';
+import { BlockPipeline } from './block-pipeline.mjs';
 import { prepareCanvas, NOTE_COLORS } from './timeline.mjs';
 import { DEFAULT_LINE_WIDTH, DEFAULT_LINE_HEIGHT, HIT_DURATION, hitFrame } from '../core/visual-constants.mjs';
 import { previewViewport, simultaneousNotes, hitParticles } from '../core/editor-display.mjs';
@@ -17,7 +18,7 @@ export class Preview {
   constructor(canvas) {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
     this.backgroundFrame = new PreviewBackground();
-    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true; this.showBlocks = true;
+    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true; this.showBlocks = true; this.blockRenderer = 'canvas';
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]]) {
@@ -159,6 +160,8 @@ export class Preview {
   drawBlocks(context, seconds, viewport) {
     const blocks = this.chart?.blockAreas;
     if (!blocks?.length) return;
+    if (this.blockRenderer === 'block' && this.drawBlocksPipeline(context, seconds, viewport)) return;
+    if (this.blockRenderer === 'block') this.requestBlockPipeline();
     // Match the viewport's own aspect so world -> pixel stays uniform and rotation is not skewed.
     const aspect = viewport.width / viewport.height;
     const screen = blockScreen(aspect);
@@ -239,6 +242,51 @@ export class Preview {
       context.strokeRect(left, top, width, height);
       context.restore();
     }
+  }
+
+  /** Kick off the one-time load of the vendored shaders and textures. */
+  requestBlockPipeline() {
+    if (this.blockPipeline || this.blockPipelinePending || typeof document === 'undefined') return;
+    this.blockPipelinePending = true;
+    this.ensureBlockPipeline()
+      .then(() => { this.blockPipelinePending = false; this.invalidate?.(); })
+      .catch(() => { this.blockPipelinePending = false; });
+  }
+
+  async ensureBlockPipeline() {
+    if (this.blockPipeline) return this.blockPipeline;
+    const base = `${import.meta.env?.BASE_URL ?? '/'}assets/rpe/block/`;
+    const shaders = await (await fetch(`${base}shaders.json`)).json();
+    const canvas = document.createElement('canvas');
+    const pipeline = new BlockPipeline();
+    if (!pipeline.ensure(canvas, shaders)) throw new Error(pipeline.lastError || '块管线不可用');
+    await pipeline.loadImages(base);
+    this.blockCanvas = canvas;
+    this.blockPipeline = pipeline;
+    return pipeline;
+  }
+
+  /**
+   * Render the block layer with the ported GL pipeline and composite it into the 2D preview.
+   *
+   * The GL canvas stays off-DOM and is blitted with `drawImage`, which preserves the "blocks sit
+   * under the notes" ordering that a separate DOM layer would lose. Premultiplied output makes
+   * `drawImage` apply the same `src + dst·(1 − srcA)` blend the game's `ActiveBlock` uses.
+   */
+  drawBlocksPipeline(context, seconds, viewport) {
+    const pipeline = this.blockPipeline;
+    if (!pipeline || pipeline.disabled) return false;
+    try {
+      const rendered = pipeline.render({
+        blocks: this.chart?.blockAreas ?? [], now: seconds,
+        aspect: viewport.width / viewport.height,
+        width: this.canvas.width, height: this.canvas.height,
+      });
+      if (!rendered) return false;
+    } catch { return false; }
+    context.drawImage(this.blockCanvas, viewport.left, viewport.top, viewport.width, viewport.height,
+      viewport.left, viewport.top, viewport.width, viewport.height);
+    return true;
   }
 
   pick(clientX, clientY) {

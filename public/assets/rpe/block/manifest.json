@@ -1,0 +1,57 @@
+{
+  "source": "Phigros 4.0.1 BlockArea (E:\\studyMyGame\\dump\\blockArea\\docs); shaders are Unity HLSLCC GLSL ES 3.00 output, textures are Pigeon Games assets reused for technical study.",
+  "files": [
+    {
+      "path": "shaders/Unlit_ActiveBlock.glsl",
+      "programs": 1
+    },
+    {
+      "path": "shaders/Unlit_BlockCompose.glsl",
+      "programs": 2
+    },
+    {
+      "path": "shaders/Unlit_BlockSprite.glsl",
+      "programs": 1
+    },
+    {
+      "path": "shaders/Unlit_DisabledBlock.glsl",
+      "programs": 1
+    },
+    {
+      "path": "shaders/Unlit_EdgeMask.glsl",
+      "programs": 2
+    },
+    {
+      "path": "shaders/Unlit_GlowMask.glsl",
+      "programs": 2
+    },
+    {
+      "path": "shaders/Unlit_ReadyBlock.glsl",
+      "programs": 1
+    },
+    {
+      "path": "shaders/Unlit_SubtractBlockBlender.glsl",
+      "programs": 2
+    },
+    {
+      "path": "shaders/Unlit_TouchEffect.glsl",
+      "programs": 1
+    },
+    {
+      "path": "Block.png",
+      "sha256": "68eb562430b8508f014985a342ffc9f43e30a0f13577658c86260df838785d6c"
+    },
+    {
+      "path": "BlockNoise1.png",
+      "sha256": "da61ab2294ddb456314caece0565f24fbddccdf5fe7d98ec4a680c3f66033979"
+    },
+    {
+      "path": "FD_Noise.png",
+      "sha256": "5f98b4bef6073a0190bc59d0fe64db569df1c32c457c7a178310a1fc5b793576"
+    },
+    {
+      "path": "PointNoise.png",
+      "sha256": "fe1a54ef26f7d95d781f5d801a28ad82a7927c567218cda79e2a66a5988a7984"
+    }
+  ]
+}
