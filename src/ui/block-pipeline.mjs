@@ -54,6 +54,9 @@ export const RENDER_TARGETS = [
 export const SCRATCH_TARGETS = [
   { key: 'scratchA', divisor: 8, linear: false },
   { key: 'scratchB', divisor: 8, linear: false },
+  // The scene subtract needs the raw `subtractBlockRT` attribution, and both other scratches are
+  // already spoken for by the two `BlockCompose` passes, so it gets its own.
+  { key: 'scratchC', divisor: 8, linear: false },
 ];
 
 // Unity's serialised `m_State` per shader pass (render.md §固定管线状态). `blend` is
@@ -70,6 +73,8 @@ const PASS_STATE = {
   // premultiply, which is why filled regions add their full rgb and the background is attenuated.
   ActiveBlock: { blend: ['ONE', 'ONE_MINUS_SRC_ALPHA'], mask: ['R', 'G', 'B', 'A'] },
   TouchEffect: { blend: ['ONE', 'ONE'], mask: ['R', 'G', 'B', 'A'] },
+  // Port-local, see `SUBTRACT_SCENE_FRAGMENT`: overwrites the scene copy rather than blending into it.
+  SubtractScene: { blend: ['ONE', 'ZERO'], mask: ['R', 'G', 'B', 'A'] },
 };
 
 const BLEND_FACTORS = { ZERO: 0, ONE: 1, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303 };
@@ -179,6 +184,87 @@ export function adaptFragment(source) {
   return source.replace(/^([ \t]*#define[ \t]+UNITY_SUPPORTS_UNIFORM_LOCATION[ \t]+)1[ \t]*$/m, '$10');
 }
 
+/**
+ * Port-local pass: scale `sceneColorRT` by `1 - subtractAttribution` so a subtract block removes the
+ * scene colour instead of showing as a translucent red block.
+ *
+ * The game does this with `SubtractBlockPostProcessor.OnRenderImage`, which blits the subtract
+ * camera's target through `subtractBlockMaterial` at `targetPass` 0/1. That material is
+ * `Unlit/SubtractBlockBlender`, which is a *mask* operator (its declared outputs are a scalar
+ * attribution and a `vec2`), so the shader asset does not contain the scene multiply itself — the
+ * engine's Blit supplies it. `render.md` also says the mask only ever reaches `composedEnabledBlockRT`,
+ * so the effect is confined to the enabled block area.
+ *
+ * This shader is therefore written here rather than vendored: `_Mask.x` is `SubtractBlockBlender`'s
+ * attribution, `SubShader` pass 0 of that shader yields `1` across a subtract block and `0`
+ * elsewhere, and multiplying the scene by `clamp(1 - attribution, 0, 1)` drives masked-out pixels to
+ * black while leaving everything else untouched. It is applied to `sceneColorRT` before `ActiveBlock`
+ * samples it, which is also why it does not need a separate blit of the scene: `ActiveBlock` only
+ * ever reads `_SceneColor` inside its spark/hue term, so a transparent scene contributes nothing.
+ */
+const SUBTRACT_SCENE_FRAGMENT = `#version 300 es
+precision mediump float;
+uniform sampler2D _SceneColor;
+uniform sampler2D _Mask;
+in vec2 vs_TEXCOORD0;
+out vec4 SV_Target0;
+void main() {
+  float attribution = texture(_Mask, vs_TEXCOORD0.xy).x;
+  float keep = clamp(1.0 - attribution, 0.0, 1.0);
+  SV_Target0 = texture(_SceneColor, vs_TEXCOORD0.xy) * keep;
+}
+`;
+
+const SUBTRACT_SCENE_VERTEX = `#version 300 es
+precision highp float;
+uniform vec4 hlslcc_mtx4x4unity_MatrixVP[4];
+in vec4 in_POSITION0;
+in vec2 in_TEXCOORD0;
+out highp vec2 vs_TEXCOORD0;
+void main() {
+  vs_TEXCOORD0.xy = in_TEXCOORD0.xy;
+  gl_Position = hlslcc_mtx4x4unity_MatrixVP[0] * in_POSITION0.xxxx
+              + hlslcc_mtx4x4unity_MatrixVP[1] * in_POSITION0.yyyy
+              + hlslcc_mtx4x4unity_MatrixVP[2] * in_POSITION0.zzzz
+              + hlslcc_mtx4x4unity_MatrixVP[3] * in_POSITION0.wwww;
+}
+`;
+
+/**
+ * The two textures `materials.md` §1 marks sRGB. `Block.png` is uniform red so decoding it is a
+ * no-op, but it is listed for completeness.
+ */
+const SRGB_TEXTURES = new Set(['Block.png', 'BlockNoise1.png']);
+
+/**
+ * Decode an sRGB-encoded image to linear and re-quantise to 8-bit, for upload as raw RGBA.
+ *
+ * WebGL cannot be asked to do this for a plain `RGBA`/`UNSIGNED_BYTE` upload: that combination is
+ * non-sRGB, and `UNPACK_COLORSPACE_CONVERSION_WEBGL` is a no-op in WebGL2, so the decode has to
+ * happen on the CPU. The result is not byte-exact with a hardware decode — linear values are quantised
+ * to 8 bits — but it is the same curve, which is what the shaders' colour arithmetic needs.
+ */
+function decodeSrgbToBytes(image) {
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth ?? image.width;
+  canvas.height = image.naturalHeight ?? image.height;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(image, 0, 0);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  const linear = (value) => {
+    const channel = value / 255;
+    const decoded = channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    return Math.round(Math.max(0, Math.min(1, decoded)) * 255);
+  };
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    pixels.data[index] = linear(pixels.data[index]);
+    pixels.data[index + 1] = linear(pixels.data[index + 1]);
+    pixels.data[index + 2] = linear(pixels.data[index + 2]);
+  }
+  context.putImageData(pixels, 0, 0);
+  return canvas;
+}
+
 function compile(gl, type, source) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
@@ -213,6 +299,10 @@ export class BlockPipeline {
     // camera target there, which is why a block shows a distorted copy of the notes and judge lines
     // it overlaps — faithful, but it reads as a doubled image in a still editor frame.
     this.sceneDistortion = true;
+    // `'raw'` (default) uploads the PNGs as stored; `'srgb'` decodes `Block`/`BlockNoise1` to linear,
+    // which is what `materials.md` §1's `colorSpace` column asks for. See `loadImages` for the
+    // measured difference between the two readings.
+    this.textureColorSpace = 'raw';
     // `BlockRender` tuning fields from data.md. The edge dilates one round; the glow is nominally
     // six, but the sixth ring's weight (0.0040) sits below the pass threshold, so five run.
     this.edgeSize = 1;
@@ -249,6 +339,36 @@ export class BlockPipeline {
     }
     for (const target of [...RENDER_TARGETS, ...SCRATCH_TARGETS]) this.createTarget(target);
     for (const [name, slot] of Object.entries(TEXTURE_SLOTS)) this.loadTexture(name, slot);
+    // The subtract scene pass is port-local, so it is compiled here instead of coming from the dump.
+    // It reuses `PASS_STATE.SubtractScene`; `applyUniforms` unbinds nothing, so leaving `defaults`
+    // empty is fine — every uniform it has is set explicitly by `subtractScene`.
+    try {
+      const vertex = compile(gl, gl.VERTEX_SHADER, SUBTRACT_SCENE_VERTEX);
+      const fragment = compile(gl, gl.FRAGMENT_SHADER, SUBTRACT_SCENE_FRAGMENT);
+      const handle = gl.createProgram();
+      gl.attachShader(handle, vertex);
+      gl.attachShader(handle, fragment);
+      gl.linkProgram(handle);
+      gl.deleteShader(vertex);
+      gl.deleteShader(fragment);
+      if (!gl.getProgramParameter(handle, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(handle));
+      const uniforms = new Map();
+      const types = new Map();
+      for (let slot = 0; slot < gl.getProgramParameter(handle, gl.ACTIVE_UNIFORMS); slot++) {
+        const info = gl.getActiveUniform(handle, slot);
+        const name = info.name.replace(/\[0\]$/, '');
+        uniforms.set(name, gl.getUniformLocation(handle, info.name));
+        types.set(name, info.type);
+      }
+      this.programs.set('SubtractScene', [{ key: 'SubtractScene', index: 0, handle, uniforms, types, state: PASS_STATE.SubtractScene, source: { vertex: SUBTRACT_SCENE_VERTEX, fragment: SUBTRACT_SCENE_FRAGMENT } }]);
+    } catch (error) {
+      failures.push(String((error && error.message) || error));
+    }
+    if (failures.length) {
+      this.disabled = true;
+      this.lastError = failures.join(' | ');
+      return false;
+    }
     return true;
   }
 
@@ -312,12 +432,25 @@ export class BlockPipeline {
   /**
    * Upload the vendored PNGs once they are decoded.
    *
-   * materials.md §1 lists a `colorSpace` per texture (`BlockNoise1` and `Block` sRGB, the other two
-   * linear) and asks for it to be reproduced. This port uploads all four as raw RGBA, i.e. no
-   * sRGB-to-linear decode, which is the only reading that makes the shaders coherent: the compose
-   * displacement is `texture(_DisplaceMap, uv).x - 0.5`, so decoding `BlockNoise1` would push the
-   * noise's mid-grey to ~0.21 and bias every ripple by a constant -0.29 instead of centring it on
-   * zero. `Block.png` is unaffected either way — it is uniform red, and 1.0 decodes to 1.0.
+   * `materials.md` §1 lists a `colorSpace` per texture (`BlockNoise1` and `Block` sRGB, `PointNoise`
+   * and `FD_Noise` linear), and every value `block-params.json` carries is a *linear* one, so a fully
+   * faithful port would decode the two sRGB textures on upload. This port does not, and the measured
+   * consequence is worth stating precisely rather than hand-waving:
+   *
+   * - `BlockNoise1` (the displacement map) has mean `0.5041` as stored but `0.2382` once decoded, so
+   *   the decode does **not** bias the ripple itself — `BlockCompose` centres on the literal `- 0.5`
+   *   either way — but it does make `dispAvg` average ≈0.24 instead of ≈0.50, and `dispAvg` also
+   *   drives the fill colour through `_FillColor - dispAvg · _DisplaceBlendIntensity`. Raw mean gives
+   *   `fillBase ≈ 0.711`, decoded gives `≈ 0.821`.
+   * - `PointNoise` (the spark map) is sparse either way — only 7.1 % of its texels exceed `0.1` as
+   *   stored, 0.8 % once decoded — so the spark term is near zero over most of a block in both
+   *   readings. That is why the block fill reads as a dark red rather than the `_FillColor` swatch.
+   * - `Block.png` is unaffected: it is uniform red, and `1.0` decodes to `1.0`.
+   *
+   * The switch exists because the two readings differ visibly and the dump does not record whether
+   * Unity's `sRGBTexture` flag reaches the shader as a decode for these assets. Setting
+   * `blockTextureColorSpace = 'srgb'` reproduces the decode (`materials.md`'s reading); `'raw'` is the
+   * default so the shipped look does not change silently.
    */
   async loadImages(base = `${import.meta.env?.BASE_URL ?? '/'}assets/rpe/block/`) {
     await Promise.all([...this.textures.values()].map(async (entry) => {
@@ -334,8 +467,11 @@ export class BlockPipeline {
       // file's *bottom* row, and the quad's v also increases upward. Uploading with the flip off puts
       // the file's top row at v = 0, which mirrors every noise and displacement texture.
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-      entry.image = image;
+      const source = this.textureColorSpace === 'srgb' && SRGB_TEXTURES.has(entry.file)
+        ? decodeSrgbToBytes(image)
+        : image;
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      entry.image = source;
     }));
   }
 
@@ -622,7 +758,7 @@ export class BlockPipeline {
    * disabled/ready layer has content that the caller still has to composite (see
    * `compositeSceneEffects`). The block canvas itself is finished by the time this returns.
    */
-  render({ blocks, now, aspect, width, height, scene = null, sceneView = null }) {
+  render({ blocks, now, aspect, width, height, scene = null, sceneView = null, view = null }) {
     const gl = this.gl;
     if (!gl || this.disabled) return false;
     this.resize(width, height);
@@ -676,9 +812,12 @@ export class BlockPipeline {
       });
     }
     this.lastStats = stats;
-    // Retained so `diagnose` can re-derive each block's transform for its per-block probes.
+    // Retained so `diagnose` can re-derive each block's transform for its per-block probes: `blocks`
+    // and `view` describe this frame, and `view` is the layer's viewport (which is smaller than the
+    // canvas once the editor's content scale shrinks it).
     this.blocks = blocks;
     this.lastAspect = aspect;
+    this.lastView = view;
 
     // The three `SubtractBlockPostProcessor` instances sit on the subtract-family cameras and run
     // `subtractBlockMaterial` (= `SubtractBlockBlender`) at their serialised `targetPass`.
@@ -700,6 +839,12 @@ export class BlockPipeline {
     });
 
     this.renderEffects('composedEnabledBlockRT', now);
+
+    // `SubtractBlockPostProcessor`: remove the masked-out scene colour before `ActiveBlock` samples
+    // `_SceneColor`, so a subtract block reads as a hole rather than a translucent red block. It must
+    // run after `BlockCompose` pass 0 (which owns `subtractBlockRT`'s first consumer) and before the
+    // final composite.
+    this.subtractScene(now);
 
     // BlockCompose pass 1: the disabled + ready masks, reading the processed subtract pair.
     this.beginPass('composedDisabledBlockRT');
@@ -944,20 +1089,25 @@ export class BlockPipeline {
   }
 
   /**
-   * Where a block's centre lands in a mask target's pixel grid.
+   * Where a block's centre lands in a target's pixel grid.
    *
-   * Mask work happens at `Screen/8` (effects at `Screen/4`), so a block's viewport rectangle is not
-   * its mask rectangle; this is the coordinate to sample when a block looks blank. `null` when the
-   * target has no size yet.
+   * A block fills the whole canvas only while the editor's content scale is 1; at any other scale the
+   * layer's viewport (`this.lastView`) is smaller than the canvas, so the block's world position has
+   * to be shrunk and re-centred inside it before it is converted to target pixels. Mask work happens at
+   * `Screen/8` and effects at `Screen/4`, hence the per-target dimensions. `null` when the target has
+   * no size yet.
    */
   maskPixel(transform, key) {
     const target = this.targets.get(key);
-    if (!target || !target.width) return null;
+    if (!target || !target.width || !this.canvas.width || !this.canvas.height) return null;
+    const view = this.lastView ?? { width: this.canvas.width, height: this.canvas.height };
     const { screen } = transform;
+    const offsetX = (this.canvas.width - view.width) / 2;
+    const offsetY = (this.canvas.height - view.height) / 2;
     return [
-      Math.round((transform.center.x / screen.x + 0.5) * target.width),
+      Math.round((offsetX + (transform.center.x / screen.x + 0.5) * view.width) / this.canvas.width * target.width),
       // GL row 0 is the bottom and block world space is y-up, so no flip is needed here.
-      Math.round((transform.center.y / screen.y + 0.5) * target.height),
+      Math.round((offsetY + (transform.center.y / screen.y + 0.5) * view.height) / this.canvas.height * target.height),
     ];
   }
 
@@ -1101,6 +1251,37 @@ export class BlockPipeline {
         _SparkMap: this.textures.get('_SparkMap'),
       },
     });
+  }
+
+  /**
+   * `SubtractBlockPostProcessor` — remove the scene colour inside a subtract block.
+   *
+   * `subtractBlockRT` goes through `SubtractBlockBlender` pass 0 first, whose attribution is `1`
+   * across a subtract block and `0` everywhere else (its two thresholds bracket the `0.1` alpha that
+   * `BlockSprite` writes for subtract quads). Scaling the scene copy by `1 - attribution` is what
+   * makes a subtract block read as a hole rather than as a translucent red block; without it the
+   * only visible trace of a subtract block is its `0.1` alpha, which is why the Canvas2D fallback
+   * had to draw an editor-only magenta outline to make one visible at all.
+   *
+   * Skipped entirely when no subtract quad was drawn, so charts without subtract blocks pay nothing.
+   */
+  subtractScene(seconds) {
+    const mask = this.targets.get('subtractBlockRT');
+    if (!mask?.width) return false;
+    // Charts without subtract blocks pay nothing: the pass only runs when a subtract quad was drawn.
+    // It is deliberately *not* gated on `sceneDistortion`: the subtract is a property of the block,
+    // not of the scene sampling. With the scene copy left empty the multiplication is a no-op, which
+    // is why running it unconditionally in that case costs a draw and changes nothing.
+    if (!(this.lastStats?.quads ?? []).some((quad) => quad.isSubtract)) return false;
+    // `SubtractBlockBlender` pass 0 turns the raw `0.1` mask into the `1 / 0` attribution the scene
+    // multiply needs. It writes its own scratch: `scratchA` already holds the enabled-mask
+    // attribution that `BlockCompose` pass 0 consumed, and `scratchB` is the disabled pair's.
+    this.blendSubtractMask('subtractBlockRT', 'scratchC', seconds, 0);
+    const program = this.use('SubtractScene', 0);
+    this.bindTarget('sceneColorRT');
+    this.gl.enable(this.gl.BLEND);
+    this.fullscreen(program, { textures: { _SceneColor: this.targets.get('sceneColorRT'), _Mask: this.targets.get('scratchC') } });
+    return true;
   }
 
   /**

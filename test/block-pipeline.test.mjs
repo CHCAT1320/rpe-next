@@ -148,7 +148,7 @@ function makePipeline(gl) {
   for (const [key, target] of pipeline.targets) textureObjects.set(target.texture, key);
   for (const [name, entry] of pipeline.textures) textureObjects.set(entry.texture, name);
   gl.__samplerState = { samplerTexture, useCounts, textureObjects };
-  return { pipeline, canvas };
+  return { pipeline, canvas, gl };
 }
 
 /**
@@ -227,12 +227,14 @@ test('blockMatrix 把单位四边形映射到块矩形（含旋转）', () => {
   assert.ok(Math.abs(centre.x) < 1e-6 && Math.abs(centre.y) < 1e-6, JSON.stringify(centre));
 });
 
-test('13 个 program 全部编译，按材质命名', () => {
+test('13 个挖出的 program 加 1 个端口自备的 subtract 通道全部编译', () => {
   const { pipeline } = makePipeline(stubGl());
   assert.equal(pipeline.disabled, false, pipeline.lastError);
   const total = [...pipeline.programs.values()].reduce((sum, programs) => sum + programs.length, 0);
-  assert.equal(total, 13);
-  for (const key of ['BlockSprite', 'SubtractBlockBlender', 'BlockCompose', 'EdgeMask', 'GlowMask', 'DisabledBlock', 'ReadyBlock', 'ActiveBlock', 'TouchEffect']) {
+  // 13 from the dump (9 files, four of which carry two programs) plus `SubtractScene`, which the
+  // dump cannot supply because the scene multiply lives in the engine's Blit, not in the shader asset.
+  assert.equal(total, 14);
+  for (const key of ['BlockSprite', 'SubtractBlockBlender', 'BlockCompose', 'EdgeMask', 'GlowMask', 'DisabledBlock', 'ReadyBlock', 'ActiveBlock', 'TouchEffect', 'SubtractScene']) {
     assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
   }
 });
@@ -252,6 +254,7 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
     'EdgeMask#1',                     // edgeSize == 1 short-circuits to pass 1
     'GlowMask#0', 'GlowMask#0', 'GlowMask#0', 'GlowMask#0', 'GlowMask#0',
     'GlowMask#1',                     // final `.y`-only write preserves the edge
+    'SubtractBlockBlender#0', 'SubtractScene#0', // the scene subtract, before the final composite
     'BlockCompose#1',
     'SubtractBlockBlender#1',         // the ready-subtract mask is post-processed too
     'DisabledBlock#0',
@@ -303,10 +306,71 @@ test('每个 program 都绑定到正确的 RT（sampler 接线）', () => {
   }
   // render.md: blockComposeMaterial binds the *merged* masks, activeBlockMaterial the *pure ready*
   // masks, even though the sampler names collide.
-  // 13 documented targets plus this port's two Screen/8 scratches, which stand in for the internal
-  // temp Unity allocates so a camera's `OnRenderImage` has distinct source and destination handles.
-  assert.equal(pipeline.targets.size, 15);
+  // 13 documented targets plus this port's three Screen/8 scratches: two stand in for the internal
+  // temp a camera's `OnRenderImage` needs to have distinct source and destination handles, and the
+  // third holds the attribution the scene subtract multiplies by.
+  assert.equal(pipeline.targets.size, 16);
   assert.equal(pipeline.textures.size, 5, '4 张不同的 PNG 占 5 个 sampler 名（BlockNoise1 用了两次）');
+});
+
+test('贴图色彩空间可切换：默认原样上传，srgb 时按材料表解码', async () => {
+  // materials.md §1 marks Block/BlockNoise1 sRGB. Decoding cannot be asked of WebGL for an
+  // RGBA/UNSIGNED_BYTE upload, so the port does it on the CPU and the option has to be explicit.
+  // The measured effect: BlockNoise1's mean goes 0.5041 -> 0.2382, which moves `fillBase` from ~0.711
+  // to ~0.821 because `dispAvg` also scales the fill colour.
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  const uploaded = [];
+  const originalTexImage2D = gl.texImage2D;
+  gl.texImage2D = (...args) => { uploaded.push(args.at(-1)); originalTexImage2D(...args); };
+  const previousImage = globalThis.Image;
+  const previousDocument = globalThis.document;
+  const pixels = { data: new Uint8ClampedArray(4 * 4) };
+  for (let i = 0; i < 16; i += 4) { pixels.data[i] = 188; pixels.data[i + 3] = 255; }
+  let canvases = 0;
+  const written = [];
+  globalThis.Image = class { set src(value) { this.href = value; queueMicrotask(() => this.onload?.()); } };
+  globalThis.document = {
+    createElement: () => {
+      canvases += 1;
+      return {
+        width: 0, height: 0,
+        getContext: () => ({
+          drawImage() {},
+          putImageData: (image) => written.push(Uint8ClampedArray.from(image.data)),
+          getImageData: () => ({ data: Uint8ClampedArray.from(pixels.data) }),
+          clearRect() {}, fillRect() {},
+        }),
+      };
+    },
+  };
+  try {
+    await pipeline.loadImages('/fake/');
+    assert.equal(uploaded.length, 5, '五个 sampler 各上传一次');
+    assert.equal(canvases, 0, '默认不做 CPU 解码，因此不建离屏画布');
+    assert.equal(written.length, 0, '默认一次解码都不写回');
+
+    const srgb = makePipeline(stubGl());
+    srgb.pipeline.textureColorSpace = 'srgb';
+    const uploadedSrgb = [];
+    const srgbTexImage = srgb.gl.texImage2D;
+    srgb.gl.texImage2D = (...args) => { uploadedSrgb.push(args.at(-1)); srgbTexImage(...args); };
+    await srgb.pipeline.loadImages('/fake/');
+    // `loadImages` uploads one texture per *sampler*, so `BlockNoise1` (used by `_DisplaceMap` and
+    // `_TouchDisplaceMap`) is decoded twice and `Block` once: three decodes for two source images.
+    assert.equal(canvases, 3, 'Block 一次 + BlockNoise1 两次（两个 sampler 各持一个纹理对象）');
+    // Every decode must land on the sRGB curve: 188 -> 128 (0.7373 decodes to 0.5029), alpha kept.
+    assert.equal(written.length, 3, '三次解码各写回一次');
+    for (const data of written) {
+      assert.equal(data[0], 128, `188 应解码为 128，实际 ${data[0]}`);
+      assert.equal(data[3], 255, 'alpha 不参与解码');
+    }
+    // Each decoded texture is re-uploaded from its canvas rather than the original image element.
+    assert.equal(uploadedSrgb.length, 5, '解码后仍然每槽上传一次');
+  } finally {
+    globalThis.Image = previousImage;
+    globalThis.document = previousDocument;
+  }
 });
 
 // Naming a sampler is not the same as feeding it the right RT: the collision between
@@ -719,6 +783,7 @@ test('块层按设备像素渲染，再贴进视口的 CSS 像素矩形', () => 
     blockCanvas: { tag: 'gl' },
     blockSceneEffects: true,
     chart: { blockAreas: [] },
+    blockView: Preview.prototype.blockView,
     blockPipeline: {
       disabled: false,
       render: (options) => { captured.render = options; return { sceneEffects: true }; },
@@ -746,6 +811,46 @@ test('块层按设备像素渲染，再贴进视口的 CSS 像素矩形', () => 
   // The additive disabled/ready layer is composited before the block canvas, so `ActiveBlock` (which
   // already contains the layer via `_SceneColor`) stays on top, as it does in the game.
   assert.deepEqual(captured.composite, [context, 1400, 900, viewport]);
+  // `view` tells the pipeline which part of its own canvas the layer occupies, so the per-block
+  // diagnostic probes address the right pixels once `缩放` shrinks the content.
+  assert.deepEqual(captured.render.view, viewport, 'scale 1 时层铺满视口');
+});
+
+test('块的 GL 层随编辑器「缩放」一起缩小，并居中于视口', () => {
+  // The canvas is still rendered at the full viewport size in device pixels — the block screen space
+  // keeps its aspect — but the layer's rectangle inside it shrinks and re-centres, exactly as the
+  // Canvas2D path draws it. Without this the blocks would be the only layer ignoring `viewDivisor`.
+  const captured = { render: null, image: null };
+  const host = {
+    canvas: { width: 2800, height: 1800 },
+    blockCanvas: { tag: 'gl' },
+    blockSceneEffects: false,
+    chart: { blockAreas: [] },
+    blockView: Preview.prototype.blockView,
+    blockPipeline: {
+      disabled: false,
+      render: (options) => { captured.render = options; return { sceneEffects: false }; },
+      compositeSceneEffects: () => {},
+    },
+  };
+  const context = { drawImage: (...args) => { captured.image = args; }, save() {}, restore() {} };
+  const viewport = { left: 100, top: 50, width: 700, height: 450 };
+  const previous = globalThis.devicePixelRatio;
+  globalThis.devicePixelRatio = 2;
+  try {
+    Preview.prototype.drawBlocksPipeline.call(host, context, 3, viewport, 0.5);
+  } finally {
+    globalThis.devicePixelRatio = previous;
+  }
+  // The GL canvas is allocated at the *layer's* size, not the whole viewport, so zooming out also
+  // stops paying for pixels the layer cannot use. The block screen space keeps its aspect either way.
+  assert.equal(captured.render.width, 700, 'GL 画布按缩小后的层尺寸分配');
+  assert.equal(captured.render.height, 450);
+  assert.equal(captured.render.aspect, 700 / 450, '宽高比不随缩放变化');
+  // ...but the layer rect halves and is re-centred, and the scene crop follows it.
+  assert.deepEqual(captured.render.view, { left: 275, top: 162.5, width: 350, height: 225 });
+  assert.deepEqual(captured.render.sceneView, { left: 550, top: 325, width: 700, height: 450 });
+  assert.deepEqual(captured.image.slice(1), [0, 0, 700, 450, 275, 162.5, 350, 225], '贴到缩小后的矩形');
 });
 
 test('禁用态/预备态层用加法合成，而不是把预览压暗', () => {
@@ -882,6 +987,40 @@ test('诊断记录每个块进了哪一层，并在各 RT 的块中心取值', (
       assert.ok(value === null || Number.isInteger(value), `${name} 应为整数像素值或 null，实际 ${value}`);
     }
   }
+});
+
+test('减块从场景色里扣除，且没有减块时不跑这一趟', () => {
+  // `render.md`: a subtract block removes the scene colour instead of showing as a translucent red
+  // block, which is why its `0.1` alpha is otherwise almost invisible. The scene multiply is the part
+  // the shader asset cannot supply, so it is port-local (`SubtractScene`).
+  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  const subtractIndex = fixture.findIndex((block) => block.isSubtract);
+  assert.ok(subtractIndex >= 0, '语料里应有减块');
+  const subtract = fixture[subtractIndex];
+  const plain = fixture.find((block) => !block.isSubtract);
+  const at = (block) => block.enableTime + 0.01;
+
+  const withSubtract = makePipeline(stubGl());
+  withSubtract.pipeline.render({ blocks: [subtract], now: at(subtract), aspect: 16 / 9, width: 1600, height: 900 });
+  const sequence = passSequence(withSubtract.gl);
+  assert.ok(sequence.includes('SubtractScene#0'), '有减块时必须跑场景扣除');
+  // It must run after `BlockCompose` pass 0 has consumed `subtractBlockRT`, and before the composite,
+  // so `ActiveBlock` samples an already-subtracted `_SceneColor`.
+  assert.ok(sequence.indexOf('SubtractScene#0') > sequence.indexOf('BlockCompose#0'));
+  assert.ok(sequence.indexOf('SubtractScene#0') < sequence.indexOf('ActiveBlock#0'));
+  // The mask it multiplies by is pass 0's attribution, not the raw 0.1 quad — hence the extra
+  // SubtractBlockBlender run right before it.
+  assert.equal(sequence[sequence.indexOf('SubtractScene#0') - 1], 'SubtractBlockBlender#0');
+  const scene = withSubtract.pipeline.programs.get('SubtractScene')[0];
+  assert.equal(scene.state.blend.join(','), 'ONE,ZERO', '结果直接覆盖场景副本');
+  const source = scene.source.fragment;
+  assert.ok(/clamp\(1\.0 - attribution/.test(source), '扣除量必须是 1 - attribution');
+  assert.equal(samplerTargets(withSubtract.pipeline, withSubtract.gl, 'SubtractScene', 0)._Mask, 'scratchC');
+  assert.equal(samplerTargets(withSubtract.pipeline, withSubtract.gl, 'SubtractScene', 0)._SceneColor, 'sceneColorRT');
+
+  const without = makePipeline(stubGl());
+  without.pipeline.render({ blocks: [plain], now: at(plain), aspect: 16 / 9, width: 1600, height: 900 });
+  assert.ok(!passSequence(without.gl).includes('SubtractScene#0'), '没有减块时不应跑');
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
