@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   blockEase, findCurrentEventIndex, blockGeometry, blockTransform, blockState,
   blockIsActive, blockShowCoverage, blockScreen, BLOCK_SCREEN_HEIGHT, BLOCK_EASE_TYPES,
+  blockIsDestroyed, BLOCK_HIDDEN_POSITION,
 } from '../src/core/block-area.mjs';
 import { easing } from '../src/core/easing.mjs';
 import { createChart, parseChart, serializeChart, assertChart } from '../src/core/chart.mjs';
@@ -88,6 +89,13 @@ test('相位：四个时间点前后；enableTime == disableTime 的块永不生
   assert.deepEqual(blockState(block, 3), { active: false, ready: false }, '残留退回禁用外观');
   assert.deepEqual(blockState(block, 3.9), { active: false, ready: false });
   assert.equal(blockState(block, 4), null, '消失后隐藏');
+
+  // `null` stands in for the game's two hidden phases, which park the block at x = 1000 rather than
+  // changing its layer: same picture, and the box the game only stops tracking after the interval.
+  assert.equal(blockState(plainBlock(), -1), null, 'appearTime 之前隐藏');
+  assert.equal(blockIsDestroyed(plainBlock(), 3.0), false, '恰好 max(disable, disappear) 时还活着');
+  assert.equal(blockIsDestroyed(plainBlock(), 8.1), true, '超过 destroyInterval 才销毁');
+  assert.equal(BLOCK_HIDDEN_POSITION, 1000, '游戏把隐藏块停在 x = 1000');
 
   // 7 of the 48 shipped blocks do this on purpose and must stay legal.
   const inert = plainBlock({ appearTime: 1, enableTime: 3, disableTime: 3, disappearTime: 4 });

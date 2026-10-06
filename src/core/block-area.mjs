@@ -270,6 +270,11 @@ export function blockTransform(block, now, aspect) {
  * The game only ever distinguishes two materials: `Active` uses the active one and every other
  * visible state falls back to `disabledLayer` — including the residual window between
  * `disableTime` and `disappearTime`. `Ready` adds a breathing overlay on top of the disabled look.
+ *
+ * `null` also stands in for the game's "park it off-screen" case: the two hidden phases move
+ * `localPosition` to `BLOCK_HIDDEN_POSITION` rather than changing the layer, so the block is still
+ * alive and still drawn, just outside the viewport. Skipping it here is the same picture and skips
+ * the transform work; `blockIsDestroyed` covers the point where the game stops tracking it at all.
  */
 export function blockState(block, now) {
   if (!(block.appearTime <= now && now < block.disappearTime)) return null;
@@ -283,6 +288,29 @@ export function blockState(block, now) {
 export function blockIsActive(block, time) {
   return block.enableTime <= time && block.disableTime > time;
 }
+
+/**
+ * `τ > max(disableTime, disappearTime) + destroyInterval`.
+ *
+ * The game destroys the block's GameObject after this, so the object is gone rather than hidden. Where
+ * `BlockPhase` is used as a five-value enum this is `HiddenAfter`; here the caller simply stops
+ * considering the block, which is the same visible result.
+ */
+export const BLOCK_DESTROY_INTERVAL = 5;
+export function blockIsDestroyed(block, time) {
+  return time > Math.max(block.disableTime, block.disappearTime) + BLOCK_DESTROY_INTERVAL;
+}
+
+/**
+ * Where a block is parked while it is hidden.
+ *
+ * `UpdateBlocksTransform` puts `localPosition` at `x = 1000` when the block is outside
+ * `[appearTime, disappearTime)` instead of switching its layer off, which parks it far outside the
+ * orthographic viewport (world width ≈ 17.8 units). This port returns `null` from `blockState` for
+ * exactly that window and its renderers skip the block, so the drawn result is identical; this
+ * constant records the value the game uses so the equivalence is explicit rather than accidental.
+ */
+export const BLOCK_HIDDEN_POSITION = 1000;
 
 /**
  * Linear colour fade-in over `disabledBlockShowDuration`, expressed as 0..1 coverage.
