@@ -372,6 +372,41 @@ test('贴图色彩空间：默认按材料表解码 Block/BlockNoise1，raw 是�
   }
 });
 
+test('火焰边框的分母可调，且只影响 effectRT，不动块遮罩', () => {
+  // `render.md` fixes effectRT at Screen/4 and the masks at Screen/8. EdgeMask dilates by one texel of
+  // effectRT, so that denominator is the edge ring's resolution — and its thickness in screen terms.
+  // Making it adjustable must not touch the masks, or block coverage would move with the border.
+  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  const { pipeline } = makePipeline(stubGl());
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const size = (key) => [pipeline.targets.get(key).width, pipeline.targets.get(key).height];
+  assert.equal(pipeline.effectDivisor, 4, '默认就是游戏的 Screen/4');
+  assert.deepEqual(size('effectRT'), [400, 225]);
+  assert.deepEqual(size('normalBlockRT'), [200, 112]);
+
+  // Coarser: the same screen divided by 8.
+  pipeline.effectDivisor = 8;
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  assert.deepEqual(size('effectRT'), [200, 112], '分母 8 -> Screen/8');
+  assert.deepEqual(size('normalBlockRT'), [200, 112], '块遮罩不受影响');
+
+  // Sharper than the game, which is the point of making it controllable.
+  pipeline.effectDivisor = 2;
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  assert.deepEqual(size('effectRT'), [800, 450], '分母 2 -> Screen/2');
+
+  // The game's value is the fallback for anything unusable, including a stale stored NaN.
+  for (const bad of [0, -1, Number.NaN, undefined]) {
+    pipeline.effectDivisor = bad;
+    pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+    assert.deepEqual(size('effectRT'), [400, 225], `effectDivisor=${bad} 应回退到 4`);
+  }
+  // Only effectRT carries a `targetDivisor` override; every other target keeps its documented divisor.
+  assert.equal(pipeline.targetDivisor(pipeline.targets.get('sceneColorRT')), 6);
+  assert.equal(pipeline.targetDivisor(pipeline.targets.get('pingA')), 4);
+  assert.equal(pipeline.targetDivisor(pipeline.targets.get('subtractBlockRT')), 8);
+});
+
 // Naming a sampler is not the same as feeding it the right RT: the collision between
 // `blockComposeMaterial`'s and `activeBlockMaterial`'s `_Disabled*BlockRT` makes a wrong binding
 // invisible to a name-only check. This walks `sampler name -> texture unit -> texture object` and
@@ -510,18 +545,25 @@ test('fxRenderList 通道按文档算法调用，且默认开启', () => {
 test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
-  // A stand-in scene source: uploadScene only needs something drawImage accepts.
+  // A stand-in scene source: uploadScene only needs something drawImage accepts. This assigns rather
+  // than `??=`: the stub is shared process-wide, and a test that only installs its own when none
+  // exists inherits whatever the previous one left, including a context without `drawImage`.
   let uploaded = 0;
-  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() { uploaded++; } }) }) };
-  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } });
-  // Once per frame, before the composite. The fxRenderList passes add onto a transparent block
-  // canvas rather than re-copying the scene, so there is nothing to refresh afterwards.
-  assert.equal(uploaded, 1, '场景应被拷入 sceneColorRT');
-  assert.equal(pipeline.targets.get('sceneColorRT').width, Math.floor(1600 / 6));
-  assert.equal(pipeline.targets.get('sceneColorRT').height, Math.floor(900 / 6));
-  // Without a scene the copy is skipped rather than failing the frame.
-  assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: true });
-  assert.equal(uploaded, 1);
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() { uploaded++; } }) }) };
+  try {
+    pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } });
+    // Once per frame, before the composite. The fxRenderList passes add onto a transparent block
+    // canvas rather than re-copying the scene, so there is nothing to refresh afterwards.
+    assert.equal(uploaded, 1, '场景应被拷入 sceneColorRT');
+    assert.equal(pipeline.targets.get('sceneColorRT').width, Math.floor(1600 / 6));
+    assert.equal(pipeline.targets.get('sceneColorRT').height, Math.floor(900 / 6));
+    // Without a scene the copy is skipped rather than failing the frame.
+    assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: true });
+    assert.equal(uploaded, 1);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 
@@ -938,16 +980,21 @@ test('场景上传必须垂直翻转，否则块内场景镜像', () => {
   // A 2D canvas's row 0 is its top; the full-screen quad puts v = 0 at the framebuffer's bottom row.
   // Sampling `_SceneColor` without the flip reads the top of the scene at the bottom of the screen,
   // so a block shows a vertically mirrored copy of what it overlaps.
-  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() {} }) }) };
-  const gl = stubGl();
-  const { pipeline } = makePipeline(gl);
-  assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } }), { sceneEffects: true });
-  const flips = gl.__calls.filter((call) => call.name === 'pixelStorei' && call.args[0] === gl.UNPACK_FLIP_Y_WEBGL);
-  assert.ok(flips.length > 0, 'sceneColorRT 的上传应设置翻转');
-  for (const call of flips) assert.equal(call.args[1], true, 'UNPACK_FLIP_Y_WEBGL 应为 true');
-  // ...and the mask targets must not be re-uploaded from a canvas, which would need the same care.
-  const uploads = gl.__calls.filter((call) => call.name === 'texImage2D' && call.args.length === 6);
-  assert.ok(uploads.length >= 1, '应有来自 canvas 的上传');
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() {} }) }) };
+  try {
+    const gl = stubGl();
+    const { pipeline } = makePipeline(gl);
+    assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } }), { sceneEffects: true });
+    const flips = gl.__calls.filter((call) => call.name === 'pixelStorei' && call.args[0] === gl.UNPACK_FLIP_Y_WEBGL);
+    assert.ok(flips.length > 0, 'sceneColorRT 的上传应设置翻转');
+    for (const call of flips) assert.equal(call.args[1], true, 'UNPACK_FLIP_Y_WEBGL 应为 true');
+    // ...and the mask targets must not be re-uploaded from a canvas, which would need the same care.
+    const uploads = gl.__calls.filter((call) => call.name === 'texImage2D' && call.args.length === 6);
+    assert.ok(uploads.length >= 1, '应有来自 canvas 的上传');
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test('诊断记录每个块进了哪一层，并在各 RT 的块中心取值', () => {

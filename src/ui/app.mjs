@@ -438,7 +438,7 @@ element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarke
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, blockDistortion: preview.blockSceneDistortion !== false, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, blockDistortion: preview.blockSceneDistortion !== false, blockEffectDivisor: preview.blockEffectDivisor ?? 4, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
@@ -918,6 +918,29 @@ element('#realtime-enabled').addEventListener('change', event => { realtimePrevi
 element('#block-pipeline').addEventListener('change', event => { setBlockRenderer(event.target.checked ? 'block' : 'canvas'); persistEditor(); invalidate(); });
 element('#block-optional').addEventListener('change', event => { setBlockOptionalStages(event.target.checked); persistEditor(); invalidate(); });
 element('#block-distortion').addEventListener('change', event => { setBlockSceneDistortion(event.target.checked); persistEditor(); invalidate(); });
+element('#block-effect-divisor').addEventListener('change', event => {
+  // Same guard style as `#view-divisor`: an empty or invalid field reverts to the stored value rather
+  // than persisting a value that would leave the render target at the wrong size.
+  if (!event.target.value.trim() || !event.target.validity.valid) { applyDisplaySettings(); return; }
+  setBlockEffectDivisor(Number(event.target.value)); persistEditor(); invalidate();
+});
+
+/**
+ * Set the denominator of `effectRT`'s `Screen/4` — the resolution of the edge ring and the glow.
+ *
+ * `EdgeMask` dilates by one texel of that target, so this number controls both the sharpness of the
+ * "flame border" and how thick it is in screen terms; the block masks deliberately stay at the game's
+ * `Screen/8` so changing this cannot move block coverage. A live pipeline only picks the value up on
+ * its next `resize`, which recomputes sizes every frame, so nothing has to be recreated.
+ */
+function setBlockEffectDivisor(divisor) {
+  const value = Number.isFinite(divisor) && divisor >= 1 ? Math.floor(divisor) : 4;
+  for (const instance of [preview, realtimePreview]) {
+    instance.blockEffectDivisor = value;
+    if (instance.blockPipeline) instance.blockPipeline.effectDivisor = value;
+  }
+  element('#block-effect-divisor').value = String(value);
+}
 
 /**
  * Toggle the in-block scene sampling.
@@ -1422,6 +1445,7 @@ function applyPreferences(next) {
   setBlockRenderer(editorPreferences.blockPipeline === false ? 'canvas' : 'block');
   setBlockOptionalStages(editorPreferences.blockOptional !== false);
   setBlockSceneDistortion(editorPreferences.blockDistortion !== false);
+  setBlockEffectDivisor(editorPreferences.blockEffectDivisor ?? 4);
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
   realtimePreview.opacity = Number(element('#realtime-alpha').value);

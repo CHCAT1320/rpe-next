@@ -23,6 +23,8 @@ export class Preview {
     // before `applyPreferences` ran would persist `blockPipeline: false` and pin the editor to the
     // approximation forever.
     this.blockRenderer = 'block'; this.blockSceneEffects = true; this.blockError = null; this.onBlockError = null;
+    // Denominator of `effectRT`'s `Screen/4`; see `BlockPipeline.effectDivisor`.
+    this.blockEffectDivisor = 4;
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]]) {
@@ -333,6 +335,9 @@ export class Preview {
     if (!pipeline || pipeline.disabled) return false;
     pipeline.sceneEffects = this.blockSceneEffects !== false;
     pipeline.sceneDistortion = this.blockSceneDistortion !== false;
+    // Read every frame like the two flags above: the pipeline may have been created after the setting
+    // was chosen, and its `resize` recomputes target sizes each frame anyway.
+    pipeline.effectDivisor = this.blockEffectDivisor ?? 4;
     // The block layer only covers `view`, not the whole viewport, once the content is scaled down.
     const view = this.blockView(viewport, scale);
     const pipelineViewport = { ...viewport, ...view };

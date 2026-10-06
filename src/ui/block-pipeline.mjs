@@ -309,6 +309,9 @@ export class BlockPipeline {
     // six, but the sixth ring's weight (0.0040) sits below the pass threshold, so five run.
     this.edgeSize = 1;
     this.glowRadius = 6;
+    // The denominator of `effectRT`'s `Screen/4`, i.e. the resolution of the edge ring and the glow.
+    // `4` is the game's value; larger is coarser (and thicker), smaller is sharper. See `targetDivisor`.
+    this.effectDivisor = 4;
     this.glowWeightFalloff = 2.65;
     this.glowPassWeightThreshold = 0.01;
   }
@@ -412,7 +415,9 @@ export class BlockPipeline {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, linear ? gl.LINEAR : gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.targets.set(key, { texture, framebuffer: gl.createFramebuffer(), divisor, width: 0, height: 0 });
+    // `key` is kept on the target as well as in the map: `targetDivisor` needs to know which target it
+    // is looking at, and `effectRT` is the one whose divisor is user-adjustable.
+    this.targets.set(key, { key, texture, framebuffer: gl.createFramebuffer(), divisor, width: 0, height: 0 });
   }
 
   loadTexture(name, slot) {
@@ -477,11 +482,27 @@ export class BlockPipeline {
     }));
   }
 
+  /**
+   * The divisor a target is actually allocated at.
+   *
+   * `render.md` fixes `effectRT` at `Screen/4` while the block masks sit at `Screen/8`, and the edge
+   * and glow live in `effectRT`: `EdgeMask` dilates by exactly one texel of it, so that target's
+   * resolution *is* the flame border's resolution, and a coarser one also makes the ring thicker in
+   * screen terms. `effectDivisor` makes that 4 adjustable; the block masks keep the game's `Screen/8`,
+   * because changing them would move block coverage rather than just the border.
+   */
+  targetDivisor(target) {
+    if (target.key !== 'effectRT') return target.divisor;
+    const divisor = Number(this.effectDivisor);
+    return Number.isFinite(divisor) && divisor >= 1 ? Math.floor(divisor) : target.divisor;
+  }
+
   resize(width, height) {
     const gl = this.gl;
     for (const [key, target] of this.targets) {
-      const w = Math.max(1, Math.floor(width / target.divisor));
-      const h = Math.max(1, Math.floor(height / target.divisor));
+      const divisor = this.targetDivisor(target);
+      const w = Math.max(1, Math.floor(width / divisor));
+      const h = Math.max(1, Math.floor(height / divisor));
       if (target.width === w && target.height === h) continue;
       target.width = w;
       target.height = h;

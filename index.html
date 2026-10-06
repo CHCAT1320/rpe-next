@@ -35,6 +35,7 @@
         <label title="用移植自 Phigros 的 WebGL 管线绘制判定块；关闭则退回 Canvas2D 简化绘制"><input id="block-pipeline" type="checkbox" checked><span>块管线</span></label>
         <label title="启用 DisabledBlock / ReadyBlock 这两个 fxRenderList 全屏通道。ActiveBlock 自身没有禁用态填充路径，关闭后禁用块会完全不可见"><input id="block-optional" type="checkbox" checked><span>禁用态/预备态</span></label>
         <label title="块内采样场景色（游戏行为，块里会看到被位移扭曲的判定线与音符副本）。关闭后块只显示填充/描边/辉光"><input id="block-distortion" type="checkbox" checked><span>块内扭曲</span></label>
+        <label title="边缘环与辉光的分母：游戏固定为屏幕的 1/4（effectRT）。EdgeMask 每轮只外扩该纹理的 1 个像素，所以这个数同时决定火焰边框的清晰度与粗细——值越大越粗糙也越粗。块遮罩始终保持游戏的 1/8"><span>火焰边框 1/</span><input id="block-effect-divisor" type="number" min="1" max="64" step="1" value="4" aria-label="边缘与辉光分辨率分母"></label>
         <label title="可见音符 X 坐标范围的中心；不改变音符坐标"><span>X</span><input id="camera-x" type="number" step="1" min="-1000000" max="1000000" value="0" aria-label="音符视区 X 偏移"></label>
         <label title="原版 ViewScaled：值越大，可见范围越广"><span>缩放</span><input id="view-divisor" type="number" min="0.1" max="100" step="0.1" value="1" aria-label="实时预览尺度"></label>
         <button id="reset-camera" data-icon="return" title="重置视区"></button>
