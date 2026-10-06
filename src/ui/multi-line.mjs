@@ -1,5 +1,5 @@
 import { formatLineExpression, parseLineExpression } from '../application/multi-line-edit.mjs';
-import { groupLineIndices, groupNames, lineFeatureLabels, lineNameLabel } from '../core/line-groups.mjs';
+import { groupLineIndices, groupNames, isDefaultLineName, lineFeatureLabels, lineNameLabel } from '../core/line-groups.mjs';
 
 export class MultiLinePanel {
   constructor(host, getSession, { activate = () => {}, render = () => {}, notify = () => {}, timeline = null, persist = () => {} } = {}) {
@@ -86,7 +86,9 @@ export class MultiLinePanel {
       const row = document.createElement('label'); row.className = 'multi-line-row'; row.dataset.lineIndex = index;
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = session.isTargetLine(index); checkbox.disabled = !session.multiLineEnabled && index !== session.lineIndex;
       checkbox.onchange = () => { setRow(index, checkbox.checked); session.notify(); this.renderSession(); };
-      const label = document.createElement('span'); label.className = 'multi-line-name'; const name = document.createElement('span'); name.className = 'multi-line-line-name'; name.textContent = lineNameLabel(line, index); const features = lineFeatureLabels(line); const featureText = document.createElement('small'); featureText.className = 'multi-line-features'; featureText.textContent = features.join(' · '); featureText.hidden = !features.length; label.append(name, featureText);
+      const label = document.createElement('span'); label.className = 'multi-line-name'; const name = document.createElement('span'); name.className = 'multi-line-line-name';
+      const lineLabel = lineNameLabel(line, index); name.textContent = isDefaultLineName(line, index) ? lineLabel : `线 ${index} · ${lineLabel}`;
+      const features = lineFeatureLabels(line); const featureText = document.createElement('small'); featureText.className = 'multi-line-features'; featureText.textContent = features.join(' · '); featureText.hidden = !features.length; label.append(name, featureText);
       const stats = document.createElement('small'); const events = [...(line.eventLayers ?? []), line.extended ?? {}].reduce((sum, layer) => sum + Object.values(layer ?? {}).reduce((total, value) => total + (Array.isArray(value) ? value.length : 0), 0), 0); stats.textContent = `${line.notes?.length ?? 0} 音符 · ${events} 事件`;
       row.classList.toggle('current', index === session.lineIndex); row.classList.toggle('selected', checkbox.checked); row.append(checkbox, label, stats); return row;
     };

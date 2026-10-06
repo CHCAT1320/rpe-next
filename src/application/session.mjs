@@ -131,6 +131,7 @@ export class EditorSession extends EventTarget {
     lines[lineIndex] = { ...lines[lineIndex], notes: [...existing, ...structuredClone(notes)], numOfNotes: first + notes.length };
     selected = notes.map((note, offset) => first + offset);
     if (this.multiLineActive && this.multiLineMode === 'notes') {
+      this.multiLineSelection.clear();
       this.multiLineSelection.set(lineIndex, new Set(selected));
       if (lineIndex === this.lineIndex) this.selection = new Set(selected);
     } else this.selection = new Set(selected);
@@ -138,28 +139,79 @@ export class EditorSession extends EventTarget {
     return true;
   }
 
+  selectedNoteEntries() {
+    if (this.multiLineActive && this.multiLineMode === 'notes') {
+      return [...(this.multiLineSelection ?? new Map())].flatMap(([lineIndex, indices]) => {
+        const line = this.chart.judgeLineList?.[lineIndex];
+        return [...indices].map(index => ({ lineIndex, index, note: line?.notes?.[index] })).filter(entry => entry.note);
+      });
+    }
+    return [...this.selection].map(index => ({ lineIndex: this.lineIndex, index, note: this.notes[index] })).filter(entry => entry.note);
+  }
+
   deleteSelection() {
-    if (!this.selection.size) return;
+    const entries = this.selectedNoteEntries();
+    if (!entries.length) return;
     const beforeSelection = this.selectionState();
-    const selected = this.selection;
-    this.selection = new Set();
     const lines = [...this.chart.judgeLineList];
-    const notes = lines[this.lineIndex]?.notes ?? [];
-    const remaining = notes.filter((note, noteIndex) => !selected.has(noteIndex));
-    lines[this.lineIndex] = { ...lines[this.lineIndex], notes: remaining, numOfNotes: remaining.length };
+    const selectedByLine = new Map();
+    for (const entry of entries) {
+      if (!selectedByLine.has(entry.lineIndex)) selectedByLine.set(entry.lineIndex, new Set());
+      selectedByLine.get(entry.lineIndex).add(entry.index);
+    }
+    for (const [lineIndex, selected] of selectedByLine) {
+      const line = lines[lineIndex]; if (!line) continue;
+      const remaining = (line.notes ?? []).filter((note, noteIndex) => !selected.has(noteIndex));
+      lines[lineIndex] = { ...line, notes: remaining, numOfNotes: remaining.length };
+    }
+    this.selection = new Set();
+    if (this.multiLineActive && this.multiLineMode === 'notes') this.multiLineSelection = new Map();
     this.commit('删除音符', { ...this.chart, judgeLineList: lines }, beforeSelection);
   }
 
   transformSelection(label, change) {
-    if (!this.selection.size) return;
+    const entries = this.selectedNoteEntries();
+    if (!entries.length) return;
     const lines = [...this.chart.judgeLineList];
-    const notes = lines[this.lineIndex]?.notes ?? [];
-    lines[this.lineIndex] = { ...lines[this.lineIndex], notes: notes.map((note, noteIndex) => this.selection.has(noteIndex) ? change(note) : note) };
+    const changes = new Map(entries.map(entry => [`${entry.lineIndex}:${entry.index}`, change(entry.note, entry)]));
+    for (const lineIndex of new Set(entries.map(entry => entry.lineIndex))) {
+      const line = lines[lineIndex]; if (!line) continue;
+      const notes = (line.notes ?? []).map((note, index) => changes.get(`${lineIndex}:${index}`) ?? note);
+      lines[lineIndex] = { ...line, notes, numOfNotes: notes.length };
+    }
     this.commit(label, { ...this.chart, judgeLineList: lines });
   }
 
   moveSelectionToLine(targetLineIndex) {
-    if (!this.selection.size || !Number.isInteger(targetLineIndex) || targetLineIndex < 0 || targetLineIndex >= this.chart.judgeLineList.length || targetLineIndex === this.lineIndex) return;
+    const entries = this.selectedNoteEntries();
+    if (!entries.length || !Number.isInteger(targetLineIndex) || targetLineIndex < 0 || targetLineIndex >= this.chart.judgeLineList.length) return;
+    if (this.multiLineActive && this.multiLineMode === 'notes') {
+      const beforeSelection = this.selectionState();
+      const lines = [...this.chart.judgeLineList];
+      const selectedByLine = new Map();
+      for (const entry of entries) {
+        if (!selectedByLine.has(entry.lineIndex)) selectedByLine.set(entry.lineIndex, []);
+        selectedByLine.get(entry.lineIndex).push(entry);
+      }
+      const moving = entries.filter(entry => entry.lineIndex !== targetLineIndex);
+      for (const [lineIndex, selectedEntries] of selectedByLine) {
+        if (lineIndex === targetLineIndex) continue;
+        const line = lines[lineIndex]; if (!line) continue;
+        const selected = new Set(selectedEntries.map(entry => entry.index));
+        const notes = (line.notes ?? []).filter((note, index) => !selected.has(index));
+        lines[lineIndex] = { ...line, notes, numOfNotes: notes.length };
+      }
+      const target = lines[targetLineIndex]; if (!target) return;
+      const targetNotes = [...(target.notes ?? [])];
+      const selectedIndices = new Set();
+      for (const entry of moving) { selectedIndices.add(targetNotes.length); targetNotes.push(structuredClone(entry.note)); }
+      lines[targetLineIndex] = { ...target, notes: targetNotes, numOfNotes: targetNotes.length };
+      this.multiLineSelection = new Map([[targetLineIndex, selectedIndices]]);
+      this.selection = targetLineIndex === this.lineIndex ? new Set(selectedIndices) : new Set();
+      this.commit('移动音符到判定线', { ...this.chart, judgeLineList: lines }, beforeSelection);
+      return;
+    }
+    if (targetLineIndex === this.lineIndex) return;
     const beforeSelection = this.selectionState();
     const lines = [...this.chart.judgeLineList];
     const source = lines[this.lineIndex];

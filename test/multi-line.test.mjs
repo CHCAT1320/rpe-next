@@ -43,7 +43,7 @@ test('多线边界按钮按循环线组添加，音符可迁移到指定线', ()
   assert.equal(session.lineIndex, 2); assert.equal(session.chart.judgeLineList[0].notes.length, 0);
 });
 
-test('多线音符并列显示但编辑只作用于当前线', () => {
+test('多线音符并列显示并按所属线编辑', () => {
   const session = sessionWithLines(); session.setMultiLineEnabled(true); session.addMultiLine(1); session.addMultiLine(2);
   session.insertNotes([createNote(1, 2, 10)]);
   assert.deepEqual(session.chart.judgeLineList.map(line => line.notes.length), [1, 0, 0]);
@@ -54,6 +54,21 @@ test('多线音符并列显示但编辑只作用于当前线', () => {
   session.selection = new Set([0]);
   session.deleteSelection(); assert.deepEqual(session.chart.judgeLineList.map(line => line.notes.length), [1, 0, 0]);
   session.travel('undo'); assert.deepEqual(session.chart.judgeLineList.map(line => line.notes.length), [1, 1, 0]);
+});
+
+test('多线音符编辑按所属线处理，不依赖当前线', () => {
+  const session = sessionWithLines(3);
+  session.chart.judgeLineList[1].notes = [createNote(1, 2, 10)];
+  session.chart.judgeLineList[1].numOfNotes = 1;
+  session.setMultiLineEnabled(true);
+  session.multiLineIndices = [0, 1];
+  session.multiLineSelection = new Map([[1, new Set([0])]]);
+  session.selection.clear();
+  session.transformSelection('镜像非当前线音符', note => ({ ...note, positionX: -note.positionX }));
+  assert.equal(session.chart.judgeLineList[0].notes.length, 0);
+  assert.equal(session.chart.judgeLineList[1].notes[0].positionX, -10);
+  session.deleteSelection();
+  assert.equal(session.chart.judgeLineList[1].notes.length, 0);
 });
 
 test('多线事件放置和批量变换保留每条线独立数组', () => {
