@@ -16,8 +16,20 @@ import { easing } from './easing.mjs';
 /** World height of the block screen space: `2 * orthographicSize`, and all block cameras use 5.0. */
 export const BLOCK_SCREEN_HEIGHT = 10;
 
-/** `disabledBlockShowDuration` / `disabledBlockReadyDuration` — both 0.5 s in the shipped level. */
-export const BLOCK_READY_LEAD = 0.5;
+/**
+ * `disabledBlockReadyDuration` (`0x5C`) — the width of the `Ready` window, and also how long
+ * `DisabledBlockReady` waits before switching `readyLayer` → `enabledLayer`.
+ */
+export const BLOCK_READY_DURATION = 0.5;
+
+/**
+ * `disabledBlockShowDuration` (`0x58`) — the width of `DisabledBlockShow`'s colour fade-in, and
+ * **nothing else**. It is a separate field from `BLOCK_READY_DURATION`; the shipped level happens to
+ * set both to `0.5`, which is why they were once collapsed into one constant. Keeping them apart
+ * matters as soon as a chart or level overrides either: with them merged, changing the show duration
+ * would silently move the ready boundary too.
+ */
+export const BLOCK_SHOW_DURATION = 0.5;
 
 /** Number of block easing curves (easeType 0..14). */
 export const BLOCK_EASE_TYPES = 15;
@@ -263,7 +275,7 @@ export function blockState(block, now) {
   if (!(block.appearTime <= now && now < block.disappearTime)) return null;
   return {
     active: block.enableTime <= now && now < block.disableTime,
-    ready: block.enableTime - BLOCK_READY_LEAD <= now && now < block.enableTime,
+    ready: block.enableTime - BLOCK_READY_DURATION <= now && now < block.enableTime,
   };
 }
 
@@ -272,7 +284,17 @@ export function blockIsActive(block, time) {
   return block.enableTime <= time && block.disableTime > time;
 }
 
-/** Linear colour fade-in over `disabledBlockShowDuration`, expressed as 0..1 coverage. */
+/**
+ * Linear colour fade-in over `disabledBlockShowDuration`, expressed as 0..1 coverage.
+ *
+ * The game drives this from the `DisabledBlockShow` coroutine, which only starts when a block becomes
+ * visible *while already inside* its enabled window (`visible && !wasVisible && !notInWindow`). A block
+ * that appears before `enableTime` therefore never runs the fade and keeps the alpha
+ * `UpdateBlockActivation` assigns it (`1`, or `0.1` for a subtract block). This pure function is the
+ * frame-driven equivalent: it returns 1 for exactly that case, because `appearTime` precedes
+ * `enableTime` by more than the show duration in every shipped block. It diverges only for data that
+ * makes a block appear inside its own active window, which was not observed in the corpus.
+ */
 export function blockShowCoverage(block, now) {
-  return clamp01((now - block.appearTime) / BLOCK_READY_LEAD);
+  return clamp01((now - block.appearTime) / BLOCK_SHOW_DURATION);
 }
