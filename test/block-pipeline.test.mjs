@@ -520,6 +520,16 @@ test('uniform 按反射类型派发：矩阵数组走 uniform4fv，vec3 不走 u
   assert.equal(active.types.get('_SparkTint'), gl.FLOAT_VEC3);
   assert.equal(active.types.get('_FillColor'), gl.FLOAT_VEC4);
   assert.ok(gl.__calls.some((call) => call.name === 'uniform3fv'), 'vec3 uniform 应以 uniform3fv 写入');
+  // Component counts must match the setter, or the driver raises "invalid size". The material table
+  // stores colours as RGBA even where the shader declares a vec3.
+  const width = { uniform1i: 1, uniform1f: 1, uniform2fv: 2, uniform3fv: 3, uniform4fv: 4 };
+  for (const call of gl.__calls) {
+    const expected = width[call.name];
+    if (!expected) continue;
+    const size = call.args[1].length ?? 1;
+    assert.equal(size % expected, 0, `${call.args[0]?.name}: ${call.name} 收到 ${size} 个分量，应为 ${expected} 的倍数`);
+    assert.ok(size > 0, `${call.args[0]?.name}: 空分量`);
+  }
   for (const call of gl.__calls.filter((entry) => entry.name === 'uniform4fv')) {
     assert.notEqual(call.args[1].length, 3, `${call.args[0]?.name} 被当成 vec4 写入`);
   }

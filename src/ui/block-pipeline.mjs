@@ -526,11 +526,18 @@ export class BlockPipeline {
     const location = program.uniforms.get(name);
     if (location == null) return false;
     const numbers = typeof value === 'number' ? [value] : value;
+    // The material table stores every colour as RGBA, including the ones the shaders declare as
+    // `vec3` (_SparkTint, _NoiseTint), so handing four components to uniform3fv raised
+    // "invalid size" once per program per frame. Trim to the uniform's own width — but keep a
+    // genuine `vecN[]` array intact, which is how Unity writes `vec4 matrix[4]`.
+    const sized = (count) => (numbers.length > count && numbers.length % count === 0
+      ? numbers
+      : Array.from({ length: count }, (_, index) => numbers[index] ?? 0));
     switch (program.types.get(name)) {
       case gl.FLOAT_MAT4: gl.uniformMatrix4fv(location, false, numbers); return true;
-      case gl.FLOAT_VEC4: gl.uniform4fv(location, numbers); return true;
-      case gl.FLOAT_VEC3: gl.uniform3fv(location, numbers); return true;
-      case gl.FLOAT_VEC2: gl.uniform2fv(location, numbers); return true;
+      case gl.FLOAT_VEC4: gl.uniform4fv(location, sized(4)); return true;
+      case gl.FLOAT_VEC3: gl.uniform3fv(location, sized(3)); return true;
+      case gl.FLOAT_VEC2: gl.uniform2fv(location, sized(2)); return true;
       case gl.INT: case gl.BOOL: gl.uniform1i(location, numbers[0]); return true;
       default: gl.uniform1f(location, numbers[0]); return true;
     }
@@ -550,10 +557,15 @@ export class BlockPipeline {
 
   /** Uniforms the engine supplies rather than the material. */
   applyEngineUniforms(program, seconds) {
-    const gl = this.gl;
     this.setUniform(program, '_Time', [seconds / 20, seconds, seconds * 2, seconds * 3]);
-    this.setUniform(program, '_ScreenParams', [this.canvas.width, this.canvas.height, 1 / this.canvas.width, 1 / this.canvas.height]);
-    this.setUniform(program, '_ProjectionParams', [1, 0, 0, 0]);
+    // Unity's `_ScreenParams` is (width, height, 1 + 1/width, 1 + 1/height); `.zw` are not the
+    // reciprocal texel sizes the name suggests.
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    this.setUniform(program, '_ScreenParams', [width, height, 1 + 1 / width, 1 + 1 / height]);
+    // `_ProjectionParams` is (yFlip, near, far, 1/far) and only `.x` is read; every block camera is
+    // orthographic with a 0.3 near plane and a 1000 far plane.
+    this.setUniform(program, '_ProjectionParams', [1, 0.3, 1000, 1 / 1000]);
     const effect = this.targets.get('effectRT');
     this.setUniform(program, '_EffectRT_TexelSize', [1 / effect.width, 1 / effect.height, effect.width, effect.height]);
     // `UpdateTouchPos` recomputes the shine every frame instead of reading it from the material.
