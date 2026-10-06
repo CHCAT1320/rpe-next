@@ -136,7 +136,9 @@ export class Preview {
     // notes: `ActiveBlock` samples that copy as `_SceneColor` for its spark/hue term, so the term
     // matches the game's "camera target ahead of the block composite". Guides and the game UI go on
     // top afterwards; they are editor overlays, and the game draws them on a separate canvas.
-    if (this.showBlocks) this.drawBlocks(context, seconds, viewport, scale);
+    // Blocks get the *relative* content scale, not the notes' absolute one; see `blockView`.
+    const blockScale = divisor > 0 ? 1 / divisor : 1;
+    if (this.showBlocks) this.drawBlocks(context, seconds, viewport, blockScale);
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
     const globalShader = shaderEffects.some(effect => effect.global);
     if (!shaderEffects.length && this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
@@ -170,14 +172,18 @@ export class Preview {
   /**
    * Where the block screen space maps inside the preview viewport at a given content scale.
    *
-   * The editor's `缩放` control (`viewDivisor`) does not change the viewport; it shrinks what is drawn
-   * inside it, by passing `viewport.scale / divisor` as `scale` to the notes and judge lines. Blocks
-   * are defined as **screen percentages**, so they have to shrink with it or they would be the only
-   * layer that ignores the control — at `divisor` 4 the notes would be a quarter size while the blocks
-   * still filled the window. The rectangle stays centred on the viewport, which is what the notes'
-   * `translate(width / 2 …)` around the canvas centre does too.
+   * `scale` here is the **relative** content scale, i.e. how much of the viewport the play field
+   * occupies — `1` for the whole viewport, `1 / viewDivisor` once `缩放` shrinks the content. It is not
+   * the notes' absolute `viewport.scale / divisor`: feeding that in squashed the blocks to a fraction
+   * of the viewport even at the default zoom, because `viewport.scale` is already the viewport's own
+   * size relative to the 1350x900 logical field.
+   *
+   * Blocks are defined as **screen percentages of the play field**, so they have to shrink with the
+   * content or they would be the only layer that ignores `缩放` — at `divisor` 4 the notes would be a
+   * quarter size while the blocks still filled the window. The rectangle stays centred on the viewport,
+   * which is what the notes' `translate(width / 2 …)` around the canvas centre does too.
    */
-  blockView(viewport, scale) {
+  blockView(viewport, scale = 1) {
     return {
       left: viewport.left + (viewport.width - viewport.width * scale) / 2,
       top: viewport.top + (viewport.height - viewport.height * scale) / 2,

@@ -55,6 +55,52 @@ test('普通音符 above=2 与 Hold above=0 均向下，原字段无损保存', 
   for (const entry of runtime.notes) assert.equal(Math.sign(runtime.noteState(entry, runtime.state(0), 0).y), entry.note.above === 1 ? 1 : -1);
 });
 
+test('预览「缩放」同时改变输入控件、音符与判定块，块不是唯一的例外', () => {
+  // End-to-end through `Preview.draw`, because the earlier tests only covered `drawBlocks` in
+  // isolation: the control sets `preview.viewDivisor`, `draw` turns it into `viewport.scale / divisor`
+  // and hands that to the notes, the judge lines *and* the blocks. A block that ignored it filled the
+  // window at any divisor, which is the reported symptom.
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart();
+  chart.blockAreas = [{
+    topRightPercentage: { x: 0.6, y: 0.6 }, bottomLeftPercentage: { x: 0.4, y: 0.4 },
+    appearTime: 0, enableTime: 1, disableTime: 5, disappearTime: 6, isSubtract: false,
+    rotateEvents: [{ anchor: { x: 0.5, y: 0.5 }, time: 0, easeType: 0, rotation: 0 }],
+    moveEvents: [{ endPosition: { x: 0.75, y: 0.5 }, time: 0, easeTypeX: 0, easeTypeY: 0 }],
+    scaleEvents: [{ anchor: { x: 0.5, y: 0.5 }, time: 0, easeTypeX: 0, easeTypeY: 0, scale: { x: 1, y: 1 } }],
+  }];
+  const tempo = new TempoMap(chart.BPMList);
+  // The block screen space is `2 * orthographicSize` tall and `aspect` wide, and `previewViewport`
+  // caps the logical field at 1350x900, so this 600x400 surface maps the whole canvas to the field.
+  // `moveEvents[0].endPosition` puts the centre at 0.75 of the field and its width at 0.2, so at
+  // relative content scale `s` the centre is `300 + 0.25 * 600 * s` and the width `0.2 * 600 * s`.
+  // With `s = 1 / viewDivisor` that is 450 / 120 px at the default and 375 / 60 px at divisor 2.
+  const centre = (divisor) => 300 + (0.25 * 600) / divisor;
+  const blockWidth = (divisor) => (0.2 * 600) / divisor;
+  const translations = (context) => context.calls.filter((call) => call.method === 'translate').map((call) => call.args);
+  const widths = (context) => context.calls.filter((call) => call.method === 'fillRect').map((call) => call.args[2]);
+  const run = (viewDivisor) => {
+    const { context, canvas } = previewSurface();
+    const preview = new Preview(canvas);
+    preview.viewDivisor = viewDivisor;
+    Object.assign(preview, { visible: true, applyShaders: false, showHitEffects: false, showGameUI: false, blockRenderer: 'canvas', images: {} });
+    preview.draw(chart, tempo, 3, 0);
+    return context;
+  };
+  for (const divisor of [1, 2]) {
+    const context = run(divisor);
+    const expectedCentre = centre(divisor);
+    const found = translations(context);
+    assert.ok(found.some(([x, y]) => Math.abs(x - expectedCentre) < 1e-6 && Math.abs(y - 200) < 1e-6),
+      `divisor ${divisor} 时块心应在 (${expectedCentre}, 200)，实际 ${JSON.stringify(found)}`);
+    const expectedWidth = blockWidth(divisor);
+    assert.ok(widths(context).some((width) => Math.abs(width - expectedWidth) < 1e-6),
+      `divisor ${divisor} 时块宽应为 ${expectedWidth}，实际 ${JSON.stringify(widths(context))}`);
+  }
+  // The two divisors must produce different geometry, i.e. the control really reaches the block.
+  assert.notDeepEqual(translations(run(1)), translations(run(2)));
+});
+
 test('透明、负透明、零长度及绑定 UI 线仍可点击；退出预览不穿透', () => {
   const states = [0, -255, 255].map((alpha, index) => ({ alpha, x: index * 200, y: 0, scaleX: index === 2 ? 0 : 1, rotation: 0 }));
   const guides = lineGuides(states, [{}, {}, { attachUI: 'score' }], [0, 1, 2], 1000, 600, 1);
