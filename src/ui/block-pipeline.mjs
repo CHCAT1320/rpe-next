@@ -180,13 +180,15 @@ export class BlockPipeline {
     this.textures = new Map();
     this.disabled = false;
     this.lastError = '';
-    // Stages whose invocation site the reverse-engineering dump never located. The measured
-    // `BlockRender.LateUpdate` lists only four stages (dilate texel size, BlockCompose pass 0,
-    // RenderEffects, BlockCompose pass 1) and `DisabledBlock`, `ReadyBlock`, `TouchEffect` and the
-    // three `SubtractBlockPostProcessor`s are none of them — they must live inside
-    // `RefreshSceneColorCommands`, which was not analysed. The passes below are implemented and
-    // tested against their documented algorithms, but left unwired by default: guessing a call
-    // site would change the rendered image on a hunch.
+    // Stages whose invocation the dump does not place in `BlockRender.LateUpdate`. That method's
+    // equivalent C# was recovered and is exactly two commands — copy `CameraTarget` into
+    // `sceneColorRT`, then blit `ActiveBlock` back over `CameraTarget` — so `DisabledBlock`,
+    // `ReadyBlock`, `TouchEffect` and the three `SubtractBlockPostProcessor`s are not invoked
+    // there at all. They belong to the layer cameras: the subtract camera's output is
+    // post-processed through `SubtractBlockBlender` at `targetPass`, and the disabled / ready /
+    // touch cameras render with their own materials. Those per-camera post-process chains are not
+    // fully pinned down, so the passes below stay callable but unwired by default rather than
+    // guessed into the frame.
     this.optionalStages = false;
   }
 
@@ -458,6 +460,12 @@ export class BlockPipeline {
     const gl = this.gl;
     if (!gl || this.disabled) return false;
     this.resize(width, height);
+    // `sceneColorRT` is a copy of the camera target taken *before* the blocks composite, which is
+    // what `ActiveBlock` samples as `_SceneColor` (and what the subtract post-process eats into).
+    // This port clears it instead: the block layer is blitted over the 2D preview with `drawImage`,
+    // so the scene is already underneath and copying it into GL would double it. The consequence is
+    // that `ActiveBlock`'s background-sampling terms see black — feeding the real scene in is a
+    // separate integration step, not a shader change.
     for (const key of ['normalBlockRT', 'subtractBlockRT', 'disabledNormalBlockRT', 'disabledSubtractBlockRT',
       'disabledNormalReadyBlockRT', 'disabledSubtractReadyBlockRT', 'touchBlockRT', 'sceneColorRT']) this.clearTarget(key);
 
