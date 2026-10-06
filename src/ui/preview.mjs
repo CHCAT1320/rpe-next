@@ -18,7 +18,11 @@ export class Preview {
   constructor(canvas) {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
     this.backgroundFrame = new PreviewBackground();
-    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true; this.showBlocks = true; this.blockRenderer = 'canvas';
+    this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true; this.showBlocks = true;
+    // Default to the ported pipeline. Starting on 'canvas' meant any settings save that happened
+    // before `applyPreferences` ran would persist `blockPipeline: false` and pin the editor to the
+    // approximation forever.
+    this.blockRenderer = 'block'; this.blockSceneEffects = true; this.blockError = null; this.onBlockError = null;
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]]) {
@@ -250,7 +254,15 @@ export class Preview {
     this.blockPipelinePending = true;
     this.ensureBlockPipeline()
       .then(() => { this.blockPipelinePending = false; this.invalidate?.(); })
-      .catch(() => { this.blockPipelinePending = false; });
+      .catch((error) => {
+        this.blockPipelinePending = false;
+        // Swallowing this used to make a dead pipeline indistinguishable from "the shaders were
+        // never applied", with nothing to go on. Surface it instead: which program failed to
+        // compile is the whole diagnosis.
+        this.blockError = String((error && error.message) || error);
+        this.onBlockError?.(this.blockError);
+        if (typeof console !== 'undefined') console.error('块管线不可用，已回退 Canvas2D：', this.blockError);
+      });
   }
 
   async ensureBlockPipeline() {

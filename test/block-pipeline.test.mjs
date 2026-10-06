@@ -401,6 +401,35 @@ test('贴图 Wrap 按 materials.md §1：噪声镜像、PointNoise 平铺、Bloc
   assert.equal(pipeline.textures.size, 5);
 });
 
+test('sampler 按着色器声明的 layout location 绑定，而不是调用方的枚举顺序', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  const active = pipeline.programs.get('ActiveBlock')[0];
+  // Declaration order is not the order the caller passes them in. Binding by enumeration crossed
+  // _SceneColor, _TouchDisplaceMap and _NoiseMap: unit 8 got the noise texture where the shader
+  // expects the scene colour.
+  assert.equal(active.samplerUnits.get('_ComposeRT'), 0);
+  assert.equal(active.samplerUnits.get('_SparkMap'), 7);
+  assert.equal(active.samplerUnits.get('_SceneColor'), 8);
+  assert.equal(active.samplerUnits.get('_TouchDisplaceMap'), 9);
+  assert.equal(active.samplerUnits.get('_NoiseMap'), 10);
+  assert.equal(active.samplerUnits.size, 11);
+  // Every vendored sampler carries an explicit unit, so nothing silently falls back to counting.
+  // Count only real declarations — `UNITY_LOCATION(` also appears in the macro's own definition.
+  for (const [key, programs] of Object.entries(shaders.programs)) {
+    for (const [index, program] of programs.entries()) {
+      const built = pipeline.programs.get(key)[index];
+      const declared = (program.fragment.match(/UNITY_LOCATION\(\s*\d+\s*\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D/g) ?? []).length;
+      assert.ok(declared > 0, `${key}#${index} 应有 sampler 声明`);
+      assert.equal(built.samplerUnits.size, declared, `${key}#${index} 有未解析的 sampler unit`);
+    }
+  }
+  // And the units actually issued to GL follow the declarations.
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const units = new Set(gl.__calls.filter((call) => call.name === 'activeTexture').map((call) => call.args[0] - gl.TEXTURE0));
+  for (const unit of [0, 7, 8, 9, 10]) assert.ok(units.has(unit), `未绑定 unit ${unit}`);
+});
+
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);

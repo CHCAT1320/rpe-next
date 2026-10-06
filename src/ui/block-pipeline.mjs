@@ -239,12 +239,20 @@ export class BlockPipeline {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
       0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1,
     ]), gl.STATIC_DRAW);
-    try {
-      for (const [key, programs] of Object.entries(shaders.programs)) {
-        this.programs.set(key, programs.map((program, index) => this.buildProgram(key, index, program)));
-      }
-      this.programs.set('Passthrough', [this.buildProgram('Passthrough', 0, { fragment: PASSTHROUGH_FRAGMENT })]);
-    } catch (error) { this.disabled = true; this.lastError = error.message; return false; }
+    // Compile every program before giving up, and report all of them: bailing on the first failure
+    // hides whether one shader is broken or a dozen are.
+    const failures = [];
+    for (const [key, programs] of Object.entries(shaders.programs)) {
+      try { this.programs.set(key, programs.map((program, index) => this.buildProgram(key, index, program))); }
+      catch (error) { failures.push(String((error && error.message) || error)); }
+    }
+    try { this.programs.set('Passthrough', [this.buildProgram('Passthrough', 0, { fragment: PASSTHROUGH_FRAGMENT })]); }
+    catch (error) { failures.push(String((error && error.message) || error)); }
+    if (failures.length) {
+      this.disabled = true;
+      this.lastError = failures.join(' | ');
+      return false;
+    }
     for (const target of [...RENDER_TARGETS, ...SCRATCH_TARGETS]) this.createTarget(target);
     for (const [name, slot] of Object.entries(TEXTURE_SLOTS)) this.loadTexture(name, slot);
     return true;
@@ -271,7 +279,15 @@ export class BlockPipeline {
       uniforms.set(info.name.replace(/\[0\]$/, ''), gl.getUniformLocation(handle, info.name));
     }
     const state = Array.isArray(PASS_STATE[key]) ? PASS_STATE[key][index] : PASS_STATE[key];
-    return { key, index, handle, uniforms, state, source: program };
+    // The vendored fragments declare their samplers as `UNITY_LOCATION(n) uniform sampler2D name`,
+    // i.e. with an explicit texture unit. Binding by enumeration order silently crossed three of
+    // ActiveBlock's samplers, because the declaration order is not the order the caller passes them
+    // in. Read the declared units and bind to those.
+    const samplerUnits = new Map();
+    for (const match of program.fragment.matchAll(/UNITY_LOCATION\(\s*(\d+)\s*\)\s*uniform\s+(?:mediump |highp |lowp )?sampler2D\s+(\w+)\s*;/g)) {
+      samplerUnits.set(match[2], Number(match[1]));
+    }
+    return { key, index, handle, uniforms, state, samplerUnits, source: program };
   }
 
   createTarget({ key, divisor, linear }) {
@@ -432,14 +448,15 @@ export class BlockPipeline {
 
   applyUniforms(program, textures, floats, vectors) {
     const gl = this.gl;
-    let unit = 0;
+    let fallback = 0;
     for (const [name, target] of Object.entries(textures)) {
       const location = program.uniforms.get(name);
       if (location == null) continue;
+      // Prefer the shader's own declared unit; only fall back to counting when it has none.
+      const unit = program.samplerUnits.get(name) ?? fallback++;
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, target.texture ?? target);
       gl.uniform1i(location, unit);
-      unit += 1;
     }
     for (const [name, value] of Object.entries(floats)) {
       const location = program.uniforms.get(name);
@@ -484,14 +501,14 @@ export class BlockPipeline {
 
   applySamplers(program, textures) {
     const gl = this.gl;
-    let unit = 0;
+    let fallback = 0;
     for (const [name, entry] of Object.entries(textures)) {
       const location = program.uniforms.get(name);
       if (location == null || !entry) continue;
+      const unit = program.samplerUnits.get(name) ?? fallback++;
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, entry.texture);
       gl.uniform1i(location, unit);
-      unit += 1;
     }
   }
 
