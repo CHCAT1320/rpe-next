@@ -438,7 +438,7 @@ element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarke
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, blockDistortion: preview.blockSceneDistortion !== false, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
@@ -917,6 +917,22 @@ element('#mute-current-line').addEventListener('click', () => {
 element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
 element('#block-pipeline').addEventListener('change', event => { setBlockRenderer(event.target.checked ? 'block' : 'canvas'); persistEditor(); invalidate(); });
 element('#block-optional').addEventListener('change', event => { setBlockOptionalStages(event.target.checked); persistEditor(); invalidate(); });
+element('#block-distortion').addEventListener('change', event => { setBlockSceneDistortion(event.target.checked); persistEditor(); invalidate(); });
+
+/**
+ * Toggle the in-block scene sampling.
+ *
+ * `ActiveBlock` adds `_SceneColor * spark * _SparkMapOpacity` to its output, so a block shows a
+ * displaced copy of the notes and judge lines it overlaps — that is the game's shader, and it is why
+ * a still frame looks like the lines are drawn twice. Turning it off leaves the block as its fill,
+ * edge and glow alone, which is cleaner for editing but is not what the game renders.
+ */
+function setBlockSceneDistortion(enabled) {
+  preview.blockSceneDistortion = realtimePreview.blockSceneDistortion = enabled;
+  element('#block-distortion').checked = enabled;
+  if (preview.blockPipeline) preview.blockPipeline.sceneDistortion = enabled;
+  if (realtimePreview.blockPipeline) realtimePreview.blockPipeline.sceneDistortion = enabled;
+}
 
 /**
  * Choose between the ported GL pipeline and the Canvas2D approximation.
@@ -1405,6 +1421,7 @@ function applyPreferences(next) {
   realtimePreview.visible = editorPreferences.realtime ?? true;
   setBlockRenderer(editorPreferences.blockPipeline === false ? 'canvas' : 'block');
   setBlockOptionalStages(editorPreferences.blockOptional !== false);
+  setBlockSceneDistortion(editorPreferences.blockDistortion !== false);
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
   realtimePreview.opacity = Number(element('#realtime-alpha').value);

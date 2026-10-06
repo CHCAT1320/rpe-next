@@ -299,6 +299,7 @@ export class Preview {
     const pipeline = this.blockPipeline;
     if (!pipeline || pipeline.disabled) return false;
     pipeline.sceneEffects = this.blockSceneEffects !== false;
+    pipeline.sceneDistortion = this.blockSceneDistortion !== false;
     // `prepareCanvas` sets a devicePixelRatio transform on the 2D context, so `viewport` is in CSS
     // pixels while `canvas.width/height` are device pixels. The GL layer is sized in device pixels to
     // match the screen the game would render on, and blitted into the viewport's CSS rectangle — a

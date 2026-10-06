@@ -208,6 +208,11 @@ export class BlockPipeline {
     // `_ReadyComposeRT` holds disabled *and* ready, `abs(m)` holds pure ready, and multiplying them
     // isolates ready.
     this.sceneEffects = true;
+    // When off, `sceneColorRT` stays transparent, so `ActiveBlock`'s displaced `_SceneColor` term
+    // contributes nothing and a block renders as its fill, edge and glow alone. The game samples the
+    // camera target there, which is why a block shows a distorted copy of the notes and judge lines
+    // it overlaps — faithful, but it reads as a doubled image in a still editor frame.
+    this.sceneDistortion = true;
     // `BlockRender` tuning fields from data.md. The edge dilates one round; the glow is nominally
     // six, but the sixth ring's weight (0.0040) sits below the pass threshold, so five run.
     this.edgeSize = 1;
@@ -623,7 +628,7 @@ export class BlockPipeline {
     // composite. `ActiveBlock` samples it at a displaced uv inside its spark/hue term rather than
     // blitting it, so supplying the real scene cannot double-draw the background.
     this.clearTarget('sceneColorRT');
-    this.uploadScene(scene, sceneView);
+    if (this.sceneDistortion) this.uploadScene(scene, sceneView);
 
     const stats = { visible: 0, drawn: 0, skippedZeroSize: 0 };
     for (const block of blocks) {
