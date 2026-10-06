@@ -39,7 +39,10 @@ export default defineConfig(({ mode }) => ({
     // The editor is a plain ES module app and the desktop/Pages builds are smoke tested against
     // the emitted file names, so keep the bundle modern and predictable.
     target: 'es2022',
-    reportCompressedSize: false,
+    // Report the gzip size next to the raw size. The raw number is what lands on disk, but the
+    // gzip number is what a browser actually downloads from a compression-enabled host such as
+    // GitHub Pages, and without it a ~360 kB bundle reads as far worse than it is.
+    reportCompressedSize: true,
   },
   server: {
     host: '127.0.0.1',
