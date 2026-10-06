@@ -386,7 +386,13 @@ export class BlockPipeline {
     else context.drawImage(source, 0, 0, canvas.width, canvas.height);
     gl.bindTexture(gl.TEXTURE_2D, target.texture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    // Flip, because the two origins disagree: a 2D canvas's row 0 is its top row, while the
+    // full-screen quad puts v = 0 at clip y = -1, i.e. the framebuffer's bottom row — which is GL
+    // row 0. Without the flip, `ActiveBlock` samples `_SceneColor` with v = 0 at the bottom of the
+    // screen and reads the *top* of the scene, so every block shows a vertically mirrored copy of
+    // whatever it overlaps. Mask targets do not need this: they are both drawn and sampled in GL
+    // orientation.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
     return true;
   }

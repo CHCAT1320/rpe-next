@@ -620,6 +620,22 @@ test('渲染到 RT 时 _ProjectionParams.x 为 -1', () => {
   for (const call of writes) assert.equal(call.args[1][0], -1, 'yFlip 应为 -1');
 });
 
+test('场景上传必须垂直翻转，否则块内场景镜像', () => {
+  // A 2D canvas's row 0 is its top; the full-screen quad puts v = 0 at the framebuffer's bottom row.
+  // Sampling `_SceneColor` without the flip reads the top of the scene at the bottom of the screen,
+  // so a block shows a vertically mirrored copy of what it overlaps.
+  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() {} }) }) };
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } }), true);
+  const flips = gl.__calls.filter((call) => call.name === 'pixelStorei' && call.args[0] === gl.UNPACK_FLIP_Y_WEBGL);
+  assert.ok(flips.length > 0, 'sceneColorRT 的上传应设置翻转');
+  for (const call of flips) assert.equal(call.args[1], true, 'UNPACK_FLIP_Y_WEBGL 应为 true');
+  // ...and the mask targets must not be re-uploaded from a canvas, which would need the same care.
+  const uploads = gl.__calls.filter((call) => call.name === 'texImage2D' && call.args.length === 6);
+  assert.ok(uploads.length >= 1, '应有来自 canvas 的上传');
+});
+
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
