@@ -353,12 +353,44 @@ function stubContext() {
 
 const viewport = { left: 0, top: 0, width: 1600, height: 900 };
 
-function drawBlocks(blocks, seconds) {
+function drawBlocks(blocks, seconds, scale = 1) {
   const context = stubContext();
-  const host = { chart: { blockAreas: blocks }, drawBlockBody: Preview.prototype.drawBlockBody };
-  Preview.prototype.drawBlocks.call(host, context, seconds, viewport);
+  // `blockView` is taken from the prototype so the stub cannot drift from the real layout maths.
+  const host = { chart: { blockAreas: blocks }, drawBlockBody: Preview.prototype.drawBlockBody, blockView: Preview.prototype.blockView };
+  Preview.prototype.drawBlocks.call(host, context, seconds, viewport, scale);
   return context;
 }
+
+test('预览绘制：块的矩形随编辑器「缩放」一起收缩，而不是铺满视口', () => {
+  // `缩放` (`viewDivisor`) shrinks the content inside a fixed viewport by handing the notes and judge
+  // lines `viewport.scale / divisor`. Blocks are screen percentages, so they have to shrink with it —
+  // otherwise at divisor 4 the notes are a quarter size while the blocks still fill the window.
+  const block = plainBlock({ appearTime: 0, enableTime: 0, disableTime: 5, disappearTime: 5 });
+  const full = drawBlocks([block], 1, 1);
+  const half = drawBlocks([block], 1, 0.5);
+  const centre = (context) => context.calls.find((call) => call.name === 'translate').args;
+  const size = (context) => context.calls.find((call) => call.name === 'fillRect').args;
+  const near = (actual, expected, what) => assert.ok(Math.abs(actual - expected) < 1e-6, `${what}: ${actual} != ${expected}`);
+  // `plainBlock` spans 0.6–0.8 in both axes, so its centre is 0.7 / 0.7 and it covers 20 % of the play
+  // field: 320 × 180 px of the 1600 × 900 viewport at scale 1, half that at scale 0.5. The rect handed
+  // to `fillRect` is relative to the block centre, so it is scale-invariant by construction — the
+  // centre is what moves.
+  near(size(full)[2], 320, 'scale 1 块宽');
+  near(size(full)[3], 180, 'scale 1 块高');
+  near(size(half)[2], 160, 'scale 0.5 块宽');
+  near(size(half)[3], 90, 'scale 0.5 块高');
+  // Centre: 800 + (0.7 − 0.5) × 1600 = 1120 at scale 1; 800 + 0.2 × 800 = 960 at scale 0.5.
+  // Vertically 450 − 0.2 × 900 = 270 → 450 − 0.2 × 450 = 360, i.e. it contracts towards the middle.
+  near(centre(full)[0], 1120, 'scale 1 块心 x');
+  near(centre(full)[1], 270, 'scale 1 块心 y');
+  near(centre(half)[0], 960, 'scale 0.5 块心 x');
+  near(centre(half)[1], 360, 'scale 0.5 块心 y');
+  // The ring is one effect texel plus the block's own extent, and it is a fraction of the screen
+  // height, so it shrinks with the content.
+  const ringWidth = (context) => context.calls.filter((call) => call.name === 'strokeRect')[0].args[2];
+  near(ringWidth(full) - size(full)[2], 0.0037 * 900, '整倍时环宽');
+  near(ringWidth(half) - size(half)[2], 0.0037 * 450, '半倍时环宽');
+});
 
 test('预览绘制：生效块画填充并加法描边+光晕，禁用块加法填充无描边', () => {
   const active = drawBlocks([plainBlock({ appearTime: 0, enableTime: 0, disableTime: 5, disappearTime: 5 })], 1);

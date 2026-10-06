@@ -127,10 +127,16 @@ export class Preview {
         }
       }
     }
-    // BlockArea composites *over* the play field, not under it: the game's final step blits
-    // ActiveBlock onto CameraTarget after the main camera has already drawn the background, the
-    // judge lines and the notes, and it is semi-transparent, so the notes read through it.
-    if (this.showBlocks) this.drawBlocks(context, seconds, viewport);
+    // BlockArea composites *over* the finished play field, not under it: the game's final step blits
+    // `ActiveBlock` onto `CameraTarget` after the main camera has already drawn the background, the
+    // judge lines and the notes, so blocks are semi-transparent over the notes rather than under them.
+    //
+    // This call site was already after the line/note loop and the hit effects, which is what makes
+    // `uploadScene(this.canvas)` inside `drawBlocksPipeline` capture a canvas that *contains* the
+    // notes: `ActiveBlock` samples that copy as `_SceneColor` for its spark/hue term, so the term
+    // matches the game's "camera target ahead of the block composite". Guides and the game UI go on
+    // top afterwards; they are editor overlays, and the game draws them on a separate canvas.
+    if (this.showBlocks) this.drawBlocks(context, seconds, viewport, scale);
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
     const globalShader = shaderEffects.some(effect => effect.global);
     if (!shaderEffects.length && this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
@@ -161,21 +167,41 @@ export class Preview {
     this.images?.trim?.();
   }
 
+  /**
+   * Where the block screen space maps inside the preview viewport at a given content scale.
+   *
+   * The editor's `缩放` control (`viewDivisor`) does not change the viewport; it shrinks what is drawn
+   * inside it, by passing `viewport.scale / divisor` as `scale` to the notes and judge lines. Blocks
+   * are defined as **screen percentages**, so they have to shrink with it or they would be the only
+   * layer that ignores the control — at `divisor` 4 the notes would be a quarter size while the blocks
+   * still filled the window. The rectangle stays centred on the viewport, which is what the notes'
+   * `translate(width / 2 …)` around the canvas centre does too.
+   */
+  blockView(viewport, scale) {
+    return {
+      left: viewport.left + (viewport.width - viewport.width * scale) / 2,
+      top: viewport.top + (viewport.height - viewport.height * scale) / 2,
+      width: viewport.width * scale,
+      height: viewport.height * scale,
+    };
+  }
+
   // BlockArea lives in its own screen space: blocks are anchored to screen percentages, not to any
   // judge line, so they must not inherit a line's translate/rotate. Drawn after the notes because
   // the game composites them on top of the finished scene.
-  drawBlocks(context, seconds, viewport) {
+  drawBlocks(context, seconds, viewport, scale = 1) {
     const blocks = this.chart?.blockAreas;
     if (!blocks?.length) return;
-    if (this.blockRenderer === 'block' && this.drawBlocksPipeline(context, seconds, viewport)) return;
+    if (this.blockRenderer === 'block' && this.drawBlocksPipeline(context, seconds, viewport, scale)) return;
     if (this.blockRenderer === 'block') this.requestBlockPipeline();
+    const view = this.blockView(viewport, scale);
     // Match the viewport's own aspect so world -> pixel stays uniform and rotation is not skewed.
     const aspect = viewport.width / viewport.height;
     const screen = blockScreen(aspect);
-    const toX = (world) => viewport.left + (world / screen.x + 0.5) * viewport.width;
-    const toY = (world) => viewport.top + (0.5 - world / screen.y) * viewport.height;
-    const pixelPerWorldX = viewport.width / screen.x;
-    const pixelPerWorldY = viewport.height / screen.y;
+    const toX = (world) => view.left + (world / screen.x + 0.5) * view.width;
+    const toY = (world) => view.top + (0.5 - world / screen.y) * view.height;
+    const pixelPerWorldX = view.width / screen.x;
+    const pixelPerWorldY = view.height / screen.y;
     for (const block of blocks) {
       const state = blockState(block, seconds);
       if (!state) continue;
@@ -187,7 +213,8 @@ export class Preview {
       context.translate(toX(center.x), toY(center.y));
       // World space is y-up with counter-clockwise angles; the canvas is y-down, so negate.
       context.rotate(-rotation * Math.PI / 180);
-      this.drawBlockBody(context, block, state, width, height, viewport.height, seconds);
+      // The ring and halo are fractions of the *screen* height, so they shrink with the content too.
+      this.drawBlockBody(context, block, state, width, height, view.height, seconds);
       context.restore();
     }
   }
@@ -295,35 +322,41 @@ export class Preview {
    * under the notes" ordering that a separate DOM layer would lose. Premultiplied output makes
    * `drawImage` apply the same `src + dst·(1 − srcA)` blend the game's `ActiveBlock` uses.
    */
-  drawBlocksPipeline(context, seconds, viewport) {
+  drawBlocksPipeline(context, seconds, viewport, scale = 1) {
     const pipeline = this.blockPipeline;
     if (!pipeline || pipeline.disabled) return false;
     pipeline.sceneEffects = this.blockSceneEffects !== false;
     pipeline.sceneDistortion = this.blockSceneDistortion !== false;
+    // The block layer only covers `view`, not the whole viewport, once the content is scaled down.
+    const view = this.blockView(viewport, scale);
+    const pipelineViewport = { ...viewport, ...view };
     // `prepareCanvas` sets a devicePixelRatio transform on the 2D context, so `viewport` is in CSS
     // pixels while `canvas.width/height` are device pixels. The GL layer is sized in device pixels to
     // match the screen the game would render on, and blitted into the viewport's CSS rectangle — a
     // mismatch here scales and offsets every block by the device pixel ratio.
     const ratio = globalThis.devicePixelRatio || 1;
-    const width = Math.max(1, Math.round(viewport.width * ratio));
-    const height = Math.max(1, Math.round(viewport.height * ratio));
+    const width = Math.max(1, Math.round(view.width * ratio));
+    const height = Math.max(1, Math.round(view.height * ratio));
     let result = null;
     try {
       result = pipeline.render({
         blocks: this.chart?.blockAreas ?? [], now: seconds,
-        aspect: viewport.width / viewport.height,
+        aspect: view.width / view.height,
         width, height,
         // `blocks` draws after the background pass and before the notes, so the canvas at this point
         // is exactly the "camera target ahead of the block composite" that the game copies into
         // sceneColorRT. `ActiveBlock` samples it inside its spark/hue term, not as a blit.
         scene: this.canvas,
         // Crop the viewport out of the device-pixel canvas rather than squashing the whole scene.
-        sceneView: { left: viewport.left * ratio, top: viewport.top * ratio, width, height },
+        sceneView: { left: view.left * ratio, top: view.top * ratio, width, height },
+        // The layer's own viewport, so per-block diagnostics address the right pixels when `缩放`
+        // has shrunk the content inside the canvas.
+        view,
       });
       if (!result) return false;
     } catch { return false; }
     this.lastBlockSeconds = seconds;
-    this.lastBlockViewport = viewport;
+    this.lastBlockViewport = pipelineViewport;
     // Expose a readback diagnostic rather than making anyone describe a blank frame: the first
     // question is always whether the mask targets were written at all.
     if (typeof window !== 'undefined' && !window.__rpeBlockDiagnose) {
@@ -334,9 +367,9 @@ export class Preview {
     // composited on top. Both reach the preview additively, so neither one replaces the background
     // or the notes it overlaps; only `ActiveBlock` carries a meaningful alpha, and it is the one the
     // game composites over the camera target.
-    if (result.sceneEffects) pipeline.compositeSceneEffects(context, width, height, viewport);
+    if (result.sceneEffects) pipeline.compositeSceneEffects(context, width, height, view);
     context.drawImage(this.blockCanvas, 0, 0, width, height,
-      viewport.left, viewport.top, viewport.width, viewport.height);
+      view.left, view.top, view.width, view.height);
     return true;
   }
 
