@@ -16,7 +16,7 @@
 //     pipeline runs at reduced resolution (masks at Screen/8, effects at Screen/4), Point-filtered,
 //     exactly as the game does.
 
-import { blockState, blockTransform, blockShowCoverage } from '../core/block-area.mjs';
+import { blockState, blockTransform, blockScreen, blockShowCoverage } from '../core/block-area.mjs';
 
 // Render targets, in the game's own names, sizes and filter modes (render.md §RT 尺寸与格式).
 //
@@ -710,9 +710,33 @@ export class BlockPipeline {
    * rasterised, an empty `composedEnabledBlockRT` means the compose pass found nothing, and a
    * populated `effectRT` with an empty canvas means the final composite discarded everywhere.
    */
-  diagnose(now = 0, blocks = []) {
+  diagnose(now = 0, blocks = [], view = null) {
     const gl = this.gl;
     const report = { now, disabled: this.disabled, lastError: this.lastError, targets: {} };
+    // Where each live block *should* land, in viewport pixels, derived independently of the GL path
+    // (the same mapping the Canvas2D renderer uses). Compared against `canvasBBox` below, this
+    // separates "the transform or the data is wrong" from "the projection or the blit is wrong".
+    if (blocks.length && view) {
+      const aspect = view.width / view.height;
+      const screen = blockScreen(aspect);
+      report.visibleRects = blocks.map((block, index) => ({ block, index }))
+        .filter(({ block }) => blockState(block, now)).slice(0, 8)
+        .map(({ block, index }) => {
+          const transform = blockTransform(block, now, aspect);
+          const width = Math.abs(transform.size.x) * view.width / screen.x;
+          const height = Math.abs(transform.size.y) * view.height / screen.y;
+          // Relative to the viewport's top-left, so the numbers do not depend on canvas size or DPR.
+          const left = (transform.center.x / screen.x + 0.5) * view.width - width / 2;
+          const top = (0.5 - transform.center.y / screen.y) * view.height - height / 2;
+          return {
+            index, isSubtract: Boolean(block.isSubtract),
+            time: [block.appearTime, block.enableTime, block.disableTime, block.disappearTime],
+            topRightPercentage: block.topRightPercentage, bottomLeftPercentage: block.bottomLeftPercentage,
+            rotation: Number(transform.rotation.toFixed(2)),
+            rect: [Number(left.toFixed(1)), Number(top.toFixed(1)), Number(width.toFixed(1)), Number(height.toFixed(1))],
+          };
+        });
+    }
     // An all-zero readback is exactly what an empty frame should look like, so report whether there
     // was anything to draw before anyone concludes the pipeline is broken.
     if (blocks.length) {
@@ -749,11 +773,32 @@ export class BlockPipeline {
     gl.readPixels(0, 0, this.canvas.width, this.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
     let lit = 0;
     let sum = 0;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
     for (let index = 0; index < out.length; index += 4) {
-      if (out[index + 3] > 8) lit += 1;
+      const alpha = out[index + 3];
+      if (alpha > 8) {
+        lit += 1;
+        const pixel = index / 4;
+        const x = pixel % this.canvas.width;
+        const y = Math.floor(pixel / this.canvas.width);
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
       sum += out[index] + out[index + 1] + out[index + 2];
     }
-    report.canvas = { size: `${this.canvas.width}x${this.canvas.height}`, litRatio: Number((lit / total).toFixed(4)), meanRgb: Number((sum / (total * 3)).toFixed(2)) };
+    report.canvas = {
+      size: `${this.canvas.width}x${this.canvas.height}`,
+      litRatio: Number((lit / total).toFixed(4)),
+      meanRgb: Number((sum / (total * 3)).toFixed(2)),
+      // Bounding box of everything drawn, in GL pixels; divide by devicePixelRatio to compare with
+      // `visibleRects`, which is in viewport pixels.
+      canvasBBox: lit ? [minX, minY, maxX - minX + 1, maxY - minY + 1] : null,
+    };
     return report;
   }
 

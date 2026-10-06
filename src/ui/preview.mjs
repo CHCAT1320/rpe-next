@@ -53,7 +53,6 @@ export class Preview {
       this.backgroundFrame.draw(context, background, width, height, scale, this.backgroundBlur, devicePixelRatio || 1, this.images.backgroundAnimated);
       context.globalAlpha = 1;
     } else this.backgroundFrame.clear();
-    if (this.showBlocks) this.drawBlocks(context, seconds, viewport);
     const states = this.scene.sample(seconds);
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.viewport = viewport; this.selectedLine = selectedLine;
@@ -128,6 +127,10 @@ export class Preview {
         }
       }
     }
+    // BlockArea composites *over* the play field, not under it: the game's final step blits
+    // ActiveBlock onto CameraTarget after the main camera has already drawn the background, the
+    // judge lines and the notes, and it is semi-transparent, so the notes read through it.
+    if (this.showBlocks) this.drawBlocks(context, seconds, viewport);
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
     const globalShader = shaderEffects.some(effect => effect.global);
     if (!shaderEffects.length && this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
@@ -159,8 +162,8 @@ export class Preview {
   }
 
   // BlockArea lives in its own screen space: blocks are anchored to screen percentages, not to any
-  // judge line, so they must not inherit a line's translate/rotate. Drawn under the notes because
-  // they read as a region of the play field rather than an object in it.
+  // judge line, so they must not inherit a line's translate/rotate. Drawn after the notes because
+  // the game composites them on top of the finished scene.
   drawBlocks(context, seconds, viewport) {
     const blocks = this.chart?.blockAreas;
     if (!blocks?.length) return;
@@ -318,10 +321,11 @@ export class Preview {
       if (!rendered) return false;
     } catch { return false; }
     this.lastBlockSeconds = seconds;
+    this.lastBlockViewport = viewport;
     // Expose a readback diagnostic rather than making anyone describe a blank frame: the first
     // question is always whether the mask targets were written at all.
     if (typeof window !== 'undefined' && !window.__rpeBlockDiagnose) {
-      window.__rpeBlockDiagnose = () => this.blockPipeline.diagnose(this.lastBlockSeconds, this.chart?.blockAreas ?? []);
+      window.__rpeBlockDiagnose = () => this.blockPipeline.diagnose(this.lastBlockSeconds, this.chart?.blockAreas ?? [], this.lastBlockViewport);
     }
     context.drawImage(this.blockCanvas, 0, 0, width, height,
       viewport.left, viewport.top, viewport.width, viewport.height);
