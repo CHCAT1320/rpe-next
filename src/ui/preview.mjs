@@ -296,15 +296,24 @@ export class Preview {
     const pipeline = this.blockPipeline;
     if (!pipeline || pipeline.disabled) return false;
     pipeline.sceneEffects = this.blockSceneEffects !== false;
+    // `prepareCanvas` sets a devicePixelRatio transform on the 2D context, so `viewport` is in CSS
+    // pixels while `canvas.width/height` are device pixels. The GL layer is sized in device pixels to
+    // match the screen the game would render on, and blitted into the viewport's CSS rectangle — a
+    // mismatch here scales and offsets every block by the device pixel ratio.
+    const ratio = globalThis.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(viewport.width * ratio));
+    const height = Math.max(1, Math.round(viewport.height * ratio));
     try {
       const rendered = pipeline.render({
         blocks: this.chart?.blockAreas ?? [], now: seconds,
         aspect: viewport.width / viewport.height,
-        width: this.canvas.width, height: this.canvas.height,
+        width, height,
         // `blocks` draws after the background pass and before the notes, so the canvas at this point
         // is exactly the "camera target ahead of the block composite" that the game copies into
         // sceneColorRT. `ActiveBlock` samples it inside its spark/hue term, not as a blit.
         scene: this.canvas,
+        // Crop the viewport out of the device-pixel canvas rather than squashing the whole scene.
+        sceneView: { left: viewport.left * ratio, top: viewport.top * ratio, width, height },
       });
       if (!rendered) return false;
     } catch { return false; }
@@ -314,7 +323,7 @@ export class Preview {
     if (typeof window !== 'undefined' && !window.__rpeBlockDiagnose) {
       window.__rpeBlockDiagnose = () => this.blockPipeline.diagnose(this.lastBlockSeconds, this.chart?.blockAreas ?? []);
     }
-    context.drawImage(this.blockCanvas, viewport.left, viewport.top, viewport.width, viewport.height,
+    context.drawImage(this.blockCanvas, 0, 0, width, height,
       viewport.left, viewport.top, viewport.width, viewport.height);
     return true;
   }

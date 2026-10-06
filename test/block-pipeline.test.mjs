@@ -5,6 +5,7 @@ import {
   BlockPipeline, RENDER_TARGETS, TEXTURE_ST, adaptFragment, glowRingWeight, glowRingWeights, blockMatrix,
   FULLSCREEN_PROJECTION, QUAD_VERTICES,
 } from '../src/ui/block-pipeline.mjs';
+import { Preview } from '../src/ui/preview.mjs';
 import { blockTransform, blockState } from '../src/core/block-area.mjs';
 
 const shaders = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/shaders.json', import.meta.url), 'utf8'));
@@ -555,6 +556,35 @@ test('BlockSprite 的 _Color 必须写入，否则遮罩全为零', () => {
   const engine = new Set(['_Time', '_ScreenParams', '_ProjectionParams', '_EffectRT_TexelSize', '_TouchPosShine', 'hlslcc_mtx4x4unity_ObjectToWorld', 'hlslcc_mtx4x4unity_MatrixVP']);
   for (const name of ['_Color', '_MainTex_ST']) assert.ok(written.has(name), `${name} 未被写入`);
   assert.ok(engine.size > 0);
+});
+
+test('块层按设备像素渲染，再贴进视口的 CSS 像素矩形', () => {
+  // `prepareCanvas` scales the 2D context by devicePixelRatio, so `viewport` is CSS pixels while the
+  // canvas is device pixels. Rendering the GL layer at canvas size and blitting it into the viewport
+  // rectangle scaled and offset every block by that ratio.
+  const captured = { render: null, drawImage: null };
+  const host = {
+    canvas: { width: 2800, height: 1800 },
+    blockCanvas: { tag: 'gl' },
+    blockSceneEffects: true,
+    chart: { blockAreas: [] },
+    blockPipeline: { disabled: false, render: (options) => { captured.render = options; return true; } },
+  };
+  const context = { drawImage: (...args) => { captured.drawImage = args; } };
+  const viewport = { left: 100, top: 50, width: 700, height: 450 };
+  const previous = globalThis.devicePixelRatio;
+  globalThis.devicePixelRatio = 2;
+  try {
+    assert.equal(Preview.prototype.drawBlocksPipeline.call(host, context, 3, viewport), true);
+  } finally {
+    globalThis.devicePixelRatio = previous;
+  }
+  assert.equal(captured.render.width, 1400, 'GL 层宽应为视口的设备像素宽');
+  assert.equal(captured.render.height, 900);
+  assert.equal(captured.render.aspect, 700 / 450, '宽高比取自 CSS 视口，两种单位下一致');
+  assert.deepEqual(captured.render.sceneView, { left: 200, top: 100, width: 1400, height: 900 }, '场景按视口裁剪');
+  // The whole GL canvas is mapped onto the viewport's CSS rectangle.
+  assert.deepEqual(captured.drawImage.slice(1), [0, 0, 1400, 900, 100, 50, 700, 450]);
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {

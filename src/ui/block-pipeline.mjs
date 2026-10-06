@@ -361,7 +361,7 @@ export class BlockPipeline {
    * `ActiveBlock` samples `_SceneColor` at a *displaced* uv and folds the result into its spark/hue
    * term — it is not a full-screen copy, so this cannot double-draw the background.
    */
-  uploadScene(source) {
+  uploadScene(source, view = null) {
     if (!source) return false;
     const gl = this.gl;
     const target = this.targets.get('sceneColorRT');
@@ -377,7 +377,10 @@ export class BlockPipeline {
     // Point-like downscale, matching the target's NEAREST filter.
     context.imageSmoothingEnabled = false;
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    // `view` is the block viewport in the source's own (device) pixels, so a viewport smaller than
+    // the canvas crops rather than squashing the scene into the block area.
+    if (view) context.drawImage(source, view.left, view.top, view.width, view.height, 0, 0, canvas.width, canvas.height);
+    else context.drawImage(source, 0, 0, canvas.width, canvas.height);
     gl.bindTexture(gl.TEXTURE_2D, target.texture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -598,7 +601,7 @@ export class BlockPipeline {
    * layer cameras -> BlockCompose pass 0 -> RenderEffects (edge + glow) -> BlockCompose pass 1
    * -> ActiveBlock.
    */
-  render({ blocks, now, aspect, width, height, scene = null }) {
+  render({ blocks, now, aspect, width, height, scene = null, sceneView = null }) {
     const gl = this.gl;
     if (!gl || this.disabled) return false;
     this.resize(width, height);
@@ -608,7 +611,7 @@ export class BlockPipeline {
     // composite. `ActiveBlock` samples it at a displaced uv inside its spark/hue term rather than
     // blitting it, so supplying the real scene cannot double-draw the background.
     this.clearTarget('sceneColorRT');
-    this.uploadScene(scene);
+    this.uploadScene(scene, sceneView);
 
     const stats = { visible: 0, drawn: 0, skippedZeroSize: 0 };
     for (const block of blocks) {
