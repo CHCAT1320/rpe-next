@@ -533,6 +533,30 @@ test('uniform 按反射类型派发：矩阵数组走 uniform4fv，vec3 不走 u
   }
 });
 
+test('BlockSprite 的 _Color 必须写入，否则遮罩全为零', () => {
+  // `BlockSprite`'s vertex stage computes `vs_COLOR0 = in_COLOR0 * _Color`. The per-block colour
+  // rides in the vertex attribute (Unity bakes SpriteRenderer.color into the mesh) and `_Color` is
+  // the material tint, so leaving it unset defaults to (0,0,0,0) and every mask write becomes zero —
+  // which silently blanks the whole composite, since every later pass reads those masks.
+  // `Unlit/BlockSprite` is on the block prefab rather than in the dump's material table.
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const sprite = pipeline.programs.get('BlockSprite')[0].handle;
+  const writes = gl.__calls.filter((call) => call.args[0]?.name === '_Color' && call.args[0]?.program === sprite);
+  assert.ok(writes.length > 0, '_Color 应被写入');
+  assert.deepEqual(writes[0].args[1], [1, 1, 1, 1], '_Color 应为白色，颜色由顶点属性承载');
+  assert.ok(gl.__calls.some((call) => call.args[0]?.name === '_MainTex_ST' && call.args[0]?.program === sprite), '_MainTex_ST 应被写入');
+
+  // More generally: every uniform a program actually reads has to be written by the frame, or the
+  // driver leaves it at zero. `BlockSprite` is drawn without a material lookup, so its uniforms are
+  // the ones most easily missed.
+  const written = new Set(gl.__calls.map((call) => call.args[0]?.name).filter(Boolean));
+  const engine = new Set(['_Time', '_ScreenParams', '_ProjectionParams', '_EffectRT_TexelSize', '_TouchPosShine', 'hlslcc_mtx4x4unity_ObjectToWorld', 'hlslcc_mtx4x4unity_MatrixVP']);
+  for (const name of ['_Color', '_MainTex_ST']) assert.ok(written.has(name), `${name} 未被写入`);
+  assert.ok(engine.size > 0);
+});
+
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);

@@ -481,6 +481,14 @@ export class BlockPipeline {
       : [1, 1, 1, coverage];
     const location = gl.getAttribLocation(program.handle, 'in_COLOR0');
     if (location >= 0) gl.vertexAttrib4f(location, color[0], color[1], color[2], color[3]);
+    // `BlockSprite`'s vertex stage computes `vs_COLOR0 = in_COLOR0 * _Color`, so the material tint
+    // multiplies whatever the mesh carries. Unity bakes SpriteRenderer.color into the vertex stream
+    // and leaves `_Color` at the material's own value, which for the block prefab is white; leaving
+    // it unset defaults to (0,0,0,0) and every mask write becomes zero. `Unlit/BlockSprite` is not
+    // among the eight materials in the dump's table — it lives on the block prefab — so the material
+    // table cannot supply this one.
+    this.setUniform(program, '_Color', [1, 1, 1, 1]);
+    this.setUniform(program, '_MainTex_ST', [1, 1, 0, 0]);
     this.applySamplers(program, { _MainTex: this.textures.get('_MainTex') });
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
