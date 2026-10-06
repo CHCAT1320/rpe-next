@@ -602,18 +602,25 @@ export class BlockPipeline {
     this.clearTarget('sceneColorRT');
     this.uploadScene(scene);
 
+    const stats = { visible: 0, drawn: 0, skippedZeroSize: 0 };
     for (const block of blocks) {
       const phase = blockState(block, now);
       if (!phase) continue;
+      stats.visible += 1;
       const transform = blockTransform(block, now, aspect);
-      if (!(Math.abs(transform.size.x) > 0) || !(Math.abs(transform.size.y) > 0)) continue;
+      // A zero-extent quad is skipped rather than drawn, which is correct — this chart's blocks
+      // really do animate through a zero scale — but it means "visible" and "rasterised" are not the
+      // same number, so both are counted for the diagnostic.
+      if (!(Math.abs(transform.size.x) > 0) || !(Math.abs(transform.size.y) > 0)) { stats.skippedZeroSize += 1; continue; }
       const coverage = blockShowCoverage(block, now);
       // Layer cameras render raw masks with `BlockSprite`; the renderer colour rides in as the
       // vertex colour, which is what gives subtract blocks their 0.1 intensity.
       if (phase.active) this.drawBlockQuad(block.isSubtract ? 'subtractBlockRT' : 'normalBlockRT', block, transform, coverage, now);
       else this.drawBlockQuad(block.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT', block, transform, coverage, now);
       if (phase.ready) this.drawBlockQuad(block.isSubtract ? 'disabledSubtractReadyBlockRT' : 'disabledNormalReadyBlockRT', block, transform, coverage, now);
+      stats.drawn += 1;
     }
+    this.lastStats = stats;
 
     // The three `SubtractBlockPostProcessor` instances sit on the subtract-family cameras and run
     // `subtractBlockMaterial` (= `SubtractBlockBlender`) at their serialised `targetPass`.
@@ -709,6 +716,9 @@ export class BlockPipeline {
     } else {
       report.blocks = { total: 0, hint: '当前谱面没有判定块（blockAreas 为空）' };
     }
+    // How many quads were actually rasterised this frame, and how many were skipped for having no
+    // extent — the fork between "no block is live" and "a live block drew nothing".
+    report.lastFrame = this.lastStats ?? null;
     for (const [key, target] of this.targets) {
       this.bindTarget(key);
       const pixels = new Uint8Array(target.width * target.height * 4);
