@@ -190,17 +190,19 @@ export function adaptFragment(source) {
  *
  * The game does this with `SubtractBlockPostProcessor.OnRenderImage`, which blits the subtract
  * camera's target through `subtractBlockMaterial` at `targetPass` 0/1. That material is
- * `Unlit/SubtractBlockBlender`, which is a *mask* operator (its declared outputs are a scalar
- * attribution and a `vec2`), so the shader asset does not contain the scene multiply itself — the
- * engine's Blit supplies it. `render.md` also says the mask only ever reaches `composedEnabledBlockRT`,
- * so the effect is confined to the enabled block area.
+ * `Unlit/SubtractBlockBlender`, whose declared outputs are a scalar attribution and a `vec2` — it is a
+ * *mask* operator, and the shader asset does not contain the scene operation at all; the engine's Blit
+ * supplies it. `render.md` records the branch (`if (cam.targetTexture == null) Blit(src, dest); else
+ * Blit(src, dest, material, targetPass)`) but not the blend factor that `targetPass` selects, so **the
+ * multiply below is this port's reconstruction, not a transcription**. It is the reading that makes the
+ * recorded symptom true: a subtract block removes the scene colour, which is why its `0.1` alpha is
+ * otherwise almost invisible.
  *
- * This shader is therefore written here rather than vendored: `_Mask.x` is `SubtractBlockBlender`'s
- * attribution, `SubShader` pass 0 of that shader yields `1` across a subtract block and `0`
- * elsewhere, and multiplying the scene by `clamp(1 - attribution, 0, 1)` drives masked-out pixels to
- * black while leaving everything else untouched. It is applied to `sceneColorRT` before `ActiveBlock`
- * samples it, which is also why it does not need a separate blit of the scene: `ActiveBlock` only
- * ever reads `_SceneColor` inside its spark/hue term, so a transparent scene contributes nothing.
+ * The multiply is applied across the whole scene copy, where the game's Blit targets the camera. That
+ * is deliberately wider than the mask's reach — `render.md` says the attribution itself only ever
+ * reaches `composedEnabledBlockRT` — and it is harmless for the same reason: `ActiveBlock` samples
+ * `_SceneColor` only inside its enabled-block spark/hue term, and a transparent scene contributes
+ * nothing there.
  */
 const SUBTRACT_SCENE_FRAGMENT = `#version 300 es
 precision mediump float;
@@ -299,10 +301,10 @@ export class BlockPipeline {
     // camera target there, which is why a block shows a distorted copy of the notes and judge lines
     // it overlaps — faithful, but it reads as a doubled image in a still editor frame.
     this.sceneDistortion = true;
-    // `'raw'` (default) uploads the PNGs as stored; `'srgb'` decodes `Block`/`BlockNoise1` to linear,
-    // which is what `materials.md` §1's `colorSpace` column asks for. See `loadImages` for the
-    // measured difference between the two readings.
-    this.textureColorSpace = 'raw';
+    // `'srgb'` (default) decodes `Block`/`BlockNoise1` to linear, which is what `materials.md` §1's
+    // `colorSpace` column asks for; `'raw'` uploads the PNGs as stored. See `loadImages` for the
+    // measured difference between the two readings, and why the decode is not the default it once was.
+    this.textureColorSpace = 'srgb';
     // `BlockRender` tuning fields from data.md. The edge dilates one round; the glow is nominally
     // six, but the sixth ring's weight (0.0040) sits below the pass threshold, so five run.
     this.edgeSize = 1;
@@ -433,24 +435,24 @@ export class BlockPipeline {
    * Upload the vendored PNGs once they are decoded.
    *
    * `materials.md` §1 lists a `colorSpace` per texture (`BlockNoise1` and `Block` sRGB, `PointNoise`
-   * and `FD_Noise` linear), and every value `block-params.json` carries is a *linear* one, so a fully
-   * faithful port would decode the two sRGB textures on upload. This port does not, and the measured
-   * consequence is worth stating precisely rather than hand-waving:
+   * and `FD_Noise` linear), and every value `block-params.json` carries is a *linear* one, so the two
+   * sRGB textures are decoded on upload and the other two are not. The measured consequence of the
+   * decode, which is worth stating precisely rather than hand-waving:
    *
    * - `BlockNoise1` (the displacement map) has mean `0.5041` as stored but `0.2382` once decoded, so
    *   the decode does **not** bias the ripple itself — `BlockCompose` centres on the literal `- 0.5`
    *   either way — but it does make `dispAvg` average ≈0.24 instead of ≈0.50, and `dispAvg` also
    *   drives the fill colour through `_FillColor - dispAvg · _DisplaceBlendIntensity`. Raw mean gives
-   *   `fillBase ≈ 0.711`, decoded gives `≈ 0.821`.
+   *   `fillBase ≈ 0.711`, decoded gives `≈ 0.821`, so the decoded reading is the brighter one.
    * - `PointNoise` (the spark map) is sparse either way — only 7.1 % of its texels exceed `0.1` as
    *   stored, 0.8 % once decoded — so the spark term is near zero over most of a block in both
    *   readings. That is why the block fill reads as a dark red rather than the `_FillColor` swatch.
    * - `Block.png` is unaffected: it is uniform red, and `1.0` decodes to `1.0`.
    *
-   * The switch exists because the two readings differ visibly and the dump does not record whether
-   * Unity's `sRGBTexture` flag reaches the shader as a decode for these assets. Setting
-   * `blockTextureColorSpace = 'srgb'` reproduces the decode (`materials.md`'s reading); `'raw'` is the
-   * default so the shipped look does not change silently.
+   * The switch is kept because the dump does not record whether Unity's `sRGBTexture` flag reaches
+   * these shaders as a decode, so the undocumented reading stays reachable: `textureColorSpace = 'raw'`
+   * uploads the PNGs as stored. `'srgb'` is the direction `materials.md` names and is therefore the
+   * default; it used to be `'raw'`, which showed as a darker fill than the dump implies.
    */
   async loadImages(base = `${import.meta.env?.BASE_URL ?? '/'}assets/rpe/block/`) {
     await Promise.all([...this.textures.values()].map(async (entry) => {

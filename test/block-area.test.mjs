@@ -93,9 +93,18 @@ test('相位：四个时间点前后；enableTime == disableTime 的块永不生
   const inert = plainBlock({ appearTime: 1, enableTime: 3, disableTime: 3, disappearTime: 4 });
   for (const time of [1, 2.9, 3, 3.5, 3.99]) assert.equal(blockIsActive(inert, time), false);
   assert.notEqual(blockState(inert, 3), null, '仍然可见');
-  assert.equal(blockShowCoverage(plainBlock({ appearTime: 10 }), 10), 0);
-  assert.equal(blockShowCoverage(plainBlock({ appearTime: 10 }), 10.25), 0.5);
-  assert.equal(blockShowCoverage(plainBlock({ appearTime: 10 }), 11), 1);
+  // `DisabledBlockShow` only starts when a block becomes visible *inside* its enabled window, so a
+  // block that appears before `enableTime` never fades — the `Disabled` phase is visible from its
+  // first frame. Returning a ramp here made every shipped block invisible for 0.5 s.
+  assert.equal(blockShowCoverage(plainBlock({ appearTime: 10 }), 10), 1, 'appear 早于 enable：不淡入');
+  assert.equal(blockShowCoverage(plainBlock({ appearTime: 10 }), 10.25), 1);
+  // The corpus shape: appear 0, enable 1, so `notInWindow` is already false at appearTime.
+  assert.equal(blockShowCoverage(plainBlock(), 0), 1, '语料里的块一出现就是满 alpha');
+  // A block that appears while already enabled is the case the coroutine does cover.
+  const late = plainBlock({ appearTime: 10, enableTime: 8, disableTime: 12, disappearTime: 13 });
+  assert.equal(blockShowCoverage(late, 10), 0, '窗口内出现的块从 0 淡入');
+  assert.equal(blockShowCoverage(late, 10.25), 0.5);
+  assert.equal(blockShowCoverage(late, 11), 1);
 });
 
 test('几何：百分比→世界；反转矩形不取绝对值；超出 [0,1] 合法', () => {

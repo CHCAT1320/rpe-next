@@ -287,14 +287,25 @@ export function blockIsActive(block, time) {
 /**
  * Linear colour fade-in over `disabledBlockShowDuration`, expressed as 0..1 coverage.
  *
- * The game drives this from the `DisabledBlockShow` coroutine, which only starts when a block becomes
- * visible *while already inside* its enabled window (`visible && !wasVisible && !notInWindow`). A block
- * that appears before `enableTime` therefore never runs the fade and keeps the alpha
- * `UpdateBlockActivation` assigns it (`1`, or `0.1` for a subtract block). This pure function is the
- * frame-driven equivalent: it returns 1 for exactly that case, because `appearTime` precedes
- * `enableTime` by more than the show duration in every shipped block. It diverges only for data that
- * makes a block appear inside its own active window, which was not observed in the corpus.
+ * The game drives this from the `DisabledBlockShow` coroutine, which only starts when a block *becomes
+ * visible while already inside its enabled window*:
+ * `visible && !wasVisible && !notInWindow`, i.e. `enableTime <= appearTime && appearTime < disableTime`.
+ * Two consequences follow, and the frame-driven model has to reproduce both:
+ *
+ * - A block that appears **before** `enableTime` — every block in the shipped corpus — never runs the
+ *   coroutine, so there is no fade at all: `UpdateBlockActivation` writes the alpha on that same frame.
+ *   This used to return 0 for the first `disabledBlockShowDuration` of such a block, which made the
+ *   whole `Disabled` phase invisible.
+ * - A block that appears **inside** its own enabled window does fade, starting from the coroutine's
+ *   first write.
+ *
+ * So the first case is a step rather than a ramp. The one situation this cannot express is a block that
+ * appears, then leaves and re-enters its window: `!wasVisible` would fire again and the game would
+ * re-run the coroutine, which needs per-frame history a pure function does not have. `isSubtract`
+ * affects only the colour the caller interpolates towards, not the coverage itself.
  */
 export function blockShowCoverage(block, now) {
+  const appearsInsideWindow = block.appearTime >= block.enableTime && block.appearTime < block.disableTime;
+  if (!appearsInsideWindow) return 1;
   return clamp01((now - block.appearTime) / BLOCK_SHOW_DURATION);
 }

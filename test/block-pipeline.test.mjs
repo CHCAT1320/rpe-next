@@ -313,11 +313,12 @@ test('每个 program 都绑定到正确的 RT（sampler 接线）', () => {
   assert.equal(pipeline.textures.size, 5, '4 张不同的 PNG 占 5 个 sampler 名（BlockNoise1 用了两次）');
 });
 
-test('贴图色彩空间可切换：默认原样上传，srgb 时按材料表解码', async () => {
-  // materials.md §1 marks Block/BlockNoise1 sRGB. Decoding cannot be asked of WebGL for an
-  // RGBA/UNSIGNED_BYTE upload, so the port does it on the CPU and the option has to be explicit.
-  // The measured effect: BlockNoise1's mean goes 0.5041 -> 0.2382, which moves `fillBase` from ~0.711
-  // to ~0.821 because `dispAvg` also scales the fill colour.
+test('贴图色彩空间：默认按材料表解码 Block/BlockNoise1，raw 是可选回退', async () => {
+  // materials.md §1 marks Block/BlockNoise1 sRGB, so decoding is the documented reading and is the
+  // default. WebGL cannot be asked to do it for an RGBA/UNSIGNED_BYTE upload, so the port does it on
+  // the CPU. The measured effect: BlockNoise1's mean goes 0.5041 -> 0.2382, which moves `fillBase`
+  // from ~0.711 to ~0.821 because `dispAvg` also scales the fill colour — the raw reading is the
+  // darker one, which is why it is no longer the default.
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
   const uploaded = [];
@@ -345,28 +346,26 @@ test('贴图色彩空间可切换：默认原样上传，srgb 时按材料表解
     },
   };
   try {
+    // Default: the two sRGB textures are decoded. `loadImages` uploads one texture per *sampler*, so
+    // `BlockNoise1` (used by `_DisplaceMap` and `_TouchDisplaceMap`) is decoded twice and `Block`
+    // once: three decodes for two source images.
+    assert.equal(pipeline.textureColorSpace, 'srgb', '默认按材料表解码');
     await pipeline.loadImages('/fake/');
     assert.equal(uploaded.length, 5, '五个 sampler 各上传一次');
-    assert.equal(canvases, 0, '默认不做 CPU 解码，因此不建离屏画布');
-    assert.equal(written.length, 0, '默认一次解码都不写回');
-
-    const srgb = makePipeline(stubGl());
-    srgb.pipeline.textureColorSpace = 'srgb';
-    const uploadedSrgb = [];
-    const srgbTexImage = srgb.gl.texImage2D;
-    srgb.gl.texImage2D = (...args) => { uploadedSrgb.push(args.at(-1)); srgbTexImage(...args); };
-    await srgb.pipeline.loadImages('/fake/');
-    // `loadImages` uploads one texture per *sampler*, so `BlockNoise1` (used by `_DisplaceMap` and
-    // `_TouchDisplaceMap`) is decoded twice and `Block` once: three decodes for two source images.
     assert.equal(canvases, 3, 'Block 一次 + BlockNoise1 两次（两个 sampler 各持一个纹理对象）');
-    // Every decode must land on the sRGB curve: 188 -> 128 (0.7373 decodes to 0.5029), alpha kept.
     assert.equal(written.length, 3, '三次解码各写回一次');
+    // Every decode must land on the sRGB curve: 188 -> 128 (0.7373 decodes to 0.5029), alpha kept.
     for (const data of written) {
       assert.equal(data[0], 128, `188 应解码为 128，实际 ${data[0]}`);
       assert.equal(data[3], 255, 'alpha 不参与解码');
     }
-    // Each decoded texture is re-uploaded from its canvas rather than the original image element.
-    assert.equal(uploadedSrgb.length, 5, '解码后仍然每槽上传一次');
+
+    // The opt-out uploads the PNGs as stored and never builds a decode canvas.
+    const raw = makePipeline(stubGl());
+    raw.pipeline.textureColorSpace = 'raw';
+    const before = canvases;
+    await raw.pipeline.loadImages('/fake/');
+    assert.equal(canvases, before, 'raw 不做 CPU 解码，因此不建离屏画布');
   } finally {
     globalThis.Image = previousImage;
     globalThis.document = previousDocument;
@@ -907,6 +906,9 @@ test('贴图按 Unity 约定垂直翻转（v = 0 对应图像底部）', async (
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
   const previous = globalThis.Image;
+  // The decode path (now the default) needs a 2D context; this test only cares about the upload flag,
+  // so it exercises the raw path and leaves the decode to the colour-space test above.
+  pipeline.textureColorSpace = 'raw';
   globalThis.Image = class { set src(value) { this.href = value; queueMicrotask(() => this.onload?.()); } };
   try {
     await pipeline.loadImages('/fake/');
