@@ -70,6 +70,8 @@ const PASS_STATE = {
   // premultiply, which is why filled regions add their full rgb and the background is attenuated.
   ActiveBlock: { blend: ['ONE', 'ONE_MINUS_SRC_ALPHA'], mask: ['R', 'G', 'B', 'A'] },
   TouchEffect: { blend: ['ONE', 'ONE'], mask: ['R', 'G', 'B', 'A'] },
+  // Port-internal, not a game shader: stands in for the `fxRenderList` canvases.
+  Passthrough: { blend: ['ONE', 'ZERO'], mask: ['R', 'G', 'B', 'A'] },
 };
 
 const BLEND_FACTORS = { ZERO: 0, ONE: 1, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303 };
@@ -118,16 +120,27 @@ void main() {
 }
 `;
 
+/**
+ * Sampler name -> vendored file, with the texture's import settings from materials.md §1.
+ *
+ * The wrap modes are not cosmetic: `FD_Noise` and `BlockNoise1` are **Mirror** and `PointNoise` is
+ * **Repeat**, so out-of-range sampling mirrors rather than clamping, which changes the edges at low
+ * `_ST` frequencies. Every texture is Point-filtered with no mipmaps, matching `MipCount = 1`.
+ */
 const TEXTURE_SLOTS = {
-  _DisplaceMap: 'BlockNoise1.png',
-  _SparkMap: 'PointNoise.png',
-  _NoiseMap: 'FD_Noise.png',
-  _TouchDisplaceMap: 'BlockNoise1.png',
-  _MainTex: 'Block.png',
+  _DisplaceMap: { file: 'BlockNoise1.png', wrap: 'MIRRORED_REPEAT' },
+  _SparkMap: { file: 'PointNoise.png', wrap: 'REPEAT' },
+  _NoiseMap: { file: 'FD_Noise.png', wrap: 'MIRRORED_REPEAT' },
+  _TouchDisplaceMap: { file: 'BlockNoise1.png', wrap: 'MIRRORED_REPEAT' },
+  _MainTex: { file: 'Block.png', wrap: 'CLAMP_TO_EDGE' },
 };
 
-/** Per-material texture tiling from materials.md (`_ST`; every offset is 0). */
-const TEXTURE_ST = {
+/**
+ * Per-material texture tiling (`_ST.xy`; every offset is 0). From the `m_TexEnvs` table in
+ * materials.md — the dump's JSON has no machine-readable copy, so these are the one set of numbers
+ * still transcribed by hand. `block-pipeline.test.mjs` pins each pair against that table.
+ */
+export const TEXTURE_ST = {
   ActiveBlock: { _DisplaceMap: [0.80, 0.30], _SparkMap: [3.00, 1.20], _NoiseMap: [1.50, 1.46], _TouchDisplaceMap: [0.55, 0.30] },
   BlockCompose: { _DisplaceMap: [2.13, 1.02] },
   DisabledBlock: { _DisplaceMap: [0.50, 0.20], _SparkMap: [3.00, 1.20] },
@@ -193,16 +206,14 @@ export class BlockPipeline {
     this.textures = new Map();
     this.disabled = false;
     this.lastError = '';
-    // Stages whose invocation the dump does not place in `BlockRender.LateUpdate`. That method's
-    // equivalent C# was recovered and is exactly two commands — copy `CameraTarget` into
-    // `sceneColorRT`, then blit `ActiveBlock` back over `CameraTarget` — so `DisabledBlock`,
-    // `ReadyBlock`, `TouchEffect` and the three `SubtractBlockPostProcessor`s are not invoked
-    // there at all. They belong to the layer cameras: the subtract camera's output is
-    // post-processed through `SubtractBlockBlender` at `targetPass`, and the disabled / ready /
-    // touch cameras render with their own materials. Those per-camera post-process chains are not
-    // fully pinned down, so the passes below stay callable but unwired by default rather than
-    // guessed into the frame.
-    this.optionalStages = false;
+    // On by default, and not merely a hypothesis: `ActiveBlock` has exactly three contributions —
+    // the enabled look gated on `glow + edge + enabledMask`, the ready pulse gated on
+    // `_ReadyComposeRT.x · abs(m)`, and the touch layer. It has no disabled-fill path at all, and for
+    // a disabled-but-not-ready block every one of those gates is zero, so it draws nothing. Only
+    // `DisabledBlock` can make such a block visible. That product is also why the two masks exist:
+    // `_ReadyComposeRT` holds disabled *and* ready, `abs(m)` holds pure ready, and multiplying them
+    // isolates ready.
+    this.sceneEffects = true;
     // `BlockRender` tuning fields from data.md. The edge dilates one round; the glow is nominally
     // six, but the sixth ring's weight (0.0040) sits below the pass threshold, so five run.
     this.edgeSize = 1;
@@ -232,9 +243,10 @@ export class BlockPipeline {
       for (const [key, programs] of Object.entries(shaders.programs)) {
         this.programs.set(key, programs.map((program, index) => this.buildProgram(key, index, program)));
       }
+      this.programs.set('Passthrough', [this.buildProgram('Passthrough', 0, { fragment: PASSTHROUGH_FRAGMENT })]);
     } catch (error) { this.disabled = true; this.lastError = error.message; return false; }
     for (const target of [...RENDER_TARGETS, ...SCRATCH_TARGETS]) this.createTarget(target);
-    for (const [name, file] of Object.entries(TEXTURE_SLOTS)) this.loadTexture(name, file);
+    for (const [name, slot] of Object.entries(TEXTURE_SLOTS)) this.loadTexture(name, slot);
     return true;
   }
 
@@ -273,22 +285,32 @@ export class BlockPipeline {
     this.targets.set(key, { texture, framebuffer: gl.createFramebuffer(), divisor, width: 0, height: 0 });
   }
 
-  loadTexture(name, file) {
+  loadTexture(name, slot) {
     const gl = this.gl;
+    const wrap = slot.wrap === 'REPEAT' ? gl.REPEAT : slot.wrap === 'MIRRORED_REPEAT' ? gl.MIRRORED_REPEAT : gl.CLAMP_TO_EDGE;
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    // Every block texture is Point-filtered in the game (materials.md); using LINEAR here makes the
-    // noise visibly blurrier than it should be.
+    // Every block texture is Point-filtered with a single mip in the game, so linear filtering or a
+    // mipmapped minification would make the noise visibly blurrier than it is.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
     // 1x1 opaque black until the image arrives; the composite tolerates it.
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
-    this.textures.set(name, { texture, file, image: null });
+    this.textures.set(name, { texture, file: slot.file, wrap: slot.wrap, image: null });
   }
 
-  /** Upload the vendored PNGs once they are decoded. Returns a promise for the first call. */
+  /**
+   * Upload the vendored PNGs once they are decoded.
+   *
+   * materials.md §1 lists a `colorSpace` per texture (`BlockNoise1` and `Block` sRGB, the other two
+   * linear) and asks for it to be reproduced. This port uploads all four as raw RGBA, i.e. no
+   * sRGB-to-linear decode, which is the only reading that makes the shaders coherent: the compose
+   * displacement is `texture(_DisplaceMap, uv).x - 0.5`, so decoding `BlockNoise1` would push the
+   * noise's mid-grey to ~0.21 and bias every ripple by a constant -0.29 instead of centring it on
+   * zero. `Block.png` is unaffected either way — it is uniform red, and 1.0 decodes to 1.0.
+   */
   async loadImages(base = `${import.meta.env?.BASE_URL ?? '/'}assets/rpe/block/`) {
     await Promise.all([...this.textures.values()].map(async (entry) => {
       if (entry.image) return;
@@ -582,6 +604,10 @@ export class BlockPipeline {
     // The ready-subtract mask is post-processed as well: `ActiveBlock` reads its `.y` coverage.
     this.blendSubtractMask('disabledSubtractReadyBlockRT', 'scratchA', now, 1);
 
+    // The `fxRenderList` canvases draw into the camera target before it is copied into
+    // `sceneColorRT`, so they must run here rather than after the composite.
+    if (this.sceneEffects) this.renderSceneEffects(now);
+
     // ActiveBlock: the single full-screen composite that produces the visible image. `Start` binds
     // its `_Disabled*RT` samplers to the *pure ready* masks, unlike `blockComposeMaterial`, which
     // gets the merged ones under the same names.
@@ -606,7 +632,6 @@ export class BlockPipeline {
         _SceneColor: this.targets.get('sceneColorRT'),
       },
     });
-    if (this.optionalStages) this.renderOptionalStages(now);
     return true;
   }
 
@@ -753,21 +778,27 @@ export class BlockPipeline {
   }
 
   /**
-   * The three stages whose invocation the dump never located, as one switchable extra pass.
+   * The `fxRenderList` screen-space passes.
    *
-   * `DisabledBlock` and `ReadyBlock` both blend additively (`One, One` and `SrcAlpha, One`), so
-   * running them over the finished image adds the disabled fill and the ready breathing pulse
-   * without touching any mask channel. `TouchEffect` needs pointer data an editor has none of and
-   * contributes nothing here.
+   * `BlockRender.Start` stretches every canvas in `fxRenderList` to the full screen, points it at the
+   * main camera and leaves the material on it. That is the only mechanism that can host
+   * `DisabledBlock`, `ReadyBlock` and `TouchEffect`: none of them appears in `LateUpdate`, in
+   * `RenderEffects` or in `RefreshSceneColorCommands`, yet all three sample screen-space masks and
+   * `composedDisabledBlockRT`, which only exists after compose pass 1. They therefore run as
+   * full-screen canvases through the main camera, between compose pass 1 (a `LateUpdate` step) and
+   * the command buffer that copies the camera target into `sceneColorRT`.
    *
-   * Off by default, and deliberately so: `ActiveBlock`'s own branches already cover the active,
-   * ready and touch looks, so this is only right if `ActiveBlock` leaves the *disabled* look to
-   * `DisabledBlock` — the same ambiguity the dump flags around whether the ready pulse is drawn
-   * twice. It exists so the question can be settled by eye rather than argued from the shaders.
+   * Both blend additively — `One, One` and `SrcAlpha, One` — so they only add to what is beneath,
+   * and the refreshed `sceneColorRT` consequently contains them, which is what the ordering implies.
    */
-  renderOptionalStages(seconds) {
+  renderSceneEffects(seconds) {
+    this.beginPass(null);
+    let program = this.use('Passthrough', 0);
+    this.fullscreen(program, { textures: { _MainTex: this.targets.get('sceneColorRT') } });
     this.disabledBlock(null, seconds);
     this.readyPulse(null, seconds);
+    // `RefreshSceneColorCommands` copies the camera target *after* these have drawn.
+    this.uploadScene(this.canvas);
   }
 
   /**
@@ -802,6 +833,22 @@ export class BlockPipeline {
 }
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/**
+ * Straight copy of a bound texture, used to seed the canvas with the scene before the additive
+ * screen-space effects draw over it.
+ *
+ * `BlockRender.Start` stretches every canvas in `fxRenderList` to the full screen and points it at
+ * the main camera, which is how the screen-space effect materials reach the camera target. This port
+ * has no canvases, so it composites them itself and needs a way to put the scene down first.
+ */
+const PASSTHROUGH_FRAGMENT = `#version 300 es
+precision highp float;
+in highp vec2 vs_TEXCOORD0;
+uniform sampler2D _MainTex;
+layout(location = 0) out mediump vec4 SV_Target0;
+void main() { SV_Target0 = texture(_MainTex, vs_TEXCOORD0); }
+`;
 
 /**
  * Column-major MVP for one block quad.

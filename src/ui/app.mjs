@@ -438,7 +438,7 @@ element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarke
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockOptionalStages === true, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
@@ -931,17 +931,17 @@ function setBlockRenderer(mode) {
 }
 
 /**
- * Toggle the stages whose invocation the reverse-engineering dump never located.
+ * Toggle the `fxRenderList` screen-space passes.
  *
- * `DisabledBlock` and `ReadyBlock` blend additively, so this only ever adds to the image; it exists
- * so the open question — whether `ActiveBlock` already draws the disabled look and the ready pulse
- * itself — can be settled by eye.
+ * `DisabledBlock` and `ReadyBlock` blend additively, so turning this off can only remove the
+ * disabled fill and the ready pulse — and since `ActiveBlock` has no disabled-fill path of its own,
+ * off means disabled blocks become invisible.
  */
 function setBlockOptionalStages(enabled) {
-  preview.blockOptionalStages = realtimePreview.blockOptionalStages = enabled;
+  preview.blockSceneEffects = realtimePreview.blockSceneEffects = enabled;
   element('#block-optional').checked = enabled;
-  if (preview.blockPipeline) preview.blockPipeline.optionalStages = enabled;
-  if (realtimePreview.blockPipeline) realtimePreview.blockPipeline.optionalStages = enabled;
+  if (preview.blockPipeline) preview.blockPipeline.sceneEffects = enabled;
+  if (realtimePreview.blockPipeline) realtimePreview.blockPipeline.sceneEffects = enabled;
 }
 element('#realtime-alpha').addEventListener('input', event => { realtimePreview.opacity = Number(event.target.value); persistEditor(); invalidate(); });
 for (const selector of ['#loop-start', '#loop-end', '#loop-enabled']) element(selector).addEventListener('change', () => {
@@ -1397,7 +1397,7 @@ function applyPreferences(next) {
   element('#y-scale-slider').value = timeline.scale;
   realtimePreview.visible = editorPreferences.realtime ?? true;
   setBlockRenderer(editorPreferences.blockPipeline === false ? 'canvas' : 'block');
-  setBlockOptionalStages(editorPreferences.blockOptional === true);
+  setBlockOptionalStages(editorPreferences.blockOptional !== false);
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
   realtimePreview.opacity = Number(element('#realtime-alpha').value);

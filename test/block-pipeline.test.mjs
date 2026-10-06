@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { BlockPipeline, RENDER_TARGETS, glowRingWeight, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
+import { BlockPipeline, RENDER_TARGETS, TEXTURE_ST, glowRingWeight, glowRingWeights, blockMatrix } from '../src/ui/block-pipeline.mjs';
 import { blockTransform, blockState } from '../src/core/block-area.mjs';
 
 const shaders = JSON.parse(readFileSync(new URL('../public/assets/rpe/block/shaders.json', import.meta.url), 'utf8'));
@@ -24,6 +24,7 @@ function stubGl() {
     TEXTURE_2D: enumValue('TEXTURE_2D'), TEXTURE_MIN_FILTER: enumValue('MIN'), TEXTURE_MAG_FILTER: enumValue('MAG'),
     TEXTURE_WRAP_S: enumValue('WRAPS'), TEXTURE_WRAP_T: enumValue('WRAPT'),
     LINEAR: enumValue('LINEAR'), NEAREST: enumValue('NEAREST'), CLAMP_TO_EDGE: enumValue('CLAMP'),
+    REPEAT: enumValue('REPEAT'), MIRRORED_REPEAT: enumValue('MIRROR'),
     RGBA: enumValue('RGBA'), UNSIGNED_BYTE: enumValue('UBYTE'), FRAMEBUFFER: enumValue('FB'),
     COLOR_ATTACHMENT0: enumValue('CA0'), FRAMEBUFFER_COMPLETE: enumValue('FBC'),
     ARRAY_BUFFER: enumValue('ARRAYBUF'), FLOAT: enumValue('FLOAT'), STATIC_DRAW: enumValue('STATIC'),
@@ -143,7 +144,8 @@ test('13 个 program 全部编译，按材质命名', () => {
   const { pipeline } = makePipeline(stubGl());
   assert.equal(pipeline.disabled, false, pipeline.lastError);
   const total = [...pipeline.programs.values()].reduce((sum, programs) => sum + programs.length, 0);
-  assert.equal(total, 13);
+  // 13 from the game, plus this port's own passthrough.
+  assert.equal(total, 14);
   for (const key of ['BlockSprite', 'SubtractBlockBlender', 'BlockCompose', 'EdgeMask', 'GlowMask', 'DisabledBlock', 'ReadyBlock', 'ActiveBlock', 'TouchEffect']) {
     assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
   }
@@ -163,6 +165,9 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
     'GlowMask#1',                     // final `.y`-only write preserves the edge
     'BlockCompose#1',
     'SubtractBlockBlender#1',         // the ready-subtract mask is post-processed too
+    'Passthrough#0',                  // fxRenderList: seed the canvas with the scene
+    'DisabledBlock#0',
+    'ReadyBlock#0',
     'ActiveBlock#0',
   ]);
   assert.ok(sequence.includes('BlockSprite#0'), '至少栅格化一个块四边形');
@@ -173,7 +178,8 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
   assert.equal(sequence[blendAt + 2], 'BlockCompose#0');
   const compose1 = sequence.indexOf('BlockCompose#1');
   assert.equal(sequence[compose1 + 1], 'SubtractBlockBlender#1', '预备减块遮罩也要后处理');
-  assert.equal(sequence[compose1 + 2], 'ActiveBlock#0');
+  assert.equal(sequence[compose1 + 2], 'Passthrough#0', 'fxRenderList 通道在合成之前');
+  assert.equal(sequence.at(-1), 'ActiveBlock#0');
 });
 
 test('固定功能状态与 Shader 资产一致（GLSL 里没有这些）', () => {
@@ -230,17 +236,14 @@ test('隐藏的块不产生绘制调用', () => {
   assert.ok(passSequence(gl).includes('ActiveBlock#0'), '合成阶段照常执行');
 });
 
-test('可选阶段按文档算法调用，且默认不参与渲染', () => {
+test('fxRenderList 通道按文档算法调用，且默认开启', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  const baseline = passSequence(gl);
-  // These three have no invocation in the measured LateUpdate, in RenderEffects, or in
-  // RefreshSceneColorCommands (whose recovered body is two blits), so they stay unwired.
-  for (const key of ['ReadyBlock#0', 'TouchEffect#0', 'DisabledBlock#0']) {
-    assert.ok(!baseline.includes(key), `${key} 不应默认执行`);
-  }
-  // They are still compiled and available.
+  // On by default: ActiveBlock cannot draw a disabled block, so these are required, not optional.
+  assert.ok(passSequence(gl).includes('DisabledBlock#0'), '禁用态填充默认执行');
+  assert.ok(passSequence(gl).includes('ReadyBlock#0'));
+  assert.ok(passSequence(gl).includes('Passthrough#0'), '先把场景铺到画布上');
   for (const key of ['SubtractBlockBlender', 'ReadyBlock', 'DisabledBlock', 'TouchEffect']) {
     assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
   }
@@ -252,14 +255,24 @@ test('可选阶段按文档算法调用，且默认不参与渲染', () => {
   pipeline.blendSubtractMask('subtractBlockRT', 'scratchA', 1, 0);
   assert.equal(passSequence(gl).at(-1), 'SubtractBlockBlender#0');
 
-  // The switchable hypothesis path adds the disabled fill and the ready pulse over the final image.
+  // The `fxRenderList` path in full. These are full-screen canvases drawn through the main camera,
+  // so they land in the camera target *before* `RefreshSceneColorCommands` copies it into
+  // sceneColorRT — hence before ActiveBlock, not after it. The passthrough seeds the canvas with the
+  // scene so the additive passes have something to add to.
   const gl2 = stubGl();
   const second = makePipeline(gl2);
-  second.pipeline.optionalStages = true;
+  second.pipeline.sceneEffects = true;
   second.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  assert.deepEqual(passSequence(gl2).slice(-3), ['ActiveBlock#0', 'DisabledBlock#0', 'ReadyBlock#0']);
-  // ...and `Start` binds both of their `_ComposeRT` samplers to the disabled compose, not the
-  // enabled one, despite the shared sampler name.
+  assert.deepEqual(passSequence(gl2).slice(-4), ['Passthrough#0', 'DisabledBlock#0', 'ReadyBlock#0', 'ActiveBlock#0']);
+  // Turning it off leaves the composite intact, just without the disabled fill and pulse.
+  const gl3 = stubGl();
+  const third = makePipeline(gl3);
+  third.pipeline.sceneEffects = false;
+  third.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  assert.equal(passSequence(gl3).at(-1), 'ActiveBlock#0');
+  assert.ok(!passSequence(gl3).includes('DisabledBlock#0'));
+  // ...and `Start` binds both `_ComposeRT` samplers to the disabled compose, not the enabled one,
+  // despite the shared sampler name.
   assert.equal(second.pipeline.programs.get('DisabledBlock')[0].uniforms.has('_ComposeRT'), true);
   assert.equal(second.pipeline.programs.get('ReadyBlock')[0].uniforms.has('_ComposeRT'), true);
 });
@@ -271,12 +284,16 @@ test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () =>
   let uploaded = 0;
   globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() { uploaded++; } }) }) };
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } });
-  assert.equal(uploaded, 1, '场景应被拷入 sceneColorRT');
+  // Twice per frame: once up front, and again after the fxRenderList passes have drawn into the
+  // camera target, because `RefreshSceneColorCommands` copies it *after* they run.
+  assert.equal(uploaded, 2, '场景应被拷入 sceneColorRT（合成前 + fx 通道后）');
   assert.equal(pipeline.targets.get('sceneColorRT').width, Math.floor(1600 / 6));
   assert.equal(pipeline.targets.get('sceneColorRT').height, Math.floor(900 / 6));
-  // Without a scene the stage is skipped rather than failing the frame.
+  // Without a scene the up-front copy is skipped rather than failing the frame, but the post-fx
+  // refresh still runs: the fxRenderList passes have drawn into the camera target by then, so it has
+  // to be re-copied regardless of where the scene originally came from.
   assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), true);
-  assert.equal(uploaded, 1);
+  assert.equal(uploaded, 3);
 });
 
 
@@ -341,6 +358,47 @@ test('材质参数由 dump 生成，不再手抄', () => {
   assert.ok(near(pipeline.touchShine(0), expected), `${pipeline.touchShine(0)} != ${expected}`);
   // At a sine peak the shine saturates at the brightness multiplier.
   assert.ok(near(pipeline.touchShine(Math.PI / 2 / active._TouchPosShineSpeed), active._TouchPosBrightness));
+});
+
+test('_ST tiling 与 materials.md 的 m_TexEnvs 表逐项一致', () => {
+  // The only numbers still transcribed by hand, because the dump's JSON has no tiling table.
+  // Quoted here from materials.md §2 so a transcription slip cannot survive.
+  assert.deepEqual(TEXTURE_ST.ActiveBlock, {
+    _DisplaceMap: [0.8, 0.3], _SparkMap: [3.0, 1.2], _NoiseMap: [1.5, 1.46], _TouchDisplaceMap: [0.55, 0.3],
+  });
+  assert.deepEqual(TEXTURE_ST.BlockCompose, { _DisplaceMap: [2.13, 1.02] });
+  assert.deepEqual(TEXTURE_ST.DisabledBlock, { _DisplaceMap: [0.5, 0.2], _SparkMap: [3.0, 1.2] });
+  assert.deepEqual(TEXTURE_ST.TouchEffect, { _DisplaceMap: [0.55, 0.3], _NoiseMap: [1.5, 1.46] });
+
+  // Every tiling must actually be applied: an absent entry silently becomes 1,1 and changes the
+  // displacement/spark frequency by up to 3x.
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const writes = gl.__calls.filter((call) => call.name === 'uniform4f');
+  assert.ok(writes.length > 0);
+  for (const [material, entries] of Object.entries(TEXTURE_ST)) {
+    for (const [name, scale] of Object.entries(entries)) {
+      assert.ok(scale[0] !== 1 || scale[1] !== 1, `${material}.${name} 不应是默认 tiling`);
+    }
+  }
+});
+
+test('贴图 Wrap 按 materials.md §1：噪声镜像、PointNoise 平铺、Block 钳制', () => {
+  const { pipeline } = makePipeline(stubGl());
+  // Out-of-range sampling mirrors rather than clamps, which changes the edges at low `_ST`
+  // frequencies — the doc calls this out specifically.
+  assert.equal(pipeline.textures.get('_DisplaceMap').file, 'BlockNoise1.png');
+  assert.equal(pipeline.textures.get('_DisplaceMap').wrap, 'MIRRORED_REPEAT');
+  assert.equal(pipeline.textures.get('_TouchDisplaceMap').wrap, 'MIRRORED_REPEAT');
+  assert.equal(pipeline.textures.get('_NoiseMap').file, 'FD_Noise.png');
+  assert.equal(pipeline.textures.get('_NoiseMap').wrap, 'MIRRORED_REPEAT');
+  assert.equal(pipeline.textures.get('_SparkMap').file, 'PointNoise.png');
+  assert.equal(pipeline.textures.get('_SparkMap').wrap, 'REPEAT');
+  assert.equal(pipeline.textures.get('_MainTex').file, 'Block.png');
+  assert.equal(pipeline.textures.get('_MainTex').wrap, 'CLAMP_TO_EDGE');
+  // `BlockNoise1` backs two sampler names.
+  assert.equal(pipeline.textures.size, 5);
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {

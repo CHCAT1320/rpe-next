@@ -33,7 +33,7 @@
         <label title="预览比例"><span>比例</span><select id="preview-ratio" aria-label="预览比例"></select></label>
         <label title="背景实时预览"><input id="realtime-enabled" type="checkbox" checked><span>背景</span></label>
         <label title="用移植自 Phigros 的 WebGL 管线绘制判定块；关闭则退回 Canvas2D 简化绘制"><input id="block-pipeline" type="checkbox" checked><span>块管线</span></label>
-        <label title="额外叠加 DisabledBlock 填充与 ReadyBlock 呼吸（这三个材质的调用点未被逆向文档恢复，仅在 ActiveBlock 未自绘禁用态时才需要）"><input id="block-optional" type="checkbox"><span>禁用态叠加</span></label>
+        <label title="启用 DisabledBlock / ReadyBlock 这两个 fxRenderList 全屏通道。ActiveBlock 自身没有禁用态填充路径，关闭后禁用块会完全不可见"><input id="block-optional" type="checkbox" checked><span>禁用态/预备态</span></label>
         <label title="可见音符 X 坐标范围的中心；不改变音符坐标"><span>X</span><input id="camera-x" type="number" step="1" min="-1000000" max="1000000" value="0" aria-label="音符视区 X 偏移"></label>
         <label title="原版 ViewScaled：值越大，可见范围越广"><span>缩放</span><input id="view-divisor" type="number" min="0.1" max="100" step="0.1" value="1" aria-label="实时预览尺度"></label>
         <button id="reset-camera" data-icon="return" title="重置视区"></button>
