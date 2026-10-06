@@ -151,9 +151,18 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
     'GlowMask#0', 'GlowMask#0', 'GlowMask#0', 'GlowMask#0', 'GlowMask#0',
     'GlowMask#1',                     // final `.y`-only write preserves the edge
     'BlockCompose#1',
+    'SubtractBlockBlender#1',         // the ready-subtract mask is post-processed too
     'ActiveBlock#0',
   ]);
   assert.ok(sequence.includes('BlockSprite#0'), '至少栅格化一个块四边形');
+  // The subtract post-processors run after the cameras and before the compose that consumes them,
+  // and the ready-subtract one runs between compose pass 1 and the final composite.
+  const blendAt = sequence.indexOf('SubtractBlockBlender#0');
+  assert.equal(sequence[blendAt + 1], 'SubtractBlockBlender#1', '启用/禁用两路各一次');
+  assert.equal(sequence[blendAt + 2], 'BlockCompose#0');
+  const compose1 = sequence.indexOf('BlockCompose#1');
+  assert.equal(sequence[compose1 + 1], 'SubtractBlockBlender#1', '预备减块遮罩也要后处理');
+  assert.equal(sequence[compose1 + 2], 'ActiveBlock#0');
 });
 
 test('固定功能状态与 Shader 资产一致（GLSL 里没有这些）', () => {
@@ -186,7 +195,9 @@ test('每个 program 都绑定到正确的 RT（sampler 接线）', () => {
   }
   // render.md: blockComposeMaterial binds the *merged* masks, activeBlockMaterial the *pure ready*
   // masks, even though the sampler names collide.
-  assert.equal(pipeline.targets.size, 13);
+  // 13 documented targets plus this port's two Screen/8 scratches, which stand in for the internal
+  // temp Unity allocates so a camera's `OnRenderImage` has distinct source and destination handles.
+  assert.equal(pipeline.targets.size, 15);
   assert.equal(pipeline.textures.size, 5, '4 张不同的 PNG 占 5 个 sampler 名（BlockNoise1 用了两次）');
 });
 
@@ -213,9 +224,9 @@ test('可选阶段按文档算法调用，且默认不参与渲染', () => {
   const { pipeline } = makePipeline(gl);
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
   const baseline = passSequence(gl);
-  // The measured LateUpdate covers four stages; the rest live in the unanalysed
-  // RefreshSceneColorCommands, so they must not run unless asked for.
-  for (const key of ['SubtractBlockBlender#0', 'SubtractBlockBlender#1', 'ReadyBlock#0', 'TouchEffect#0', 'DisabledBlock#0']) {
+  // These three have no invocation in the measured LateUpdate, in RenderEffects, or in
+  // RefreshSceneColorCommands (whose recovered body is two blits), so they stay unwired.
+  for (const key of ['ReadyBlock#0', 'TouchEffect#0', 'DisabledBlock#0']) {
     assert.ok(!baseline.includes(key), `${key} 不应默认执行`);
   }
   // They are still compiled and available.
@@ -223,13 +234,29 @@ test('可选阶段按文档算法调用，且默认不参与渲染', () => {
     assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
   }
 
-  pipeline.blendSubtractMask('subtractBlockRT', 'disabledSubtractBlockRT', 1);
-  pipeline.stampSubtractMask('subtractBlockRT', 'sceneColorRT', 1);
   pipeline.readyPulse('composedDisabledBlockRT', 1);
   pipeline.touchEffect('touchBlockRT', 1, []);
-  assert.deepEqual(passSequence(gl).slice(-4),
-    ['SubtractBlockBlender#1', 'SubtractBlockBlender#0', 'ReadyBlock#0', 'TouchEffect#0']);
+  assert.deepEqual(passSequence(gl).slice(-2), ['ReadyBlock#0', 'TouchEffect#0']);
+  // Pass selection is explicit: 0 for the enabled scalar attribution, 1 for the vec2 form.
+  pipeline.blendSubtractMask('subtractBlockRT', 'scratchA', 1, 0);
+  assert.equal(passSequence(gl).at(-1), 'SubtractBlockBlender#0');
 });
+
+test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  // A stand-in scene source: uploadScene only needs something drawImage accepts.
+  let uploaded = 0;
+  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() { uploaded++; } }) }) };
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } });
+  assert.equal(uploaded, 1, '场景应被拷入 sceneColorRT');
+  assert.equal(pipeline.targets.get('sceneColorRT').width, Math.floor(1600 / 6));
+  assert.equal(pipeline.targets.get('sceneColorRT').height, Math.floor(900 / 6));
+  // Without a scene the stage is skipped rather than failing the frame.
+  assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), true);
+  assert.equal(uploaded, 1);
+});
+
 
 test('blockCompose 的输入接线与反编译一致', () => {
   const gl = stubGl();

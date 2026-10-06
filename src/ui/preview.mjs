@@ -281,6 +281,10 @@ export class Preview {
         blocks: this.chart?.blockAreas ?? [], now: seconds,
         aspect: viewport.width / viewport.height,
         width: this.canvas.width, height: this.canvas.height,
+        // `blocks` draws after the background pass and before the notes, so the canvas at this point
+        // is exactly the "camera target ahead of the block composite" that the game copies into
+        // sceneColorRT. `ActiveBlock` samples it inside its spark/hue term, not as a blit.
+        scene: this.canvas,
       });
       if (!rendered) return false;
     } catch { return false; }

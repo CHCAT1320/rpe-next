@@ -42,6 +42,20 @@ export const RENDER_TARGETS = [
   { key: 'pingB', divisor: 4, linear: false },
 ];
 
+/**
+ * Port-internal scratch targets.
+ *
+ * `SubtractBlockPostProcessor.OnRenderImage` blits `source -> destination` through
+ * `subtractBlockMaterial`, and the three instances live on the subtract-family cameras. A camera
+ * that renders in place still gets distinct source and destination handles because Unity allocates
+ * an internal temp, so these two Screen/8 targets stand in for it. They are deliberately kept out
+ * of the game's 13.
+ */
+export const SCRATCH_TARGETS = [
+  { key: 'scratchA', divisor: 8, linear: false },
+  { key: 'scratchB', divisor: 8, linear: false },
+];
+
 // Unity's serialised `m_State` per shader pass (render.md §固定管线状态). `blend` is
 // [src, dst] in WebGL terms; `mask` is which colour channels the pass is allowed to write.
 const PASS_STATE = {
@@ -213,7 +227,7 @@ export class BlockPipeline {
         this.programs.set(key, programs.map((program, index) => this.buildProgram(key, index, program)));
       }
     } catch (error) { this.disabled = true; this.lastError = error.message; return false; }
-    for (const target of RENDER_TARGETS) this.createTarget(target);
+    for (const target of [...RENDER_TARGETS, ...SCRATCH_TARGETS]) this.createTarget(target);
     for (const [name, file] of Object.entries(TEXTURE_SLOTS)) this.loadTexture(name, file);
     return true;
   }
@@ -306,6 +320,38 @@ export class BlockPipeline {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.canvas.width = width;
     this.canvas.height = height;
+  }
+
+  /**
+   * Copy the scene underneath the blocks into `sceneColorRT`, the job `RefreshSceneColorCommands`
+   * does with `cmd.Blit(CameraTarget, sceneColorRT)`.
+   *
+   * The game takes this at Screen/6 with Point filtering. Reproducing that matters because
+   * `ActiveBlock` samples `_SceneColor` at a *displaced* uv and folds the result into its spark/hue
+   * term — it is not a full-screen copy, so this cannot double-draw the background.
+   */
+  uploadScene(source) {
+    if (!source) return false;
+    const gl = this.gl;
+    const target = this.targets.get('sceneColorRT');
+    if (typeof document === 'undefined') return false;
+    this.sceneCanvas ??= document.createElement('canvas');
+    const canvas = this.sceneCanvas;
+    if (canvas.width !== target.width || canvas.height !== target.height) {
+      canvas.width = target.width;
+      canvas.height = target.height;
+    }
+    const context = canvas.getContext('2d');
+    if (!context) return false;
+    // Point-like downscale, matching the target's NEAREST filter.
+    context.imageSmoothingEnabled = false;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    gl.bindTexture(gl.TEXTURE_2D, target.texture);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+    return true;
   }
 
   /** Bind a program and apply its recovered fixed-function state. */
@@ -456,18 +502,17 @@ export class BlockPipeline {
    * layer cameras -> BlockCompose pass 0 -> RenderEffects (edge + glow) -> BlockCompose pass 1
    * -> ActiveBlock.
    */
-  render({ blocks, now, aspect, width, height }) {
+  render({ blocks, now, aspect, width, height, scene = null }) {
     const gl = this.gl;
     if (!gl || this.disabled) return false;
     this.resize(width, height);
-    // `sceneColorRT` is a copy of the camera target taken *before* the blocks composite, which is
-    // what `ActiveBlock` samples as `_SceneColor` (and what the subtract post-process eats into).
-    // This port clears it instead: the block layer is blitted over the 2D preview with `drawImage`,
-    // so the scene is already underneath and copying it into GL would double it. The consequence is
-    // that `ActiveBlock`'s background-sampling terms see black — feeding the real scene in is a
-    // separate integration step, not a shader change.
     for (const key of ['normalBlockRT', 'subtractBlockRT', 'disabledNormalBlockRT', 'disabledSubtractBlockRT',
-      'disabledNormalReadyBlockRT', 'disabledSubtractReadyBlockRT', 'touchBlockRT', 'sceneColorRT']) this.clearTarget(key);
+      'disabledNormalReadyBlockRT', 'disabledSubtractReadyBlockRT', 'touchBlockRT']) this.clearTarget(key);
+    // `RefreshSceneColorCommands` copies the camera target into `sceneColorRT` ahead of the
+    // composite. `ActiveBlock` samples it at a displaced uv inside its spark/hue term rather than
+    // blitting it, so supplying the real scene cannot double-draw the background.
+    this.clearTarget('sceneColorRT');
+    this.uploadScene(scene);
 
     for (const block of blocks) {
       const phase = blockState(block, now);
@@ -475,40 +520,49 @@ export class BlockPipeline {
       const transform = blockTransform(block, now, aspect);
       if (!(Math.abs(transform.size.x) > 0) || !(Math.abs(transform.size.y) > 0)) continue;
       const coverage = blockShowCoverage(block, now);
+      // Layer cameras render raw masks with `BlockSprite`; the renderer colour rides in as the
+      // vertex colour, which is what gives subtract blocks their 0.1 intensity.
       if (phase.active) this.drawBlockQuad(block.isSubtract ? 'subtractBlockRT' : 'normalBlockRT', block, transform, coverage);
       else this.drawBlockQuad(block.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT', block, transform, coverage);
       if (phase.ready) this.drawBlockQuad(block.isSubtract ? 'disabledSubtractReadyBlockRT' : 'disabledNormalReadyBlockRT', block, transform, coverage);
     }
 
-    // BlockCompose pass 0: the enabled masks are also used as the coverage channel by EdgeMask.
-    this.bindTarget('composedEnabledBlockRT');
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.enable(gl.BLEND);
+    // The three `SubtractBlockPostProcessor` instances sit on the subtract-family cameras and run
+    // `subtractBlockMaterial` (= `SubtractBlockBlender`) at their serialised `targetPass`.
+    // `Start` never binds that material — the passes come from the scene asset — so they are pinned
+    // down from the other end instead: `BlockCompose` pass 0 only reads `.x` and differences it
+    // against the normal mask, which needs the scalar attribution (pass 0), while pass 1's
+    // consumers read `.xy` and `.y` and therefore need the vec2 form (pass 1).
+    this.blendSubtractMask('subtractBlockRT', 'scratchA', now, 0);
+    this.blendSubtractMask('disabledSubtractBlockRT', 'scratchB', now, 1);
+
+    // BlockCompose pass 0: abs(subtract - normal) plus the liquid displacement. Its scalar output
+    // doubles as EdgeMask's `_ComposeRT` coverage channel.
+    this.beginPass('composedEnabledBlockRT');
     let program = this.use('BlockCompose', 0);
     this.applyMaterial(program, 'BlockCompose', now);
     this.applyTiling(program, 'BlockCompose');
     this.fullscreen(program, {
-      textures: { _DisplaceMap: this.textures.get('_DisplaceMap'), _NormalBlockRT: this.targets.get('normalBlockRT'), _SubtractBlockRT: this.targets.get('subtractBlockRT') },
+      textures: { _DisplaceMap: this.textures.get('_DisplaceMap'), _NormalBlockRT: this.targets.get('normalBlockRT'), _SubtractBlockRT: this.targets.get('scratchA') },
     });
 
     this.renderEffects('composedEnabledBlockRT', now);
 
-    // BlockCompose pass 1: disabled + ready masks.
-    this.bindTarget('composedDisabledBlockRT');
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // BlockCompose pass 1: the disabled + ready masks, reading the processed subtract pair.
+    this.beginPass('composedDisabledBlockRT');
     program = this.use('BlockCompose', 1);
     this.applyMaterial(program, 'BlockCompose', now);
     this.fullscreen(program, {
-      textures: { _DisabledNormalBlockRT: this.targets.get('disabledNormalBlockRT'), _DisabledSubtractBlockRT: this.targets.get('disabledSubtractBlockRT') },
+      textures: { _DisabledNormalBlockRT: this.targets.get('disabledNormalBlockRT'), _DisabledSubtractBlockRT: this.targets.get('scratchB') },
     });
 
-    // ActiveBlock: the single full-screen composite that produces the visible image.
-    this.bindTarget(null);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.enable(gl.BLEND);
+    // The ready-subtract mask is post-processed as well: `ActiveBlock` reads its `.y` coverage.
+    this.blendSubtractMask('disabledSubtractReadyBlockRT', 'scratchA', now, 1);
+
+    // ActiveBlock: the single full-screen composite that produces the visible image. `Start` binds
+    // its `_Disabled*RT` samplers to the *pure ready* masks, unlike `blockComposeMaterial`, which
+    // gets the merged ones under the same names.
+    this.beginPass(null);
     program = this.use('ActiveBlock', 0);
     this.applyMaterial(program, 'ActiveBlock', now);
     this.applyTiling(program, 'ActiveBlock');
@@ -519,7 +573,7 @@ export class BlockPipeline {
         _ComposeRT: this.targets.get('composedEnabledBlockRT'),
         _EffectRT: this.targets.get('effectRT'),
         _DisabledNormalBlockRT: this.targets.get('disabledNormalReadyBlockRT'),
-        _DisabledSubtractBlockRT: this.targets.get('disabledSubtractReadyBlockRT'),
+        _DisabledSubtractBlockRT: this.targets.get('scratchA'),
         _ReadyComposeRT: this.targets.get('composedDisabledBlockRT'),
         _TouchHoverRT: this.targets.get('touchBlockRT'),
         _DisplaceMap: this.textures.get('_DisplaceMap'),
@@ -530,6 +584,15 @@ export class BlockPipeline {
       },
     });
     return true;
+  }
+
+  /** Bind a target and clear it, ready for a `One, Zero` (overwriting) pass. */
+  beginPass(key) {
+    const gl = this.gl;
+    this.bindTarget(key);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
   }
 
   /**
@@ -592,27 +655,18 @@ export class BlockPipeline {
   }
 
   /**
-   * `Unlit/SubtractBlockBlender` pass 1 — the documented dual-threshold attribution with a
-   * smoothstep coverage lift at mask edges, written as `vec2(v, t.y · v · 10)`.
+   * `Unlit/SubtractBlockBlender` — the subtract camera's post-process, run at `targetPass`.
    *
-   * Pass 0 of the same material is the scalar-only variant (`st` alone) that the
-   * `SubtractBlockPostProcessor` uses when stamping the subtract region into `sceneColorRT`.
+   * Pass 0 is the scalar-only variant: `SV_Target = (x >= low) + (x >= high ? -1 : 0)`, giving a
+   * clean attribution flag that `BlockCompose` pass 0 differences against the normal mask, so a
+   * lone subtract block reads as 1 and an overlapping pair cancels to 0. Pass 1 adds the documented
+   * smoothstep coverage lift and writes `vec2(v, t.y · v · 10)`, which is what the `.xy` and `.y`
+   * consumers of the disabled masks need.
    */
-  blendSubtractMask(sourceMask, dest, seconds = 0) {
+  blendSubtractMask(sourceMask, dest, seconds = 0, pass = 1) {
     const gl = this.gl;
-    this.bindTarget(dest);
-    gl.enable(gl.BLEND);
-    const program = this.use('SubtractBlockBlender', 1);
-    this.applyMaterial(program, 'SubtractBlockBlender', seconds);
-    this.fullscreen(program, { textures: { _MainTex: this.targets.get(sourceMask) } });
-  }
-
-  /** `Unlit/SubtractBlockBlender` pass 0 — the scalar attribution flag, for the scene stamp. */
-  stampSubtractMask(sourceMask, dest, seconds = 0) {
-    const gl = this.gl;
-    this.bindTarget(dest);
-    gl.enable(gl.BLEND);
-    const program = this.use('SubtractBlockBlender', 0);
+    this.beginPass(dest);
+    const program = this.use('SubtractBlockBlender', pass);
     this.applyMaterial(program, 'SubtractBlockBlender', seconds);
     this.fullscreen(program, { textures: { _MainTex: this.targets.get(sourceMask) } });
   }
