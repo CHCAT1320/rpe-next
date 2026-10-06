@@ -616,7 +616,11 @@ export class BlockPipeline {
   /**
    * One frame of the whole pipeline, mirroring `BlockRender.LateUpdate`:
    * layer cameras -> BlockCompose pass 0 -> RenderEffects (edge + glow) -> BlockCompose pass 1
-   * -> ActiveBlock.
+   * -> fxRenderList (disabled + ready, on their own canvas) -> ActiveBlock.
+   *
+   * Returns `false` when nothing was drawn, otherwise `{ sceneEffects }` — whether the additive
+   * disabled/ready layer has content that the caller still has to composite (see
+   * `compositeSceneEffects`). The block canvas itself is finished by the time this returns.
    */
   render({ blocks, now, aspect, width, height, scene = null, sceneView = null }) {
     const gl = this.gl;
@@ -630,8 +634,8 @@ export class BlockPipeline {
     this.clearTarget('sceneColorRT');
     if (this.sceneDistortion) this.uploadScene(scene, sceneView);
 
-    const stats = { visible: 0, drawn: 0, skippedZeroSize: 0 };
-    for (const block of blocks) {
+    const stats = { visible: 0, drawn: 0, skippedZeroSize: 0, quads: [] };
+    for (const [index, block] of blocks.entries()) {
       const phase = blockState(block, now);
       if (!phase) continue;
       stats.visible += 1;
@@ -639,16 +643,42 @@ export class BlockPipeline {
       // A zero-extent quad is skipped rather than drawn, which is correct — this chart's blocks
       // really do animate through a zero scale — but it means "visible" and "rasterised" are not the
       // same number, so both are counted for the diagnostic.
-      if (!(Math.abs(transform.size.x) > 0) || !(Math.abs(transform.size.y) > 0)) { stats.skippedZeroSize += 1; continue; }
+      if (!(Math.abs(transform.size.x) > 0) || !(Math.abs(transform.size.y) > 0)) {
+        stats.skippedZeroSize += 1;
+        stats.quads.push({ index, state: phase.active ? 'active' : phase.ready ? 'ready' : 'disabled', skipped: 'zero-size', size: [transform.size.x, transform.size.y] });
+        continue;
+      }
       const coverage = blockShowCoverage(block, now);
       // Layer cameras render raw masks with `BlockSprite`; the renderer colour rides in as the
       // vertex colour, which is what gives subtract blocks their 0.1 intensity.
-      if (phase.active) this.drawBlockQuad(block.isSubtract ? 'subtractBlockRT' : 'normalBlockRT', block, transform, coverage, now);
-      else this.drawBlockQuad(block.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT', block, transform, coverage, now);
-      if (phase.ready) this.drawBlockQuad(block.isSubtract ? 'disabledSubtractReadyBlockRT' : 'disabledNormalReadyBlockRT', block, transform, coverage, now);
+      const layer = phase.active
+        ? (block.isSubtract ? 'subtractBlockRT' : 'normalBlockRT')
+        : (block.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT');
+      const readyLayer = phase.ready
+        ? (block.isSubtract ? 'disabledSubtractReadyBlockRT' : 'disabledNormalReadyBlockRT')
+        : null;
+      this.drawBlockQuad(layer, block, transform, coverage, now);
+      if (readyLayer) this.drawBlockQuad(readyLayer, block, transform, coverage, now);
       stats.drawn += 1;
+      // Per-block bookkeeping for `diagnose`: which layer received the quad, which state the block is
+      // in, and where its centre landed in mask pixels. Without this, a block that renders wrong is
+      // indistinguishable from one that was never drawn.
+      stats.quads.push({
+        index,
+        state: phase.active ? 'active' : phase.ready ? 'ready' : 'disabled',
+        isSubtract: Boolean(block.isSubtract),
+        layer,
+        readyLayer,
+        coverage: Number(coverage.toFixed(3)),
+        size: [Number(transform.size.x.toFixed(3)), Number(transform.size.y.toFixed(3))],
+        rotation: Number(transform.rotation.toFixed(2)),
+        maskCentre: this.maskPixel(transform, layer),
+      });
     }
     this.lastStats = stats;
+    // Retained so `diagnose` can re-derive each block's transform for its per-block probes.
+    this.blocks = blocks;
+    this.lastAspect = aspect;
 
     // The three `SubtractBlockPostProcessor` instances sit on the subtract-family cameras and run
     // `subtractBlockMaterial` (= `SubtractBlockBlender`) at their serialised `targetPass`.
@@ -679,16 +709,24 @@ export class BlockPipeline {
       textures: { _DisabledNormalBlockRT: this.targets.get('disabledNormalBlockRT'), _DisabledSubtractBlockRT: this.targets.get('scratchB') },
     });
 
-    // The ready-subtract mask is post-processed as well: `ActiveBlock` reads its `.y` coverage.
+    // The ready-subtract mask is post-processed as well, because the third
+    // `SubtractBlockPostProcessor` (pass 1) sits on the subtract-ready camera. In the game its result
+    // only ever lands in an internal temp that the camera's `OnRenderImage` owns, which is what this
+    // scratch stands in for; `activeBlockMaterial` samples the *raw* `disabledSubtractReadyBlockRT`
+    // below, exactly as `Start` binds it.
     this.blendSubtractMask('disabledSubtractReadyBlockRT', 'scratchA', now, 1);
 
     // The `fxRenderList` canvases draw into the camera target before it is copied into
     // `sceneColorRT`, so they must run here rather than after the composite.
-    if (this.sceneEffects) this.renderSceneEffects(now);
+    const sceneEffects = this.sceneEffects ? this.renderSceneEffects(now) : false;
 
     // ActiveBlock: the single full-screen composite that produces the visible image. `Start` binds
-    // its `_Disabled*RT` samplers to the *pure ready* masks, unlike `blockComposeMaterial`, which
-    // gets the merged ones under the same names.
+    // its `_Disabled*RT` samplers to the *pure ready* masks — literally `disabledNormalReadyBlockRT`
+    // and `disabledSubtractReadyBlockRT`, not `scratchA`/`scratchB` — unlike `blockComposeMaterial`,
+    // which gets the merged (disabled + ready) masks under the same names. `ds` feeds
+    // `m = ds - dn`, so binding the post-processed scratch instead would change `rd = ready·|m|`
+    // for subtract blocks: `SubtractBlockBlender` pass 1 clamps and multiplies the coverage by 10,
+    // while the render target holds the raw `0.1·coverage` that `BlockSprite` wrote.
     // ActiveBlock composites over what is already in the camera target — the game blits it with
     // `Blit(None, CameraTarget, activeBlockMaterial)`, which does not clear — so this pass must not
     // clear either, or the fxRenderList output underneath is wiped before it can show.
@@ -705,7 +743,7 @@ export class BlockPipeline {
         _ComposeRT: this.targets.get('composedEnabledBlockRT'),
         _EffectRT: this.targets.get('effectRT'),
         _DisabledNormalBlockRT: this.targets.get('disabledNormalReadyBlockRT'),
-        _DisabledSubtractBlockRT: this.targets.get('scratchA'),
+        _DisabledSubtractBlockRT: this.targets.get('disabledSubtractReadyBlockRT'),
         _ReadyComposeRT: this.targets.get('composedDisabledBlockRT'),
         _TouchHoverRT: this.targets.get('touchBlockRT'),
         _DisplaceMap: this.textures.get('_DisplaceMap'),
@@ -715,6 +753,26 @@ export class BlockPipeline {
         _SceneColor: this.targets.get('sceneColorRT'),
       },
     });
+    // The disabled/ready layer is returned rather than blitted here: it has to reach the preview with
+    // an additive composite, which canvas 2D can only do, so `Preview` performs that step.
+    return { sceneEffects };
+  }
+
+  /**
+   * Draw the additive `fxRenderList` layer into a 2D context.
+   *
+   * `lighter` is the canvas 2D spelling of `dst + src`: it adds colour and leaves the destination
+   * alpha untouched, which is exactly what `One, One` / `SrcAlpha, One` do to the game's camera
+   * target. A `source-over` blit here would instead use the layer's own coverage alpha to attenuate
+   * the background — the reported "some states go dark, some go black".
+   */
+  compositeSceneEffects(context, width, height, viewport) {
+    const layer = this.sceneEffectsCanvas;
+    if (!layer) return false;
+    context.save();
+    context.globalCompositeOperation = 'lighter';
+    context.drawImage(layer, 0, 0, width, height, viewport.left, viewport.top, viewport.width, viewport.height);
+    context.restore();
     return true;
   }
 
@@ -769,8 +827,16 @@ export class BlockPipeline {
       report.blocks = { total: 0, hint: '当前谱面没有判定块（blockAreas 为空）' };
     }
     // How many quads were actually rasterised this frame, and how many were skipped for having no
-    // extent — the fork between "no block is live" and "a live block drew nothing".
+    // extent — the fork between "no block is live" and "a live block drew nothing". `quads` names the
+    // mask layer each one went to, so a wrong layer shows up as a data difference, not a guess.
     report.lastFrame = this.lastStats ?? null;
+    // Sample the pipeline's own intermediates at each drawn block's centre. This is the part that
+    // distinguishes the failure modes for a block that renders too dark or not at all:
+    // `compose` 0 means the mask never reached `BlockCompose`; `edge`/`glow` 0 on a block that no other
+    // one covers means `RenderEffects` produced nothing for it; a non-zero `disabledSubtractReady`
+    // where the block is not ready means the ready half of the composite is fed by the wrong mask.
+    report.samples = this.sampleBlocks(now, this.lastAspect ?? 16 / 9);
+    this.bindTarget(null);
     for (const [key, target] of this.targets) {
       this.bindTarget(key);
       const pixels = new Uint8Array(target.width * target.height * 4);
@@ -817,6 +883,82 @@ export class BlockPipeline {
       canvasBBox: lit ? [minX, minY, maxX - minX + 1, maxY - minY + 1] : null,
     };
     return report;
+  }
+
+  /**
+   * Read the pipeline's own intermediates at each drawn block's centre.
+   *
+   * This is the diagnostic that separates the failure modes behind "this block is too dark / black",
+   * which is otherwise indistinguishable from a distance:
+   *
+   * - `compose` is 0 on a block that was rasterised → its mask never survived `BlockCompose`, so
+   *   `ActiveBlock` has nothing to fill with (the shader discards there and the hole shows through).
+   * - `edge` and `glow` are the effect channels `ActiveBlock` adds on top; a block whose `compose` is
+   *   fine but whose edge is 0 everywhere it is not covered by another block means `RenderEffects`
+   *   produced nothing, which is exactly "no edge ripple".
+   * - `disabledSubtractReady` is the ready mask `ActiveBlock` differences against the normal one; a
+   *   non-zero value for a block that is not in its ready window points at a wrong binding.
+   *
+   * Every value is sampled at the block's centre in that target's own pixel grid, so a mask and an
+   * effect target are both addressed correctly despite their different divisors.
+   */
+  sampleBlocks(now, aspect) {
+    const gl = this.gl;
+    const probes = [
+      ['compose', 'composedEnabledBlockRT', 0],
+      ['effectEdge', 'effectRT', 0],
+      ['effectGlow', 'effectRT', 1],
+      ['readyCompose', 'composedDisabledBlockRT', 0],
+      ['disabledNormal', 'disabledNormalBlockRT', 0],
+      ['disabledSubtract', 'disabledSubtractBlockRT', 0],
+      ['disabledNormalReady', 'disabledNormalReadyBlockRT', 0],
+      ['disabledSubtractReady', 'disabledSubtractReadyBlockRT', 1],
+      ['sceneColor', 'sceneColorRT', 0],
+    ];
+    const rows = (this.lastStats?.quads ?? []).filter((quad) => !quad.skipped).slice(0, 16);
+    const read = new Map();
+    for (const [, key] of probes) {
+      if (read.has(key)) continue;
+      const target = this.targets.get(key);
+      if (!target?.width) { read.set(key, null); continue; }
+      this.bindTarget(key);
+      const pixels = new Uint8Array(target.width * target.height * 4);
+      gl.readPixels(0, 0, target.width, target.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      read.set(key, { target, pixels });
+    }
+    if (!rows.length) return [];
+    return rows.map((quad) => {
+      const block = this.blocks?.[quad.index];
+      const transform = block ? blockTransform(block, now, aspect) : null;
+      const entry = { block: quad.index, state: quad.state, isSubtract: quad.isSubtract, layer: quad.layer, readyLayer: quad.readyLayer };
+      for (const [label, key, channel] of probes) {
+        const buffer = read.get(key);
+        if (!buffer || !transform) { entry[label] = null; continue; }
+        const position = this.maskPixel(transform, key);
+        const x = Math.max(0, Math.min(buffer.target.width - 1, position[0]));
+        const y = Math.max(0, Math.min(buffer.target.height - 1, position[1]));
+        entry[label] = buffer.pixels[(y * buffer.target.width + x) * 4 + channel];
+      }
+      return entry;
+    });
+  }
+
+  /**
+   * Where a block's centre lands in a mask target's pixel grid.
+   *
+   * Mask work happens at `Screen/8` (effects at `Screen/4`), so a block's viewport rectangle is not
+   * its mask rectangle; this is the coordinate to sample when a block looks blank. `null` when the
+   * target has no size yet.
+   */
+  maskPixel(transform, key) {
+    const target = this.targets.get(key);
+    if (!target || !target.width) return null;
+    const { screen } = transform;
+    return [
+      Math.round((transform.center.x / screen.x + 0.5) * target.width),
+      // GL row 0 is the bottom and block world space is y-up, so no flip is needed here.
+      Math.round((transform.center.y / screen.y + 0.5) * target.height),
+    ];
   }
 
   /** Bind a target and clear it, ready for a `One, Zero` (overwriting) pass. */
@@ -962,7 +1104,8 @@ export class BlockPipeline {
   }
 
   /**
-   * The `fxRenderList` screen-space passes.
+   * The `fxRenderList` screen-space passes, rendered onto their own canvas so they can be composited
+   * **additively** over the preview instead of replacing it.
    *
    * `BlockRender.Start` stretches every canvas in `fxRenderList` to the full screen, points it at the
    * main camera and leaves the material on it. That is the only mechanism that can host
@@ -972,17 +1115,35 @@ export class BlockPipeline {
    * full-screen canvases through the main camera, between compose pass 1 (a `LateUpdate` step) and
    * the command buffer that copies the camera target into `sceneColorRT`.
    *
-   * Both blend additively — `One, One` and `SrcAlpha, One` — so they only add to what is beneath,
-   * and the refreshed `sceneColorRT` consequently contains them, which is what the ordering implies.
+   * Both passes blend additively (`One, One` and `SrcAlpha, One`), so in the game they only add to the
+   * camera target, which already holds the background, judge lines and notes: the disabled fill never
+   * *replaces* what is behind it. Colour alone cannot express that here, because these passes also
+   * write an **alpha** proportional to the block's coverage (`One, One` accumulates it), and a GL
+   * canvas blitted with `source-over` uses that alpha to attenuate the destination — a disabled block
+   * would therefore darken 40-60 % of the pixels it covers. Keeping the layer separate and drawing it
+   * with `globalCompositeOperation = 'lighter'` reproduces the additive intent: colour adds, alpha is
+   * left alone.
    */
   renderSceneEffects(seconds) {
-    // Start from transparent. The scene stays in `sceneColorRT` for `_SceneColor` sampling and the
-    // 2D preview draws the real background underneath; blitting the scene here as well would double
-    // it, because this canvas is composited over that same background. Both passes only add, so they
-    // do not need the scene beneath them.
-    this.beginPass(null);
-    this.disabledBlock(null, seconds);
-    this.readyPulse(null, seconds);
+    if (typeof document === 'undefined') return false;
+    const layer = this.sceneEffectsCanvas ??= document.createElement('canvas');
+    if (layer.width !== this.canvas.width || layer.height !== this.canvas.height) {
+      layer.width = this.canvas.width;
+      layer.height = this.canvas.height;
+    }
+    const previousCanvas = this.canvas;
+    this.canvas = layer;
+    try {
+      // Start from transparent. The scene stays in `sceneColorRT` for `_SceneColor` sampling and the
+      // 2D preview draws the real background underneath; blitting the scene here as well would
+      // double it, because this layer is composited over that same background.
+      this.beginPass(null);
+      this.disabledBlock(null, seconds);
+      this.readyPulse(null, seconds);
+    } finally {
+      this.canvas = previousCanvas;
+    }
+    return true;
   }
 
   /**

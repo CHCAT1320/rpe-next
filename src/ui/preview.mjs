@@ -307,8 +307,9 @@ export class Preview {
     const ratio = globalThis.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(viewport.width * ratio));
     const height = Math.max(1, Math.round(viewport.height * ratio));
+    let result = null;
     try {
-      const rendered = pipeline.render({
+      result = pipeline.render({
         blocks: this.chart?.blockAreas ?? [], now: seconds,
         aspect: viewport.width / viewport.height,
         width, height,
@@ -319,7 +320,7 @@ export class Preview {
         // Crop the viewport out of the device-pixel canvas rather than squashing the whole scene.
         sceneView: { left: viewport.left * ratio, top: viewport.top * ratio, width, height },
       });
-      if (!rendered) return false;
+      if (!result) return false;
     } catch { return false; }
     this.lastBlockSeconds = seconds;
     this.lastBlockViewport = viewport;
@@ -328,6 +329,12 @@ export class Preview {
     if (typeof window !== 'undefined' && !window.__rpeBlockDiagnose) {
       window.__rpeBlockDiagnose = () => this.blockPipeline.diagnose(this.lastBlockSeconds, this.chart?.blockAreas ?? [], this.lastBlockViewport);
     }
+    // Order matters and mirrors the game: the additive `fxRenderList` layer (disabled fill + ready
+    // pulse) goes down first, then `ActiveBlock` — which already contains it as `_SceneColor` — is
+    // composited on top. Both reach the preview additively, so neither one replaces the background
+    // or the notes it overlaps; only `ActiveBlock` carries a meaningful alpha, and it is the one the
+    // game composites over the camera target.
+    if (result.sceneEffects) pipeline.compositeSceneEffects(context, width, height, viewport);
     context.drawImage(this.blockCanvas, 0, 0, width, height,
       viewport.left, viewport.top, viewport.width, viewport.height);
     return true;

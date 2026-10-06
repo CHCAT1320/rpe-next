@@ -72,6 +72,9 @@ function stubGl() {
     enableVertexAttribArray: record('enableVertexAttribArray'), disableVertexAttribArray: record('disableVertexAttribArray'),
     vertexAttribPointer: record('vertexAttribPointer'), vertexAttrib4f: record('vertexAttrib4f'),
     useProgram: (program) => calls.push({ name: 'useProgram', args: [program] }),
+    // `diagnose` reads targets back; zero pixels are enough for the bookkeeping assertions, but the
+    // buffer has to actually be filled so the per-block probes read real (if empty) values.
+    readPixels: (x, y, width, height, format, type, pixels) => { calls.push({ name: 'readPixels', args: [x, y, width, height] }); if (pixels) pixels.fill(0); },
     uniformMatrix4fv: record('uniformMatrix4fv'), uniform1i: record('uniform1i'), uniform1f: record('uniform1f'),
     uniform4f: record('uniform4f'), uniform2fv: record('uniform2fv'), uniform3fv: record('uniform3fv'), uniform4fv: record('uniform4fv'),
   };
@@ -101,7 +104,74 @@ function makePipeline(gl) {
   for (const [key, programs] of pipeline.programs) {
     for (const program of programs) gl.__programs.set(program.handle.handle, `${key}#${program.index}`);
   }
+  // Record which texture object each `activeTexture` unit holds, so a sampler's *destination* can be
+  // identified rather than merely its existence. `applyUniforms` sends textures to sequential units
+  // and then calls `uniform1i(location(name), unit)` with that 0-based index, while `activeTexture`
+  // receives the `TEXTUREn` enum, so the first call establishes the base the indices are offset from.
+  // Because units are reused by every pass, the bookkeeping is snapshotted per `useProgram` call —
+  // otherwise a later pass would overwrite an earlier one's wiring and `effectRT` would appear on
+  // `BlockCompose#0` too.
+  const units = new Map();
+  const bindings = new Map();
+  const samplerTexture = new Map();
+  const useCounts = new Map();
+  let current = null;
+  let wanted = null;
+  let base = null;
+  const activeTexture = gl.activeTexture;
+  // `applyUniforms` passes the 0-based index to `uniform1i` but the `TEXTUREn` enum to
+  // `activeTexture`, so normalise the latter back to an index as soon as the base is known.
+  gl.activeTexture = (unit) => { base ??= unit; wanted = unit - base; activeTexture(unit); };
+  const bindTexture = gl.bindTexture;
+  gl.bindTexture = (target, texture) => {
+    if (wanted !== null) {
+      units.set(wanted, texture);
+      for (const [key, unit] of bindings) if (unit === wanted) samplerTexture.set(key, texture);
+    }
+    bindTexture(target, texture);
+  };
+  const useProgram = gl.useProgram;
+  gl.useProgram = (program) => {
+    const count = (useCounts.get(program.handle) ?? 0) + 1;
+    useCounts.set(program.handle, count);
+    current = `${program.handle}#${count}`;
+    useProgram(program);
+  };
+  const uniform1i = gl.uniform1i;
+  gl.uniform1i = (location, unit) => {
+    const key = `${location.program.handle}:${location.name}`;
+    bindings.set(key, unit);
+    if (current !== null) samplerTexture.set(`${current}:${location.name}`, units.get(unit));
+    uniform1i(location, unit);
+  };
+  const textureObjects = new Map();
+  for (const [key, target] of pipeline.targets) textureObjects.set(target.texture, key);
+  for (const [name, entry] of pipeline.textures) textureObjects.set(entry.texture, name);
+  gl.__samplerState = { samplerTexture, useCounts, textureObjects };
   return { pipeline, canvas };
+}
+
+/**
+ * Resolve every sampler of one program's *last* use to the name of the texture it was given.
+ *
+ * Returns `{}` for a pass that never ran; an object that cannot be matched to the pipeline's own
+ * tables resolves to `'unknown-texture'` rather than being silently omitted.
+ */
+function samplerTargets(pipeline, gl, key, index) {
+  const program = pipeline.programs.get(key)[index];
+  const { samplerTexture, useCounts, textureObjects } = gl.__samplerState;
+  const handle = program.handle.handle;
+  const count = useCounts.get(handle);
+  if (!count) return {};
+  const result = {};
+  for (const name of program.uniforms.keys()) {
+    if (program.types.get(name) !== gl.SAMPLER_2D) continue;
+    // Integer uniforms like `_TouchPosCount` also honour `uniform1i`, so they are filtered out here.
+    const texture = samplerTexture.get(`${handle}#${count}:${name}`);
+    if (!texture) continue;
+    result[name] = textureObjects.get(texture) ?? 'unknown-texture';
+  }
+  return result;
 }
 
 /** Pass sequence as `key#index` strings, in `useProgram` order. */
@@ -168,9 +238,12 @@ test('13 个 program 全部编译，按材质命名', () => {
 });
 
 test('render 按 LateUpdate 的顺序跑完整条管线', () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  try {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
-  assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), true);
+  assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: true });
   const sequence = passSequence(gl);
   // A block is active at t=66 s, so one quad is rasterised, then the five fixed stages run in order.
   const tail = sequence.slice(sequence.indexOf('BlockCompose#0'));
@@ -195,6 +268,9 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
   assert.equal(sequence[compose1 + 1], 'SubtractBlockBlender#1', '预备减块遮罩也要后处理');
   assert.equal(sequence[compose1 + 2], 'DisabledBlock#0', 'fxRenderList 通道在合成之前');
   assert.equal(sequence.at(-1), 'ActiveBlock#0');
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test('固定功能状态与 Shader 资产一致（GLSL 里没有这些）', () => {
@@ -233,6 +309,70 @@ test('每个 program 都绑定到正确的 RT（sampler 接线）', () => {
   assert.equal(pipeline.textures.size, 5, '4 张不同的 PNG 占 5 个 sampler 名（BlockNoise1 用了两次）');
 });
 
+// Naming a sampler is not the same as feeding it the right RT: the collision between
+// `blockComposeMaterial`'s and `activeBlockMaterial`'s `_Disabled*BlockRT` makes a wrong binding
+// invisible to a name-only check. This walks `sampler name -> texture unit -> texture object` and
+// compares against `BlockRender.Start`'s binding table in render.md.
+test('每个 sampler 实际接到 Start 指定的那张 RT（而不只是名字存在）', () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  try {
+    const gl = stubGl();
+    const { pipeline } = makePipeline(gl);
+    pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+
+    // activeBlockMaterial: the `_Disabled*` samplers carry the *pure ready* render targets, and
+    // `_ReadyComposeRT` the composed disabled mask. `_DisabledSubtractBlockRT` is the regression this
+    // pins: it used to receive `scratchA`, the `SubtractBlockBlender` pass 1 output.
+    const active = samplerTargets(pipeline, gl, 'ActiveBlock', 0);
+    assert.deepEqual(active, {
+      _ComposeRT: 'composedEnabledBlockRT',
+      _EffectRT: 'effectRT',
+      _DisabledNormalBlockRT: 'disabledNormalReadyBlockRT',
+      _DisabledSubtractBlockRT: 'disabledSubtractReadyBlockRT',
+      _ReadyComposeRT: 'composedDisabledBlockRT',
+      _TouchHoverRT: 'touchBlockRT',
+      _SceneColor: 'sceneColorRT',
+      _DisplaceMap: '_DisplaceMap',
+      _SparkMap: '_SparkMap',
+      _TouchDisplaceMap: '_TouchDisplaceMap',
+      _NoiseMap: '_NoiseMap',
+    });
+
+    // blockComposeMaterial gets the merged masks under the same two names, plus the scratch the
+    // subtract post-processors wrote into.
+    const merge = samplerTargets(pipeline, gl, 'BlockCompose', 0);
+    assert.equal(merge._NormalBlockRT, 'normalBlockRT');
+    assert.equal(merge._SubtractBlockRT, 'scratchA');
+    assert.equal(merge._DisplaceMap, '_DisplaceMap');
+    const disabled = samplerTargets(pipeline, gl, 'BlockCompose', 1);
+    assert.equal(disabled._DisabledNormalBlockRT, 'disabledNormalBlockRT');
+    assert.equal(disabled._DisabledSubtractBlockRT, 'scratchB');
+
+    // blockReadyMaterial / disabledBlockMaterial read the pure-ready pair and the disabled compose.
+    for (const [key, index] of [['ReadyBlock', 0], ['DisabledBlock', 0]]) {
+      const targets = samplerTargets(pipeline, gl, key, index);
+      assert.equal(targets._ComposeRT, 'composedDisabledBlockRT', `${key}._ComposeRT`);
+      if (key === 'ReadyBlock') {
+        assert.equal(targets._DisabledNormalBlockRT, 'disabledNormalReadyBlockRT');
+        assert.equal(targets._DisabledSubtractBlockRT, 'disabledSubtractReadyBlockRT');
+      }
+    }
+
+    // The two dilation passes consume the enabled compose as `_ComposeRT` and the ping-pong output as
+    // `_MainTex`; the final GlowMask pass preserves the edge already in `effectRT`.
+    const edge = samplerTargets(pipeline, gl, 'EdgeMask', 1);
+    assert.equal(edge._MainTex, 'composedEnabledBlockRT', 'edgeSize == 1 直接读源遮罩');
+    assert.equal(edge._ComposeRT, 'composedEnabledBlockRT');
+    const glowFinal = samplerTargets(pipeline, gl, 'GlowMask', 1);
+    // Five rings ping-pong pingA → pingB → pingA → pingB → pingA, so the final `.y`-only write reads
+    // the odd one back. The sixth ring's weight (0.0040) is below the 0.01 threshold and is cut.
+    assert.equal(glowFinal._MainTex, 'pingA');
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test('RT 尺寸按除数派生：1600x900 -> 掩码 200x112、效果 400x225', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
@@ -252,46 +392,56 @@ test('隐藏的块不产生绘制调用', () => {
 });
 
 test('fxRenderList 通道按文档算法调用，且默认开启', () => {
-  const gl = stubGl();
-  const { pipeline } = makePipeline(gl);
-  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  // On by default: ActiveBlock cannot draw a disabled block, so these are required, not optional.
-  assert.ok(passSequence(gl).includes('DisabledBlock#0'), '禁用态填充默认执行');
-  assert.ok(passSequence(gl).includes('ReadyBlock#0'));
-  // The scene is left in `sceneColorRT` for `_SceneColor` sampling rather than blitted onto the
-  // block canvas, which is composited over the 2D background and would otherwise double it.
-  assert.ok(!passSequence(gl).some((entry) => entry.startsWith('Passthrough')), '不应把场景再铺一遍');
-  for (const key of ['SubtractBlockBlender', 'ReadyBlock', 'DisabledBlock', 'TouchEffect']) {
-    assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
+  // `renderSceneEffects` needs a canvas to render the additive layer onto. Without a DOM it declines
+  // and reports `sceneEffects: false`, so the layer is stubbed in here.
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  try {
+    const gl = stubGl();
+    const { pipeline } = makePipeline(gl);
+    assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: true });
+    // On by default: ActiveBlock cannot draw a disabled block, so these are required, not optional.
+    assert.ok(passSequence(gl).includes('DisabledBlock#0'), '禁用态填充默认执行');
+    assert.ok(passSequence(gl).includes('ReadyBlock#0'));
+    // The scene is left in `sceneColorRT` for `_SceneColor` sampling rather than blitted onto the
+    // block canvas, which is composited over the 2D background and would otherwise double it.
+    assert.ok(!passSequence(gl).some((entry) => entry.startsWith('Passthrough')), '不应把场景再铺一遍');
+    for (const key of ['SubtractBlockBlender', 'ReadyBlock', 'DisabledBlock', 'TouchEffect']) {
+      assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
+    }
+    // The additive layer targets its own canvas, not the block canvas that gets blitted: it must not
+    // contribute alpha to the layer that is composited over the preview.
+    assert.notEqual(pipeline.sceneEffectsCanvas, pipeline.canvas);
+
+    pipeline.readyPulse('composedDisabledBlockRT', 1);
+    pipeline.touchEffect('touchBlockRT', 1, []);
+    assert.deepEqual(passSequence(gl).slice(-2), ['ReadyBlock#0', 'TouchEffect#0']);
+    // Pass selection is explicit: 0 for the enabled scalar attribution, 1 for the vec2 form.
+    pipeline.blendSubtractMask('subtractBlockRT', 'scratchA', 1, 0);
+    assert.equal(passSequence(gl).at(-1), 'SubtractBlockBlender#0');
+
+    // The `fxRenderList` path in full. These are full-screen canvases drawn through the main camera,
+    // so they land in the camera target *before* `RefreshSceneColorCommands` copies it into
+    // sceneColorRT — hence before ActiveBlock, not after it.
+    const gl2 = stubGl();
+    const second = makePipeline(gl2);
+    second.pipeline.sceneEffects = true;
+    second.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+    assert.deepEqual(passSequence(gl2).slice(-3), ['DisabledBlock#0', 'ReadyBlock#0', 'ActiveBlock#0']);
+    // Turning it off leaves the composite intact, just without the disabled fill and pulse.
+    const gl3 = stubGl();
+    const third = makePipeline(gl3);
+    third.pipeline.sceneEffects = false;
+    assert.deepEqual(third.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: false });
+    assert.equal(passSequence(gl3).at(-1), 'ActiveBlock#0');
+    assert.ok(!passSequence(gl3).includes('DisabledBlock#0'));
+    // ...and `Start` binds both `_ComposeRT` samplers to the disabled compose, not the enabled one,
+    // despite the shared sampler name.
+    assert.equal(second.pipeline.programs.get('DisabledBlock')[0].uniforms.has('_ComposeRT'), true);
+    assert.equal(second.pipeline.programs.get('ReadyBlock')[0].uniforms.has('_ComposeRT'), true);
+  } finally {
+    globalThis.document = previousDocument;
   }
-
-  pipeline.readyPulse('composedDisabledBlockRT', 1);
-  pipeline.touchEffect('touchBlockRT', 1, []);
-  assert.deepEqual(passSequence(gl).slice(-2), ['ReadyBlock#0', 'TouchEffect#0']);
-  // Pass selection is explicit: 0 for the enabled scalar attribution, 1 for the vec2 form.
-  pipeline.blendSubtractMask('subtractBlockRT', 'scratchA', 1, 0);
-  assert.equal(passSequence(gl).at(-1), 'SubtractBlockBlender#0');
-
-  // The `fxRenderList` path in full. These are full-screen canvases drawn through the main camera,
-  // so they land in the camera target *before* `RefreshSceneColorCommands` copies it into
-  // sceneColorRT — hence before ActiveBlock, not after it. The passthrough seeds the canvas with the
-  // scene so the additive passes have something to add to.
-  const gl2 = stubGl();
-  const second = makePipeline(gl2);
-  second.pipeline.sceneEffects = true;
-  second.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  assert.deepEqual(passSequence(gl2).slice(-3), ['DisabledBlock#0', 'ReadyBlock#0', 'ActiveBlock#0']);
-  // Turning it off leaves the composite intact, just without the disabled fill and pulse.
-  const gl3 = stubGl();
-  const third = makePipeline(gl3);
-  third.pipeline.sceneEffects = false;
-  third.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  assert.equal(passSequence(gl3).at(-1), 'ActiveBlock#0');
-  assert.ok(!passSequence(gl3).includes('DisabledBlock#0'));
-  // ...and `Start` binds both `_ComposeRT` samplers to the disabled compose, not the enabled one,
-  // despite the shared sampler name.
-  assert.equal(second.pipeline.programs.get('DisabledBlock')[0].uniforms.has('_ComposeRT'), true);
-  assert.equal(second.pipeline.programs.get('ReadyBlock')[0].uniforms.has('_ComposeRT'), true);
 });
 
 test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () => {
@@ -307,7 +457,7 @@ test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () =>
   assert.equal(pipeline.targets.get('sceneColorRT').width, Math.floor(1600 / 6));
   assert.equal(pipeline.targets.get('sceneColorRT').height, Math.floor(900 / 6));
   // Without a scene the copy is skipped rather than failing the frame.
-  assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), true);
+  assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: true });
   assert.equal(uploaded, 1);
 });
 
@@ -563,15 +713,22 @@ test('块层按设备像素渲染，再贴进视口的 CSS 像素矩形', () => 
   // `prepareCanvas` scales the 2D context by devicePixelRatio, so `viewport` is CSS pixels while the
   // canvas is device pixels. Rendering the GL layer at canvas size and blitting it into the viewport
   // rectangle scaled and offset every block by that ratio.
-  const captured = { render: null, drawImage: null };
+  const captured = { render: null, image: null, composite: null };
   const host = {
     canvas: { width: 2800, height: 1800 },
     blockCanvas: { tag: 'gl' },
     blockSceneEffects: true,
     chart: { blockAreas: [] },
-    blockPipeline: { disabled: false, render: (options) => { captured.render = options; return true; } },
+    blockPipeline: {
+      disabled: false,
+      render: (options) => { captured.render = options; return { sceneEffects: true }; },
+      compositeSceneEffects: (...args) => { captured.composite = args; },
+    },
   };
-  const context = { drawImage: (...args) => { captured.drawImage = args; } };
+  const context = {
+    drawImage: (...args) => { captured.image = args; },
+    save() {}, restore() {}, set globalCompositeOperation(value) { this.operation = value; },
+  };
   const viewport = { left: 100, top: 50, width: 700, height: 450 };
   const previous = globalThis.devicePixelRatio;
   globalThis.devicePixelRatio = 2;
@@ -585,7 +742,57 @@ test('块层按设备像素渲染，再贴进视口的 CSS 像素矩形', () => 
   assert.equal(captured.render.aspect, 700 / 450, '宽高比取自 CSS 视口，两种单位下一致');
   assert.deepEqual(captured.render.sceneView, { left: 200, top: 100, width: 1400, height: 900 }, '场景按视口裁剪');
   // The whole GL canvas is mapped onto the viewport's CSS rectangle.
-  assert.deepEqual(captured.drawImage.slice(1), [0, 0, 1400, 900, 100, 50, 700, 450]);
+  assert.deepEqual(captured.image.slice(1), [0, 0, 1400, 900, 100, 50, 700, 450]);
+  // The additive disabled/ready layer is composited before the block canvas, so `ActiveBlock` (which
+  // already contains the layer via `_SceneColor`) stays on top, as it does in the game.
+  assert.deepEqual(captured.composite, [context, 1400, 900, viewport]);
+});
+
+test('禁用态/预备态层用加法合成，而不是把预览压暗', () => {
+  // `DisabledBlock` is `One, One` and `ReadyBlock` is `SrcAlpha, One`, so both write an alpha
+  // proportional to the block's coverage. Blitting that layer with `source-over` therefore uses the
+  // coverage to attenuate whatever is underneath, which is how the disabled and ready states ended up
+  // dark or black; `lighter` adds colour and preserves the destination, matching the game's additive
+  // passes onto the camera target.
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  try {
+    const gl = stubGl();
+    const { pipeline } = makePipeline(gl);
+    assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: true });
+    const layer = pipeline.sceneEffectsCanvas;
+    assert.ok(layer, 'fxRenderList 层应有独立画布');
+    assert.deepEqual([layer.width, layer.height], [1600, 900], '层尺寸跟画布一致');
+    const calls = [];
+    const context = {
+      save() { calls.push('save'); }, restore() { calls.push('restore'); },
+      set globalCompositeOperation(value) { calls.push(`op:${value}`); },
+      drawImage: (...args) => { calls.push(['drawImage', ...args]); },
+    };
+    const viewport = { left: 10, top: 20, width: 800, height: 450 };
+    assert.equal(pipeline.compositeSceneEffects(context, 1600, 900, viewport), true);
+    assert.deepEqual(calls, ['save', 'op:lighter', ['drawImage', layer, 0, 0, 1600, 900, 10, 20, 800, 450], 'restore']);
+    // With the layer disabled there is nothing to composite, and no canvas is allocated.
+    const off = makePipeline(stubGl());
+    off.pipeline.sceneEffects = false;
+    assert.deepEqual(off.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), { sceneEffects: false });
+    assert.equal(off.pipeline.sceneEffectsCanvas, undefined);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('两个加法通道真的写入非零 alpha，否则这个合成差异不可见', () => {
+  // Guards the premise of the test above: if the fragment stages wrote alpha 0, a `source-over` blit
+  // would be indistinguishable from `lighter` and the regression could not be observed.
+  const source = shaders.programs.DisabledBlock[0].fragment;
+  const writes = [...source.matchAll(/SV_Target0\.w\s*=\s*([^;]+);/g)].map((match) => match[1].trim());
+  assert.deepEqual(writes, ['vs_COLOR0.w'], 'DisabledBlock 的 alpha 直接来自顶点色，即 BlockSprite 写入的覆盖度');
+  // ReadyBlock writes the same coverage into rgb and alpha (as two component writes), which is what
+  // makes `lighter` (add) and `source-over` (replace, attenuated by that alpha) differ so visibly.
+  const ready = shaders.programs.ReadyBlock[0].fragment;
+  assert.ok(/SV_Target0\.w\s*=/.test(ready), 'ReadyBlock 写 alpha');
+  assert.ok(/SV_Target0\.xyz\s*=/.test(ready), 'ReadyBlock 同时写 rgb');
 });
 
 test('贴图按 Unity 约定垂直翻转（v = 0 对应图像底部）', async () => {
@@ -627,13 +834,54 @@ test('场景上传必须垂直翻转，否则块内场景镜像', () => {
   globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() {} }) }) };
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);
-  assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } }), true);
+  assert.deepEqual(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } }), { sceneEffects: true });
   const flips = gl.__calls.filter((call) => call.name === 'pixelStorei' && call.args[0] === gl.UNPACK_FLIP_Y_WEBGL);
   assert.ok(flips.length > 0, 'sceneColorRT 的上传应设置翻转');
   for (const call of flips) assert.equal(call.args[1], true, 'UNPACK_FLIP_Y_WEBGL 应为 true');
   // ...and the mask targets must not be re-uploaded from a canvas, which would need the same care.
   const uploads = gl.__calls.filter((call) => call.name === 'texImage2D' && call.args.length === 6);
   assert.ok(uploads.length >= 1, '应有来自 canvas 的上传');
+});
+
+test('诊断记录每个块进了哪一层，并在各 RT 的块中心取值', () => {
+  // A blank or too-dark block has three plausible causes that look identical from outside: the quad
+  // never rasterised, it went to the wrong layer, or the composite/effect targets are empty for it.
+  // `diagnose` has to distinguish them, so pin the bookkeeping down.
+  globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ clearRect() {}, fillRect() {} }) }) };
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  const now = 66;
+  pipeline.render({ blocks: fixture, now, aspect: 16 / 9, width: 1600, height: 900 });
+  const quads = pipeline.lastStats.quads;
+  assert.ok(quads.length > 0, '应有块被光栅化');
+  for (const quad of quads) {
+    assert.ok(['active', 'ready', 'disabled'].includes(quad.state), `未知状态 ${quad.state}`);
+    assert.ok(quad.layer.endsWith('BlockRT'), `层名 ${quad.layer}`);
+    if (quad.state === 'active') assert.equal(quad.layer, quad.isSubtract ? 'subtractBlockRT' : 'normalBlockRT');
+    else assert.equal(quad.layer, quad.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT');
+    // The ready half is only drawn when the block is inside its ready window.
+    assert.equal(Boolean(quad.readyLayer), quad.state === 'ready', 'readyLayer 只在预备态出现');
+  }
+  // Per-block probes address each target in that target's own pixel grid (masks /8, effects /4).
+  const block = fixture.find((entry) => blockState(entry, now)?.active);
+  const aspect = 16 / 9;
+  const transform = blockTransform(block, now, aspect);
+  const mask = pipeline.maskPixel(transform, 'normalBlockRT');
+  const effect = pipeline.maskPixel(transform, 'effectRT');
+  assert.equal(mask[0], Math.round((transform.center.x / transform.screen.x + 0.5) * pipeline.targets.get('normalBlockRT').width));
+  assert.ok(effect[0] > mask[0], 'effectRT 分辨率是掩码的两倍，同一世界点落在更大的像素坐标上');
+  const report = pipeline.diagnose(now, fixture, { width: 1600, height: 900 });
+  assert.ok(report.samples.length > 0, '应给出逐块采样');
+  const keys = Object.keys(report.samples[0]);
+  for (const name of ['compose', 'effectEdge', 'effectGlow', 'readyCompose', 'disabledNormalReady', 'sceneColor']) {
+    assert.ok(keys.includes(name), `采样缺少 ${name}`);
+  }
+  for (const sample of report.samples) {
+    for (const [name, value] of Object.entries(sample)) {
+      if (name === 'block' || name === 'state' || name === 'isSubtract' || name === 'layer' || name === 'readyLayer') continue;
+      assert.ok(value === null || Number.isInteger(value), `${name} 应为整数像素值或 null，实际 ${value}`);
+    }
+  }
 });
 
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
