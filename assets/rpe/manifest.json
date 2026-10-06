@@ -1,65 +1,65 @@
 {
-  "source": "Original RPE Resources, reused with owner permission; originals are read only.",
+  "source": "Generated replacement assets for public distribution; local builds may use the original RPE resources.",
   "files": [
     {
       "path": "Texture/Tap2.png",
-      "bytes": 4000,
-      "sha256": "eb1f5024126c5106165dd0562508f54f83b3ecd00fdf18d0afde2e0cfde86f29"
+      "bytes": 1965,
+      "sha256": "3dbecfcbd36665abbd90b47945ed1aa0bfdba832f34941f3653cf3466f7402a1"
     },
     {
       "path": "Texture/Tap2HL.png",
-      "bytes": 29702,
-      "sha256": "8d89723e62a48a5a7ba8e840335b3049ee8d8d3434d6f9445a5aed1e33912044"
+      "bytes": 4485,
+      "sha256": "d45dfbe708760d887f3d3036ebe426003b30ce669b4e5b08745e4c54ba625ef2"
     },
     {
       "path": "Texture/Drag2.png",
-      "bytes": 3033,
-      "sha256": "4ae29e9040410601a642fdd97e635bf49a3d817b1f43374cf6241c6bc60e9dc3"
+      "bytes": 1178,
+      "sha256": "0b59c55ac22fa65dba856c64e8bdc1c45ec5f970a586e4beab4b93c2e0b35c72"
     },
     {
       "path": "Texture/DragHL.png",
-      "bytes": 24750,
-      "sha256": "5dd56de2af05477bfcc697ce373d8b1895cdceecef3306a934f4545d5d85b1ad"
+      "bytes": 3545,
+      "sha256": "c585b93412f05fe996121f3c2204c956d36f7e36ee59707f01d60672ea269279"
     },
     {
       "path": "Texture/Flick2.png",
-      "bytes": 8257,
-      "sha256": "4ece87bbb2d797f16edf33ba9fef3fda20bad3fa7b14ad8a8433b1d8d756b8f8"
+      "bytes": 3854,
+      "sha256": "1019b0de2b30c76231e3a020f8b491a4334c649193b94b84c087b63c90655911"
     },
     {
       "path": "Texture/Flick2HL.png",
-      "bytes": 51672,
-      "sha256": "dcbd287215c560dddd60fdca8bdb6d5492931d88122c6183e02af38f074fc911"
+      "bytes": 6483,
+      "sha256": "67fd53f19130f310700b1ddf578abe46c1d3ad38a53232e8627a986240060caf"
     },
     {
       "path": "Texture/Hold.png",
-      "bytes": 862688,
-      "sha256": "c6144cd69fdd89d38134b1d0c09530ba374475cbde7b1d6c388de3f59bae96e2"
+      "bytes": 36712,
+      "sha256": "dc9fae5d44dc682a949ea560218ff8c3893fdc8c255918f753d9c6d6aacea6a5"
     },
     {
       "path": "Texture/Hold3.png",
-      "bytes": 953286,
-      "sha256": "410c34ca019973c284ea7baefd5133c40bcdc1895af5861f9f9f9249d81ee22d"
+      "bytes": 40600,
+      "sha256": "63f35e5a896c4c391a0243259391828f8b2d94030ca215fe67b790b989fe71ab"
     },
     {
       "path": "Texture/HoldHL.png",
-      "bytes": 1141099,
-      "sha256": "15a51bd47ac7e53ddb66c8dd6bc3c4cc190f4601a6191659060966dacea1f8d8"
+      "bytes": 42626,
+      "sha256": "17b05feba2efbc18cb2d949a772693acab34fe93649a26dd640ca42cb2e48047"
     },
     {
       "path": "Texture/HoldHead.png",
-      "bytes": 28011,
-      "sha256": "96660f2ac07dd60ee0c5ec6844786e3c28293d9a644ed7b8a829789228c7e2e6"
+      "bytes": 1035,
+      "sha256": "19b83203daeb0f3bbab3279f4c1a5afbbd9561f8bf9e260456d99f391f1895f2"
     },
     {
       "path": "Texture/HoldHeadHL.png",
-      "bytes": 44203,
-      "sha256": "4ca440750a7b676df470a1ab94553c6023182e5a290e65afc18be934987c8d10"
+      "bytes": 2171,
+      "sha256": "bbe2d25c7251c3a884f9ee03b0892193d2c6df06a0eecf9c75ec790a51e2898a"
     },
     {
       "path": "Texture/HoldEnd.png",
-      "bytes": 16209,
-      "sha256": "49370cade95294ef397e6a09c25a451bc8e81beb95961c1e67fb8b3e5c7a8667"
+      "bytes": 1035,
+      "sha256": "19b83203daeb0f3bbab3279f4c1a5afbbd9561f8bf9e260456d99f391f1895f2"
     },
     {
       "path": "Texture/line.png",
@@ -203,158 +203,158 @@
     },
     {
       "path": "Texture/img-1.png",
-      "bytes": 3326,
-      "sha256": "2292c4d4e39fa28d23e03601a79c7d1cc096f5ebbf9c6cc8dcc57da2c774869e"
+      "bytes": 7314,
+      "sha256": "88cb1078c472c8a1185bc223fc5ebc9aa60a0e7b6c4c4e03823dac0ba56606b5"
     },
     {
       "path": "Texture/img-2.png",
-      "bytes": 5251,
-      "sha256": "41ab1dea47f39a5113651555f950fc1429d813215ec1813b264816f2f626429f"
+      "bytes": 10535,
+      "sha256": "4a33d955081ba09680dcd072f2aff0b52da628e37b166247ebc9156504933391"
     },
     {
       "path": "Texture/img-3.png",
-      "bytes": 9239,
-      "sha256": "fc9de43367a643959bb431969862296745f8ca9ee1490f9e335a03c7577ddd36"
+      "bytes": 11395,
+      "sha256": "6801b2a85ad547ce5c812d2fb39980d63a0b508cd7f0aa47315d88318487ec6b"
     },
     {
       "path": "Texture/img-4.png",
-      "bytes": 10916,
-      "sha256": "3aa1d1d4af26869263f50e0668eb7beef7bea4614d00ed4af3f4e9a8fe59fdc8"
+      "bytes": 12158,
+      "sha256": "b5b2087fb759d960c3a5f3fefa3fb3005635cfea2895ecb974ba7e05fdc0e164"
     },
     {
       "path": "Texture/img-5.png",
-      "bytes": 11522,
-      "sha256": "c07ce2b691888161cf549510998028399d6dea9ea0fc64bf4dba75fb3f6a970d"
+      "bytes": 12938,
+      "sha256": "fd444a9c79e56c20c6e9416aa3dd8f4c3fe7abd3b4ba069ca654c2b1470b9f59"
     },
     {
       "path": "Texture/img-6.png",
-      "bytes": 11437,
-      "sha256": "906b935f3224b57101858b07cb0147f98dd7a459ef0d234727a10a26fba94e4e"
+      "bytes": 13303,
+      "sha256": "c075f48bae6802eb93ee122143afee846a067cfe0e0c367a9d07c79beca8f530"
     },
     {
       "path": "Texture/img-7.png",
-      "bytes": 12571,
-      "sha256": "540ea70afbf78e29a2bea227853bf04aad5a1ba9ff8d1cae9fd9cffe612fb3c1"
+      "bytes": 13956,
+      "sha256": "8438f2027268393709531bfed5ad3f87f87c5b0d860ace47210fad8105271d15"
     },
     {
       "path": "Texture/img-8.png",
-      "bytes": 13137,
-      "sha256": "b0ee717be09a68e7973727a691dcbfb9a6eba10bc00d7cae1d4a13c7c21c025b"
+      "bytes": 14257,
+      "sha256": "bd095b1babe6678769f2f92bb6525177c6e7489374a15922904ae5948a9160e2"
     },
     {
       "path": "Texture/img-9.png",
-      "bytes": 13022,
-      "sha256": "61f29a441c77160668bcc34e33310343fc796a5459463fd61b04b0418ac72100"
+      "bytes": 14770,
+      "sha256": "e95019255a719ea1c308b09ec1b9497eaf4552b42788c027dbcb680f40d54f34"
     },
     {
       "path": "Texture/img-10.png",
-      "bytes": 12380,
-      "sha256": "6b8f19811e36154eca1a1b626ad05ea5fd8da275e0c5cf259149277e3fb428e5"
+      "bytes": 15155,
+      "sha256": "064caf759b4e6ec88fddbf93f0ddc53717a8f71c48cbd00ddbd442c5f856f8ff"
     },
     {
       "path": "Texture/img-11.png",
-      "bytes": 12787,
-      "sha256": "109e788ebe4e5ac5427e6fd373370c127bc7830603135716a7bd5a8b32f3e331"
+      "bytes": 16044,
+      "sha256": "4b874b43334b56e92587707f80b78f81a96784ede32a6cfa74f8170c42fcc76c"
     },
     {
       "path": "Texture/img-12.png",
-      "bytes": 12306,
-      "sha256": "7a5f7b950f7ad2f5084502427a0e17d83cf8cbd1c25622ab8585b5cc14f88dcf"
+      "bytes": 15882,
+      "sha256": "17f0246089eafecfd62fe6c477d7cb0bb05e8e748ed8d2d42d4d3e76523fc1fc"
     },
     {
       "path": "Texture/img-13.png",
-      "bytes": 12439,
-      "sha256": "d5ddafcd3d5faa250880bed8b8b78b39f3bc95e957b41d5d8a8fee42b934922b"
+      "bytes": 16405,
+      "sha256": "be664efdbe8ed2bbce7661cbdf36fdd670dd5174acfb182ac964158a70e754c2"
     },
     {
       "path": "Texture/img-14.png",
-      "bytes": 13062,
-      "sha256": "ab35e281e33fdb89bdb49be3da5f2ae22f70f64a52cc947c8ee539d435cc6ee9"
+      "bytes": 16673,
+      "sha256": "3c7b315ea8526a6a32398f4e3f7da59b6079f31094f1957bd96d5fe46047ec3b"
     },
     {
       "path": "Texture/img-15.png",
-      "bytes": 13265,
-      "sha256": "de8daf29d3627ede443c57aad14102a877a411dce16b12b40c8a2354b0ac33d2"
+      "bytes": 15967,
+      "sha256": "ff74c19de43c3bc29ebb5bd72859420272685f62c92e1e30f15c892017dc8b69"
     },
     {
       "path": "Texture/img-16.png",
-      "bytes": 13808,
-      "sha256": "1e51e6ce8ef7f58d9362d3aec9164c2f630f18a639e463deaa6f26ba7fd00926"
+      "bytes": 15865,
+      "sha256": "51dea391b121408f77603fcde516ef7317886891a5b9fc3ee8f4f3d196bf6340"
     },
     {
       "path": "Texture/img-17.png",
-      "bytes": 12726,
-      "sha256": "b578e83fa701fec3ea7e59ae6ea6b6a36406c5b3bd90b60f451e5f046740d676"
+      "bytes": 16210,
+      "sha256": "7b42170654cb973e9f569f351dc7002896a41a8f339cf2b701a6b2f8ace5c187"
     },
     {
       "path": "Texture/img-18.png",
-      "bytes": 13061,
-      "sha256": "45394a2fdcbe9b4739c1a01a243abf08f81fca5f0da643105f3e73da73f1b3cc"
+      "bytes": 16325,
+      "sha256": "c20917419da1cbf408d8345a472511c878a28fea99b5b0a30c9cad79b8c71c95"
     },
     {
       "path": "Texture/img-19.png",
-      "bytes": 13465,
-      "sha256": "ab3a914a42d5fec9a0532e90f0bd727e9bccff025d7fe29d4369a1c52278a143"
+      "bytes": 16224,
+      "sha256": "13e5cdf61a5605c538a7aa72af0989653f36a70fe205adc8e097a5bac804e60f"
     },
     {
       "path": "Texture/img-20.png",
-      "bytes": 13055,
-      "sha256": "965883df4d8904647c6ad48755b7179fb172720dd953d47b669373ee938d94fb"
+      "bytes": 15940,
+      "sha256": "7bf0adcd8574acab86b03f2f3cfa620921c185552512d0e91de19a9a32c7cffe"
     },
     {
       "path": "Texture/img-21.png",
-      "bytes": 12853,
-      "sha256": "06e226b198057467e70ed1a59bd6cbee1bcdb271a62970c0d37a9427e78f146b"
+      "bytes": 16045,
+      "sha256": "017a98186b3ee7109291aa18d11a618eb1935bb0babf6cfb0ef92a263a319241"
     },
     {
       "path": "Texture/img-22.png",
-      "bytes": 13872,
-      "sha256": "f5e74e5de6c9992c4f43bd84e8c727d7167e521c2573007440bbe0ac8729a0d7"
+      "bytes": 16148,
+      "sha256": "de44201919d956245f17a331c2c3f9e64b1a35c963322d518da98f9a2b3c5f84"
     },
     {
       "path": "Texture/img-23.png",
-      "bytes": 13170,
-      "sha256": "6c83dfa344da8d9e96fe6626d89e30dfca7800369cb5298737d95aa6297bb35b"
+      "bytes": 15457,
+      "sha256": "d03c02152f4e2527dfc2cf581c5629bee8c15c26f8ccb4c6af4b14eb0c85d8fc"
     },
     {
       "path": "Texture/img-24.png",
-      "bytes": 12668,
-      "sha256": "ba0df493b0fc0e00b9d67f8d843d7f5f81ac5963a878ad3656ed76d890043cae"
+      "bytes": 15326,
+      "sha256": "064f45e3d0f36903414572824eaf65cf595880cf20f41daa4343296f23c55598"
     },
     {
       "path": "Texture/img-25.png",
-      "bytes": 11159,
-      "sha256": "5eea525b1134828019d2aae65be51d43910e90e7eebc99da023baa4da0cd3b08"
+      "bytes": 14744,
+      "sha256": "86dfdfc0bf292263a3831c51cc2ca74202e0324f285b1c6af2aad9d01cf53a72"
     },
     {
       "path": "Texture/img-26.png",
-      "bytes": 11435,
-      "sha256": "090ce93a8b5ac3e1a4f67e48af5c9e178c9670daf08e384706d691b1c07daa07"
+      "bytes": 13906,
+      "sha256": "60ac24b9ed481423bb3dfb06a9927883146d1468ff99d3912fb4f308b4b8bafe"
     },
     {
       "path": "Texture/img-27.png",
-      "bytes": 9841,
-      "sha256": "6909d6438817a7850d95872e696c8c0231fa451ab7999a9a2137c080e3870bb2"
+      "bytes": 14157,
+      "sha256": "b8bd4cb8617cc0b028810dc3d64eac944845f5c8b9fa69da9be19628f09f7ec1"
     },
     {
       "path": "Texture/img-28.png",
-      "bytes": 8752,
-      "sha256": "dd035d9c2d93af8331f5f9ba012e868709e0b0ef9c9550f55d8238384aee9c85"
+      "bytes": 14362,
+      "sha256": "9dd75a7de4db75efd2fc8e630c2e6b4cbd9526a7d9f6e8a0f134632a67796320"
     },
     {
       "path": "Texture/img-29.png",
-      "bytes": 7839,
-      "sha256": "096d83a82ce6bb9164224da5be970b644baa5e5d959ef9607e8c2d0307188054"
+      "bytes": 14427,
+      "sha256": "34592f19bdfeca6167890e1fc9ce2d2bc771962608b797826b80bc985d9b7733"
     },
     {
       "path": "Texture/img-30.png",
-      "bytes": 2618,
-      "sha256": "8f3de8e36e1c1f309947325fd7685b33acefe17505b9ef10f8724cafbea153c0"
+      "bytes": 14520,
+      "sha256": "0173ac997125f265c15e22caa0bfe328266a1af652c20de689546e83c2a6ebe4"
     },
     {
       "path": "Texture/img-31.png",
-      "bytes": 191,
-      "sha256": "dbde33a0d54287d292b33c07ff8d419e6dcde831db3c641330d9e29ce2bba84c"
+      "bytes": 8034,
+      "sha256": "68de34fbd346388d089acb7e3f4a7bdec6f904673de045aef1d310ba473d36f1"
     },
     {
       "path": "shaders/bokeh.glsl",
@@ -778,18 +778,18 @@
     },
     {
       "path": "SE/tap.ogg",
-      "bytes": 5823,
-      "sha256": "55b70340de68b9f196094a0eaf353701796c09f890ddd50e52fe9c62a07ecc55"
+      "bytes": 4122,
+      "sha256": "e9fe482f36a5b9d11e2943c0feefd69596d1d6217ac34c4e9babaa1859bd18d8"
     },
     {
       "path": "SE/drag.ogg",
-      "bytes": 10693,
-      "sha256": "b22c52856c435d1f2400d61331d4a3b0dc07c6dd1955e0757288a6d6d1fcc808"
+      "bytes": 4357,
+      "sha256": "7648a256fa4d0f1ff6a899dbf725650afc171fde1b75596a3acfe9e421c5ab52"
     },
     {
       "path": "SE/flick.ogg",
-      "bytes": 8519,
-      "sha256": "5f9009d31dfda40ce8aa2a6bad991d09cc51b6eddf4d56ac2d93e392eaffeac6"
+      "bytes": 4216,
+      "sha256": "30380346ce7712acb79a71e188a679908fac152ea9d53aca4a01c1980f0a199b"
     }
   ]
 }
