@@ -75,10 +75,12 @@ function ease12(progress) {
  * interpolating semantics. See the plan's §3.5 / §9-R1.
  */
 export function blockEase(easeType, progress) {
-  if (CONSTANT_ZERO.has(easeType)) return 0;
-  if (easeType === CONSTANT_ONE) return 1;
-  if (easeType === 12) return ease12(progress);
-  const mapped = EASE_MAP[easeType];
+  // The game casts the serialised easeType to int, so a fractional value floors rather than fails.
+  const type = Math.floor(easeType);
+  if (CONSTANT_ZERO.has(type)) return 0;
+  if (type === CONSTANT_ONE) return 1;
+  if (type === 12) return ease12(progress);
+  const mapped = EASE_MAP[type];
   if (mapped === undefined) throw new Error(`blockEase: easeType ${easeType} 不在 0..14 内`);
   return easing(progress, mapped);
 }

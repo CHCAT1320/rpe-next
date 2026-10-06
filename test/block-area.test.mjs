@@ -219,7 +219,7 @@ test('官方导入把 blockAreaList 提升为 blockAreas，并且不污染原文
   assert.deepEqual(bare.blockAreas, [], '官方谱面无该键时为空数组');
 });
 
-test('校验：拒绝越界 easeType / 零 scale / 单元素越界 / 时间乱序，放过真实数据里的病态块', () => {
+test('校验：只拒绝游戏本身会崩或产生 NaN 的数据；真实谱面的病态块一律放过', () => {
   const rejected = (mutate, pattern) => {
     const chart = createChart();
     chart.blockAreas = [plainBlock()];
@@ -228,27 +228,71 @@ test('校验：拒绝越界 easeType / 零 scale / 单元素越界 / 时间乱�
   };
   rejected(block => { block.moveEvents[0].easeTypeX = 15; }, /easeTypeX/);
   rejected(block => { block.rotateEvents[0].easeType = -1; }, /easeType/);
-  rejected(block => { block.scaleEvents = [{ anchor: { x: 0.5, y: 0.5 }, time: 0, easeTypeX: 0, easeTypeY: 0, scale: { x: 0, y: 1 } }]; }, /scale/);
-  rejected(block => { block.scaleEvents[0].time = 9; }, /单元素/);
-  rejected(block => { block.enableTime = 5; }, /appearTime/);
   rejected(block => { block.topRightPercentage = { x: Number.NaN, y: 0 }; }, /坐标/);
+  rejected(block => { block.disappearTime = Number.POSITIVE_INFINITY; }, /disappearTime/);
+  rejected(block => { block.scaleEvents[0].scale = { x: Number.NaN, y: 1 }; }, /scale/);
 
-  // These all occur in the shipped corpus and must stay legal.
-  const accepted = mutate => {
+  // Real charts contain every one of these, and the game renders them.
+  const accepted = (mutate, why) => {
     const chart = createChart();
     chart.blockAreas = [plainBlock()];
     mutate(chart.blockAreas[0]);
-    assert.doesNotThrow(() => assertChart(chart));
+    assert.doesNotThrow(() => assertChart(chart), why);
   };
-  accepted(block => { block.enableTime = block.disableTime; });              // 32/34/35/36/38/41/43
-  accepted(block => { block.topRightPercentage = { x: 0.5, y: 1 }; block.bottomLeftPercentage = { x: 0.51, y: 0 }; });  // 28
-  accepted(block => { block.scaleEvents = [{ anchor: { x: 0.5, y: 0.5 }, time: 0, easeTypeX: 3, easeTypeY: 6, scale: { x: -50, y: 1 } }]; });
-  accepted(block => { block.moveEvents[0].endPosition = { x: -0.2, y: 1.3 }; });
+  // A shipped chart (Chart.AT.json) really does carry a zero scale component: `SafeDiv` turns the
+  // degenerate denominator into a ratio of 1, so it renders rather than failing.
+  accepted(block => {
+    block.scaleEvents = [
+      { anchor: { x: 0.5, y: 0.5 }, time: 0, easeTypeX: 0, easeTypeY: 0, scale: { x: 1, y: 1 } },
+      { anchor: { x: 0.5, y: 0.5 }, time: 1, easeTypeX: 0, easeTypeY: 0, scale: { x: 0, y: 1 } },
+    ];
+  }, '零缩放分量');
+  accepted(block => { block.scaleEvents[0].scale = { x: -0, y: 1 }; }, '负零');
+  accepted(block => { block.scaleEvents[0].easeTypeX = 3.7; }, '小数缓动类型');
+  accepted(block => { block.enableTime = block.disableTime; }, '永不生效（32/34/35/36/38/41/43）');
+  accepted(block => { block.topRightPercentage = { x: 0.5, y: 1 }; block.bottomLeftPercentage = { x: 0.51, y: 0 }; }, '反转矩形（28）');
+  accepted(block => { block.scaleEvents = [{ anchor: { x: 0.5, y: 0.5 }, time: 0, easeTypeX: 3, easeTypeY: 6, scale: { x: -50, y: 1 } }]; }, '负缩放');
+  accepted(block => { block.moveEvents[0].endPosition = { x: -0.2, y: 1.3 }; }, 'endPosition 越界');
+  accepted(block => { block.scaleEvents[0].time = 9; }, '单元素事件晚于 appearTime');
+  accepted(block => { block.appearTime = 5; }, '时间逆序');
+  accepted(block => { block.rotateEvents = []; block.moveEvents = []; block.scaleEvents = []; }, '三个事件列表全空');
   for (const block of fixture) {
     const chart = createChart();
     chart.blockAreas = [clone(block)];
     assert.doesNotThrow(() => assertChart(chart), `夹具第 ${fixture.indexOf(block)} 块应可解析`);
   }
+});
+
+test('零缩放不产生 NaN，且块在该轴上塌缩', () => {
+  const aspect = 16 / 9;
+  const anchor = { x: 0.5, y: 0.5 };
+  // The shape a shipped chart uses: the pivot ratio hits a zero denominator mid-list.
+  const block = plainBlock({
+    rotateEvents: [], moveEvents: [],
+    scaleEvents: [
+      { anchor, time: 0, easeTypeX: 0, easeTypeY: 0, scale: { x: 1, y: 1 } },
+      { anchor, time: 1, easeTypeX: 0, easeTypeY: 0, scale: { x: 0, y: 1 } },
+      { anchor, time: 2, easeTypeX: 0, easeTypeY: 0, scale: { x: 1, y: 1 } },
+    ],
+  });
+  for (let step = 0; step <= 40; step++) {
+    const now = -0.5 + step * 0.075;
+    const transform = blockTransform(block, now, aspect);
+    for (const value of [transform.center.x, transform.center.y, transform.size.x, transform.size.y, transform.rotation]) {
+      assert.ok(Number.isFinite(value), `now=${now} 出现非有限值`);
+    }
+  }
+  // At the zero event the width collapses to nothing rather than becoming NaN.
+  assert.equal(blockTransform(block, 1, aspect).size.x, 0);
+  // Both components zero is the degenerate `SafeDiv(0, 0)` case, which also yields 1.
+  const both = plainBlock({
+    rotateEvents: [], moveEvents: [],
+    scaleEvents: [{ anchor, time: 0, easeTypeX: 0, easeTypeY: 0, scale: { x: 0, y: 0 } }],
+  });
+  const collapsed = blockTransform(both, 0.5, aspect);
+  assert.equal(collapsed.size.x, 0);
+  assert.equal(collapsed.size.y, 0);
+  assert.ok(Number.isFinite(collapsed.center.x) && Number.isFinite(collapsed.center.y));
 });
 
 test('序列化往返保留 blockAreas', () => {

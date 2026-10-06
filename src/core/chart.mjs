@@ -73,9 +73,10 @@ function assertBlockAreas(blocks) {
     for (const property of ['appearTime', 'enableTime', 'disableTime', 'disappearTime']) {
       if (!Number.isFinite(block[property])) throw new Error(`${path}.${property}: 必须为秒数`);
     }
-    if (!(block.appearTime <= block.enableTime && block.enableTime <= block.disableTime && block.disableTime <= block.disappearTime)) {
-      throw new Error(`${path}: 时间必须满足 appearTime ≤ enableTime ≤ disableTime ≤ disappearTime`);
-    }
+    // Only unrenderable data is rejected. The four times are deliberately NOT required to be
+    // ordered, and a scale component of zero is legal: `SafeDiv` turns a degenerate denominator into
+    // a ratio of 1, and `easedProgress` clamps, so unordered times and zero scales render without
+    // NaN. Real charts contain both, and refusing to open one is far worse than drawing it oddly.
     for (const list of BLOCK_EVENT_LISTS) {
       const events = block[list.name] ?? [];
       if (!Array.isArray(events)) throw new Error(`${path}.${list.name} 必须为数组`);
@@ -83,22 +84,18 @@ function assertBlockAreas(blocks) {
         const eventPath = `${path}.${list.name}[${eventIndex}]`;
         if (!event || typeof event !== 'object') throw new Error(`${eventPath}: 无效事件`);
         if (!Number.isFinite(event.time)) throw new Error(`${eventPath}.time: 必须为秒数`);
-        // easeType outside 0..14 is an IndexOutOfRangeException in the game, not a fallback.
+        // easeType outside 0..14 is an IndexOutOfRangeException in the game, not a fallback. A
+        // fractional value is floored rather than refused, since the game casts to int.
         for (const property of list.easeTypes) {
           const value = event[property];
-          if (!Number.isInteger(value) || value < 0 || value >= BLOCK_EASE_TYPES) throw new Error(`${eventPath}.${property}: 必须为 0..${BLOCK_EASE_TYPES - 1} 的整数`);
+          if (!Number.isFinite(value) || value < 0 || value >= BLOCK_EASE_TYPES) throw new Error(`${eventPath}.${property}: 必须为 0..${BLOCK_EASE_TYPES - 1} 的缓动类型`);
         }
         if (list.anchor && (!event.anchor || !Number.isFinite(event.anchor.x) || !Number.isFinite(event.anchor.y))) throw new Error(`${eventPath}.anchor: 坐标必须为有限数字`);
         if (list.name === 'rotateEvents' && !Number.isFinite(event.rotation)) throw new Error(`${eventPath}.rotation: 必须为有限数字`);
         if (!list.vector) return;
         const vector = event[list.vector];
         if (!vector || !Number.isFinite(vector.x) || !Number.isFinite(vector.y)) throw new Error(`${eventPath}.${list.vector}: 分量必须为有限数字`);
-        // A zero scale component makes SafeDiv drop that pivot push and collapses the block.
-        if (list.vector === 'scale' && (vector.x === 0 || vector.y === 0)) throw new Error(`${eventPath}.scale: 分量不得为 0`);
       });
-      // A single event placed after appearTime walks past the end of the list in the game's
-      // interpolation path; either use two events or put the only one at/before appearTime.
-      if (events.length === 1 && events[0].time > block.appearTime) throw new Error(`${path}.${list.name}: 单元素列表的事件时间不得晚于 appearTime`);
     }
   });
 }
