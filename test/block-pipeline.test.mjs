@@ -208,6 +208,57 @@ test('隐藏的块不产生绘制调用', () => {
   assert.ok(passSequence(gl).includes('ActiveBlock#0'), '合成阶段照常执行');
 });
 
+test('可选阶段按文档算法调用，且默认不参与渲染', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  const baseline = passSequence(gl);
+  // The measured LateUpdate covers four stages; the rest live in the unanalysed
+  // RefreshSceneColorCommands, so they must not run unless asked for.
+  for (const key of ['SubtractBlockBlender#0', 'SubtractBlockBlender#1', 'ReadyBlock#0', 'TouchEffect#0', 'DisabledBlock#0']) {
+    assert.ok(!baseline.includes(key), `${key} 不应默认执行`);
+  }
+  // They are still compiled and available.
+  for (const key of ['SubtractBlockBlender', 'ReadyBlock', 'DisabledBlock', 'TouchEffect']) {
+    assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
+  }
+
+  pipeline.blendSubtractMask('subtractBlockRT', 'disabledSubtractBlockRT', 1);
+  pipeline.stampSubtractMask('subtractBlockRT', 'sceneColorRT', 1);
+  pipeline.readyPulse('composedDisabledBlockRT', 1);
+  pipeline.touchEffect('touchBlockRT', 1, []);
+  assert.deepEqual(passSequence(gl).slice(-4),
+    ['SubtractBlockBlender#1', 'SubtractBlockBlender#0', 'ReadyBlock#0', 'TouchEffect#0']);
+});
+
+test('blockCompose 的输入接线与反编译一致', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  // BlockCompose pass 0 reads the raw normal/subtract masks plus the displacement texture;
+  // pass 1 reads the disabled pair. Pass 1 additionally samples _DisabledSubtractBlockRT.xy, which
+  // is what pins format 25 down to a two-channel target.
+  const compose0 = pipeline.programs.get('BlockCompose')[0];
+  const compose1 = pipeline.programs.get('BlockCompose')[1];
+  for (const name of ['_DisplaceMap', '_NormalBlockRT', '_SubtractBlockRT']) assert.ok(compose0.uniforms.has(name), name);
+  for (const name of ['_DisabledNormalBlockRT', '_DisabledSubtractBlockRT']) assert.ok(compose1.uniforms.has(name), name);
+  const body1 = compose1.source.fragment;
+  assert.ok(/SV_Target0\.y\s*=/.test(body1), 'pass 1 应同时写出覆盖度通道 .y');
+  const body0 = compose0.source.fragment;
+  assert.ok(/SV_Target0\s*=/.test(body0) && !/SV_Target0\.y/.test(body0), 'pass 0 只写标量');
+});
+
+test('减法混合器的双阈值常量来自材质资产', () => {
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  pipeline.blendSubtractMask('subtractBlockRT', 'disabledSubtractBlockRT', 1);
+  // 0.1 (a subtract block's mask intensity) sits between the thresholds, 1.0 (normal) above both.
+  const low = 0.09; const high = 0.12;
+  const attribution = (x) => (x >= low ? 1 : 0) + (x >= high ? -1 : -0);
+  assert.equal(attribution(0.1), 1, '减块落在两阈值之间');
+  assert.equal(attribution(1.0), 0, '普通块高于两阈值');
+  assert.equal(attribution(0.05), 0, '空处低于两阈值');
+});
+
 test('减块走 subtract 遮罩层，普通块走 normal 层', () => {
   const gl = stubGl();
   const { pipeline } = makePipeline(gl);

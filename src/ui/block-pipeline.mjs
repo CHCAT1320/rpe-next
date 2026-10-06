@@ -18,7 +18,14 @@
 
 import { blockState, blockTransform, blockShowCoverage } from '../core/block-area.mjs';
 
-/** Render targets, in the game's own names, sizes and filter modes (render.md §RT 尺寸与格式). */
+// Render targets, in the game's own names, sizes and filter modes (render.md §RT 尺寸与格式).
+//
+// The dump reports Unity's serialised format enums (16 and 25) without a mapping, but the vendored
+// fragment stages pin the channel usage down: `BlockCompose` pass 0 writes a single float and both
+// `EdgeMask` pass 1 and `GlowMask` pass 1 write one channel each, so format 16 is R8; pass 1 of
+// `BlockCompose` writes `vec2` and samples `_DisabledSubtractBlockRT.xy`, so format 25 is RG16.
+// This port allocates RGBA8 everywhere instead — a strict superset, so every channel any shader
+// reads exists. `effectRT` keeps its RG16 layout conceptually (`.x` edge, `.y` glow).
 export const RENDER_TARGETS = [
   { key: 'sceneColorRT', divisor: 6, linear: false },
   { key: 'normalBlockRT', divisor: 8, linear: false },
@@ -135,6 +142,7 @@ const MATERIAL_UNIFORMS = {
     _DisplaceBlendIntensity: 0, _SparkHueShiftAmount: 0, _BackgroundPixelScale: 6,
   },
   ReadyBlock: { _ShineColor: [1, 1, 1, 1], _ShineBrightness: 0.12, _ShineSpeed: 37.9 },
+  SubtractBlockBlender: { _ClampThresholdLow: 0.09, _ClampThresholdHigh: 0.12 },
   TouchEffect: { _DisplaceSpeed: 0, _DisplaceStrength: 0, _DisplaceDirection: [0.5, 0.5, 0, 0], _NoiseEvoSpeed: 1, _NoiseDirChangeSpeed: 60, _NoiseDisplaceStrength: 0, _NoiseRadius: 0.5, _NoiseSmoothness: 0.5, _SDFCellSize: 1, _SDFSmoothness: 0.5, _SDFFalloff: 0.5, _SDFMoveSpeed: 9.3 },
 };
 
@@ -172,6 +180,14 @@ export class BlockPipeline {
     this.textures = new Map();
     this.disabled = false;
     this.lastError = '';
+    // Stages whose invocation site the reverse-engineering dump never located. The measured
+    // `BlockRender.LateUpdate` lists only four stages (dilate texel size, BlockCompose pass 0,
+    // RenderEffects, BlockCompose pass 1) and `DisabledBlock`, `ReadyBlock`, `TouchEffect` and the
+    // three `SubtractBlockPostProcessor`s are none of them — they must live inside
+    // `RefreshSceneColorCommands`, which was not analysed. The passes below are implemented and
+    // tested against their documented algorithms, but left unwired by default: guessing a call
+    // site would change the rendered image on a hunch.
+    this.optionalStages = false;
   }
 
   /** Wire up WebGL and compile the vendored programs. Safe to call repeatedly. */
@@ -565,6 +581,80 @@ export class BlockPipeline {
     const final = this.use('GlowMask', 1);
     this.applyMaterial(final, 'GlowMask', seconds);
     this.fullscreen(final, { textures: { _MainTex: this.targets.get(from) } });
+  }
+
+  /**
+   * `Unlit/SubtractBlockBlender` pass 1 — the documented dual-threshold attribution with a
+   * smoothstep coverage lift at mask edges, written as `vec2(v, t.y · v · 10)`.
+   *
+   * Pass 0 of the same material is the scalar-only variant (`st` alone) that the
+   * `SubtractBlockPostProcessor` uses when stamping the subtract region into `sceneColorRT`.
+   */
+  blendSubtractMask(sourceMask, dest, seconds = 0) {
+    const gl = this.gl;
+    this.bindTarget(dest);
+    gl.enable(gl.BLEND);
+    const program = this.use('SubtractBlockBlender', 1);
+    this.applyMaterial(program, 'SubtractBlockBlender', seconds);
+    this.fullscreen(program, { textures: { _MainTex: this.targets.get(sourceMask) } });
+  }
+
+  /** `Unlit/SubtractBlockBlender` pass 0 — the scalar attribution flag, for the scene stamp. */
+  stampSubtractMask(sourceMask, dest, seconds = 0) {
+    const gl = this.gl;
+    this.bindTarget(dest);
+    gl.enable(gl.BLEND);
+    const program = this.use('SubtractBlockBlender', 0);
+    this.applyMaterial(program, 'SubtractBlockBlender', seconds);
+    this.fullscreen(program, { textures: { _MainTex: this.targets.get(sourceMask) } });
+  }
+
+  /**
+   * `Unlit/ReadyBlock` — the breathing pulse. Reads the pure-ready masks (`.x` normal, `.y`
+   * subtract), discards outside the block when `abs(m)·c <= 1e-4`, and writes
+   * `vec4(vec3(a)·pulse·tint, a)` with `pulse = sin(_Time.y · _ShineSpeed) · 0.5 + 1`.
+   */
+  readyPulse(dest, seconds) {
+    const gl = this.gl;
+    this.bindTarget(dest);
+    gl.enable(gl.BLEND);
+    const program = this.use('ReadyBlock', 0);
+    this.applyMaterial(program, 'ReadyBlock', seconds);
+    this.fullscreen(program, {
+      textures: {
+        _DisabledNormalBlockRT: this.targets.get('disabledNormalReadyBlockRT'),
+        _DisabledSubtractBlockRT: this.targets.get('disabledSubtractReadyBlockRT'),
+        _ComposeRT: this.targets.get('composedEnabledBlockRT'),
+      },
+    });
+  }
+
+  /**
+   * `Unlit/TouchEffect` — the touch layer.
+   *
+   * `ActiveBlock` samples it as `_TouchHoverRT` and reads `_TouchPos[10]` / `_TouchPosCount`. An
+   * editor preview has no touch input, so the pass is exercised with `count = 0` and contributes
+   * nothing; the shader is compiled and wired but has no visible effect without pointer data.
+   */
+  touchEffect(dest, seconds, positions = []) {
+    const gl = this.gl;
+    this.bindTarget(dest);
+    gl.enable(gl.BLEND);
+    const program = this.use('TouchEffect', 0);
+    this.applyMaterial(program, 'TouchEffect', seconds);
+    const count = program.uniforms.get('_TouchPosCount');
+    if (count != null) gl.uniform1i(count, positions.length);
+    for (const [index, position] of positions.slice(0, 10).entries()) {
+      const location = program.uniforms.get(`_TouchPos[${index}]`);
+      if (location != null) gl.uniform2f(location, position.x, position.y);
+    }
+    this.fullscreen(program, {
+      textures: {
+        _DisplaceMap: this.textures.get('_DisplaceMap'),
+        _TouchHoverRT: this.targets.get('touchBlockRT'),
+        _NoiseMap: this.textures.get('_NoiseMap'),
+      },
+    });
   }
 }
 
