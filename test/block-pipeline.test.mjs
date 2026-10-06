@@ -159,8 +159,7 @@ test('13 个 program 全部编译，按材质命名', () => {
   const { pipeline } = makePipeline(stubGl());
   assert.equal(pipeline.disabled, false, pipeline.lastError);
   const total = [...pipeline.programs.values()].reduce((sum, programs) => sum + programs.length, 0);
-  // 13 from the game, plus this port's own passthrough.
-  assert.equal(total, 14);
+  assert.equal(total, 13);
   for (const key of ['BlockSprite', 'SubtractBlockBlender', 'BlockCompose', 'EdgeMask', 'GlowMask', 'DisabledBlock', 'ReadyBlock', 'ActiveBlock', 'TouchEffect']) {
     assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
   }
@@ -180,7 +179,6 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
     'GlowMask#1',                     // final `.y`-only write preserves the edge
     'BlockCompose#1',
     'SubtractBlockBlender#1',         // the ready-subtract mask is post-processed too
-    'Passthrough#0',                  // fxRenderList: seed the canvas with the scene
     'DisabledBlock#0',
     'ReadyBlock#0',
     'ActiveBlock#0',
@@ -193,7 +191,7 @@ test('render 按 LateUpdate 的顺序跑完整条管线', () => {
   assert.equal(sequence[blendAt + 2], 'BlockCompose#0');
   const compose1 = sequence.indexOf('BlockCompose#1');
   assert.equal(sequence[compose1 + 1], 'SubtractBlockBlender#1', '预备减块遮罩也要后处理');
-  assert.equal(sequence[compose1 + 2], 'Passthrough#0', 'fxRenderList 通道在合成之前');
+  assert.equal(sequence[compose1 + 2], 'DisabledBlock#0', 'fxRenderList 通道在合成之前');
   assert.equal(sequence.at(-1), 'ActiveBlock#0');
 });
 
@@ -258,7 +256,9 @@ test('fxRenderList 通道按文档算法调用，且默认开启', () => {
   // On by default: ActiveBlock cannot draw a disabled block, so these are required, not optional.
   assert.ok(passSequence(gl).includes('DisabledBlock#0'), '禁用态填充默认执行');
   assert.ok(passSequence(gl).includes('ReadyBlock#0'));
-  assert.ok(passSequence(gl).includes('Passthrough#0'), '先把场景铺到画布上');
+  // The scene is left in `sceneColorRT` for `_SceneColor` sampling rather than blitted onto the
+  // block canvas, which is composited over the 2D background and would otherwise double it.
+  assert.ok(!passSequence(gl).some((entry) => entry.startsWith('Passthrough')), '不应把场景再铺一遍');
   for (const key of ['SubtractBlockBlender', 'ReadyBlock', 'DisabledBlock', 'TouchEffect']) {
     assert.ok(pipeline.programs.has(key), `缺少 ${key}`);
   }
@@ -278,7 +278,7 @@ test('fxRenderList 通道按文档算法调用，且默认开启', () => {
   const second = makePipeline(gl2);
   second.pipeline.sceneEffects = true;
   second.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
-  assert.deepEqual(passSequence(gl2).slice(-4), ['Passthrough#0', 'DisabledBlock#0', 'ReadyBlock#0', 'ActiveBlock#0']);
+  assert.deepEqual(passSequence(gl2).slice(-3), ['DisabledBlock#0', 'ReadyBlock#0', 'ActiveBlock#0']);
   // Turning it off leaves the composite intact, just without the disabled fill and pulse.
   const gl3 = stubGl();
   const third = makePipeline(gl3);
@@ -299,16 +299,14 @@ test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () =>
   let uploaded = 0;
   globalThis.document ??= { createElement: () => ({ width: 0, height: 0, getContext: () => ({ imageSmoothingEnabled: true, clearRect() {}, drawImage() { uploaded++; } }) }) };
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900, scene: { width: 1600, height: 900 } });
-  // Twice per frame: once up front, and again after the fxRenderList passes have drawn into the
-  // camera target, because `RefreshSceneColorCommands` copies it *after* they run.
-  assert.equal(uploaded, 2, '场景应被拷入 sceneColorRT（合成前 + fx 通道后）');
+  // Once per frame, before the composite. The fxRenderList passes add onto a transparent block
+  // canvas rather than re-copying the scene, so there is nothing to refresh afterwards.
+  assert.equal(uploaded, 1, '场景应被拷入 sceneColorRT');
   assert.equal(pipeline.targets.get('sceneColorRT').width, Math.floor(1600 / 6));
   assert.equal(pipeline.targets.get('sceneColorRT').height, Math.floor(900 / 6));
-  // Without a scene the up-front copy is skipped rather than failing the frame, but the post-fx
-  // refresh still runs: the fxRenderList passes have drawn into the camera target by then, so it has
-  // to be re-copied regardless of where the scene originally came from.
+  // Without a scene the copy is skipped rather than failing the frame.
   assert.equal(pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 }), true);
-  assert.equal(uploaded, 3);
+  assert.equal(uploaded, 1);
 });
 
 

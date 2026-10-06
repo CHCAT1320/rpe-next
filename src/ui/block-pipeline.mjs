@@ -70,8 +70,6 @@ const PASS_STATE = {
   // premultiply, which is why filled regions add their full rgb and the background is attenuated.
   ActiveBlock: { blend: ['ONE', 'ONE_MINUS_SRC_ALPHA'], mask: ['R', 'G', 'B', 'A'] },
   TouchEffect: { blend: ['ONE', 'ONE'], mask: ['R', 'G', 'B', 'A'] },
-  // Port-internal, not a game shader: stands in for the `fxRenderList` canvases.
-  Passthrough: { blend: ['ONE', 'ZERO'], mask: ['R', 'G', 'B', 'A'] },
 };
 
 const BLEND_FACTORS = { ZERO: 0, ONE: 1, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303 };
@@ -239,8 +237,6 @@ export class BlockPipeline {
       try { this.programs.set(key, programs.map((program, index) => this.buildProgram(key, index, program))); }
       catch (error) { failures.push(String((error && error.message) || error)); }
     }
-    try { this.programs.set('Passthrough', [this.buildProgram('Passthrough', 0, { vertex: PASSTHROUGH_VERTEX, fragment: PASSTHROUGH_FRAGMENT })]); }
-    catch (error) { failures.push(String((error && error.message) || error)); }
     if (failures.length) {
       this.disabled = true;
       this.lastError = failures.join(' | ');
@@ -658,7 +654,11 @@ export class BlockPipeline {
     // ActiveBlock: the single full-screen composite that produces the visible image. `Start` binds
     // its `_Disabled*RT` samplers to the *pure ready* masks, unlike `blockComposeMaterial`, which
     // gets the merged ones under the same names.
-    this.beginPass(null);
+    // ActiveBlock composites over what is already in the camera target — the game blits it with
+    // `Blit(None, CameraTarget, activeBlockMaterial)`, which does not clear — so this pass must not
+    // clear either, or the fxRenderList output underneath is wiped before it can show.
+    this.bindTarget(null);
+    gl.enable(gl.BLEND);
     program = this.use('ActiveBlock', 0);
     this.applyMaterial(program, 'ActiveBlock', now);
     this.applyTiling(program, 'ActiveBlock');
@@ -681,6 +681,45 @@ export class BlockPipeline {
       },
     });
     return true;
+  }
+
+  /**
+   * Readback summary of every render target and the final canvas.
+   *
+   * `readPixels` stalls the pipeline, so this is a manual diagnostic for when the composite comes
+   * out blank or wrong, not part of the frame. It answers "did the masks get written at all", which
+   * is the first fork when nothing appears: an empty `normalBlockRT` means the quads never
+   * rasterised, an empty `composedEnabledBlockRT` means the compose pass found nothing, and a
+   * populated `effectRT` with an empty canvas means the final composite discarded everywhere.
+   */
+  diagnose(now = 0) {
+    const gl = this.gl;
+    const report = { now, disabled: this.disabled, lastError: this.lastError, targets: {} };
+    for (const [key, target] of this.targets) {
+      this.bindTarget(key);
+      const pixels = new Uint8Array(target.width * target.height * 4);
+      gl.readPixels(0, 0, target.width, target.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      let touched = 0;
+      let sum = 0;
+      for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index] || pixels[index + 1] || pixels[index + 2] || pixels[index + 3]) touched += 1;
+        sum += pixels[index] + pixels[index + 1] + pixels[index + 2];
+      }
+      const count = target.width * target.height;
+      report.targets[key] = { size: `${target.width}x${target.height}`, touchedRatio: Number((touched / count).toFixed(4)), meanRgb: Number((sum / (count * 3)).toFixed(2)) };
+    }
+    this.bindTarget(null);
+    const total = this.canvas.width * this.canvas.height;
+    const out = new Uint8Array(total * 4);
+    gl.readPixels(0, 0, this.canvas.width, this.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    let lit = 0;
+    let sum = 0;
+    for (let index = 0; index < out.length; index += 4) {
+      if (out[index + 3] > 8) lit += 1;
+      sum += out[index] + out[index + 1] + out[index + 2];
+    }
+    report.canvas = { size: `${this.canvas.width}x${this.canvas.height}`, litRatio: Number((lit / total).toFixed(4)), meanRgb: Number((sum / (total * 3)).toFixed(2)) };
+    return report;
   }
 
   /** Bind a target and clear it, ready for a `One, Zero` (overwriting) pass. */
@@ -840,13 +879,13 @@ export class BlockPipeline {
    * and the refreshed `sceneColorRT` consequently contains them, which is what the ordering implies.
    */
   renderSceneEffects(seconds) {
+    // Start from transparent. The scene stays in `sceneColorRT` for `_SceneColor` sampling and the
+    // 2D preview draws the real background underneath; blitting the scene here as well would double
+    // it, because this canvas is composited over that same background. Both passes only add, so they
+    // do not need the scene beneath them.
     this.beginPass(null);
-    let program = this.use('Passthrough', 0);
-    this.fullscreen(program, { textures: { _MainTex: this.targets.get('sceneColorRT') } });
     this.disabledBlock(null, seconds);
     this.readyPulse(null, seconds);
-    // `RefreshSceneColorCommands` copies the camera target *after* these have drawn.
-    this.uploadScene(this.canvas);
   }
 
   /**
@@ -896,31 +935,6 @@ export const FULLSCREEN_PROJECTION = new Float32Array([
   0, 0, 1, 0,
   -1, -1, 0, 1,
 ]);
-/** Vertex stage for this port's own passthrough, which has no counterpart in the dump. */
-const PASSTHROUGH_VERTEX = `#version 300 es
-precision highp float;
-in highp vec4 in_POSITION0;
-in highp vec2 in_TEXCOORD0;
-uniform mat4 u_projection;
-out highp vec2 vs_TEXCOORD0;
-void main() { vs_TEXCOORD0 = in_TEXCOORD0; gl_Position = u_projection * in_POSITION0; }
-`;
-
-/**
- * Straight copy of a bound texture, used to seed the canvas with the scene before the additive
- * screen-space effects draw over it.
- *
- * `BlockRender.Start` stretches every canvas in `fxRenderList` to the full screen and points it at
- * the main camera, which is how the screen-space effect materials reach the camera target. This port
- * has no canvases, so it composites them itself and needs a way to put the scene down first.
- */
-const PASSTHROUGH_FRAGMENT = `#version 300 es
-precision highp float;
-in highp vec2 vs_TEXCOORD0;
-uniform sampler2D _MainTex;
-layout(location = 0) out mediump vec4 SV_Target0;
-void main() { SV_Target0 = texture(_MainTex, vs_TEXCOORD0); }
-`;
 
 /**
  * Column-major MVP for one block quad.
