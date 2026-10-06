@@ -438,7 +438,7 @@ element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarke
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockOptionalStages === true, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
@@ -916,6 +916,7 @@ element('#mute-current-line').addEventListener('click', () => {
 });
 element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
 element('#block-pipeline').addEventListener('change', event => { setBlockRenderer(event.target.checked ? 'block' : 'canvas'); persistEditor(); invalidate(); });
+element('#block-optional').addEventListener('change', event => { setBlockOptionalStages(event.target.checked); persistEditor(); invalidate(); });
 
 /**
  * Choose between the ported GL pipeline and the Canvas2D approximation.
@@ -927,6 +928,20 @@ function setBlockRenderer(mode) {
   preview.blockRenderer = realtimePreview.blockRenderer = mode;
   element('#block-pipeline').checked = mode === 'block';
   if (mode === 'block') { preview.requestBlockPipeline(); realtimePreview.requestBlockPipeline(); }
+}
+
+/**
+ * Toggle the stages whose invocation the reverse-engineering dump never located.
+ *
+ * `DisabledBlock` and `ReadyBlock` blend additively, so this only ever adds to the image; it exists
+ * so the open question — whether `ActiveBlock` already draws the disabled look and the ready pulse
+ * itself — can be settled by eye.
+ */
+function setBlockOptionalStages(enabled) {
+  preview.blockOptionalStages = realtimePreview.blockOptionalStages = enabled;
+  element('#block-optional').checked = enabled;
+  if (preview.blockPipeline) preview.blockPipeline.optionalStages = enabled;
+  if (realtimePreview.blockPipeline) realtimePreview.blockPipeline.optionalStages = enabled;
 }
 element('#realtime-alpha').addEventListener('input', event => { realtimePreview.opacity = Number(event.target.value); persistEditor(); invalidate(); });
 for (const selector of ['#loop-start', '#loop-end', '#loop-enabled']) element(selector).addEventListener('change', () => {
@@ -1382,6 +1397,7 @@ function applyPreferences(next) {
   element('#y-scale-slider').value = timeline.scale;
   realtimePreview.visible = editorPreferences.realtime ?? true;
   setBlockRenderer(editorPreferences.blockPipeline === false ? 'canvas' : 'block');
+  setBlockOptionalStages(editorPreferences.blockOptional === true);
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
   realtimePreview.opacity = Number(element('#realtime-alpha').value);

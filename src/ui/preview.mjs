@@ -276,6 +276,7 @@ export class Preview {
   drawBlocksPipeline(context, seconds, viewport) {
     const pipeline = this.blockPipeline;
     if (!pipeline || pipeline.disabled) return false;
+    pipeline.optionalStages = this.blockOptionalStages === true;
     try {
       const rendered = pipeline.render({
         blocks: this.chart?.blockAreas ?? [], now: seconds,

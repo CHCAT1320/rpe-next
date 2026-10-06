@@ -240,6 +240,17 @@ test('可选阶段按文档算法调用，且默认不参与渲染', () => {
   // Pass selection is explicit: 0 for the enabled scalar attribution, 1 for the vec2 form.
   pipeline.blendSubtractMask('subtractBlockRT', 'scratchA', 1, 0);
   assert.equal(passSequence(gl).at(-1), 'SubtractBlockBlender#0');
+
+  // The switchable hypothesis path adds the disabled fill and the ready pulse over the final image.
+  const gl2 = stubGl();
+  const second = makePipeline(gl2);
+  second.pipeline.optionalStages = true;
+  second.pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
+  assert.deepEqual(passSequence(gl2).slice(-3), ['ActiveBlock#0', 'DisabledBlock#0', 'ReadyBlock#0']);
+  // ...and `Start` binds both of their `_ComposeRT` samplers to the disabled compose, not the
+  // enabled one, despite the shared sampler name.
+  assert.equal(second.pipeline.programs.get('DisabledBlock')[0].uniforms.has('_ComposeRT'), true);
+  assert.equal(second.pipeline.programs.get('ReadyBlock')[0].uniforms.has('_ComposeRT'), true);
 });
 
 test('RefreshSceneColorCommands：场景先拷进 sceneColorRT 再合成', () => {

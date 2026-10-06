@@ -583,6 +583,7 @@ export class BlockPipeline {
         _SceneColor: this.targets.get('sceneColorRT'),
       },
     });
+    if (this.optionalStages) this.renderOptionalStages(now);
     return true;
   }
 
@@ -684,11 +685,52 @@ export class BlockPipeline {
     this.applyMaterial(program, 'ReadyBlock', seconds);
     this.fullscreen(program, {
       textures: {
+        // `Start` binds blockReadyMaterial's samplers to the pure-ready masks and to
+        // `composedDisabledBlockRT` — not to the enabled compose, despite the shared name.
         _DisabledNormalBlockRT: this.targets.get('disabledNormalReadyBlockRT'),
         _DisabledSubtractBlockRT: this.targets.get('disabledSubtractReadyBlockRT'),
-        _ComposeRT: this.targets.get('composedEnabledBlockRT'),
+        _ComposeRT: this.targets.get('composedDisabledBlockRT'),
       },
     });
+  }
+
+  /**
+   * `Unlit/DisabledBlock` — the flat disabled fill plus spark.
+   *
+   * `Start` binds `_ComposeRT` to `composedDisabledBlockRT`, so this must run after compose pass 1.
+   */
+  disabledBlock(dest, seconds) {
+    const gl = this.gl;
+    this.bindTarget(dest);
+    gl.enable(gl.BLEND);
+    const program = this.use('DisabledBlock', 0);
+    this.applyMaterial(program, 'DisabledBlock', seconds);
+    this.applyTiling(program, 'DisabledBlock');
+    this.fullscreen(program, {
+      textures: {
+        _ComposeRT: this.targets.get('composedDisabledBlockRT'),
+        _DisplaceMap: this.textures.get('_DisplaceMap'),
+        _SparkMap: this.textures.get('_SparkMap'),
+      },
+    });
+  }
+
+  /**
+   * The three stages whose invocation the dump never located, as one switchable extra pass.
+   *
+   * `DisabledBlock` and `ReadyBlock` both blend additively (`One, One` and `SrcAlpha, One`), so
+   * running them over the finished image adds the disabled fill and the ready breathing pulse
+   * without touching any mask channel. `TouchEffect` needs pointer data an editor has none of and
+   * contributes nothing here.
+   *
+   * Off by default, and deliberately so: `ActiveBlock`'s own branches already cover the active,
+   * ready and touch looks, so this is only right if `ActiveBlock` leaves the *disabled* look to
+   * `DisabledBlock` — the same ambiguity the dump flags around whether the ready pulse is drawn
+   * twice. It exists so the question can be settled by eye rather than argued from the shaders.
+   */
+  renderOptionalStages(seconds) {
+    this.disabledBlock(null, seconds);
+    this.readyPulse(null, seconds);
   }
 
   /**
