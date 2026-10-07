@@ -1,4 +1,61 @@
 import { defaultShaderUniform } from '../core/shader.ts';
+import type { PreviewViewport } from '../core/editor-display.ts';
+
+/**
+ * The clip rectangle a shader pass samples, normalised to 0..1 over the source canvas.
+ *
+ * `min`/`max` are plain number pairs rather than `PreviewViewport`, which is the pixel-space input
+ * `shaderViewport` converts from.
+ */
+export interface ShaderRect {
+  min: number[];
+  max: number[];
+}
+
+/** A parameter value as it can arrive from a chart: a scalar, a vector, or a name this module ignores. */
+type UniformValue = unknown;
+
+/**
+ * The canvas surface the pipeline binds to.
+ *
+ * Declared as `HTMLCanvasElement` rather than a narrower shape because the pipeline needs the real
+ * 2D/WebGL drawing surface for `getContext`, `style` and `width`/`height`; the geometry-only reads
+ * that the test doubles supply go through the `CanvasMetrics` boundary below.
+ */
+type ShaderCanvas = HTMLCanvasElement;
+
+/**
+ * The two reads `render` makes of the source canvas' on-page geometry.
+ *
+ * The test doubles pass a `{ width, height }` stand-in, so the boundary is kept structural and the
+ * declared `getBoundingClientRect` is optional to match the original's own `?.` call.
+ */
+interface CanvasMetrics {
+  getBoundingClientRect?: () => { width: number; height: number };
+}
+
+/** A canvas the pipeline can also read its on-page rectangle from. */
+type MeasuredCanvas = ShaderCanvas & CanvasMetrics;
+
+/** One rendering pass: the shader to run and the parameters the chart supplied for it. */
+export interface ShaderPass {
+  shader: string;
+  values: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/**
+ * A compiled program plus everything `setUniforms` needs to bind it.
+ *
+ * `uniforms` and `types` are `Map`s because the pipeline iterates them directly: `Object.entries`
+ * over a `Map` yields nothing, so the container type is load-bearing here.
+ */
+export interface ShaderProgram {
+  program: WebGLProgram;
+  uniforms: Map<string, WebGLUniformLocation | null>;
+  types: Map<string, number>;
+  defaults: Record<string, number | number[]>;
+}
 
 const VERTEX_SOURCE = `
 attribute vec2 a_position;
@@ -11,7 +68,7 @@ void main() {
   v_fragmentColor = vec4(1.0);
 }`;
 
-export function fragmentSource(source, webgl2 = false) {
+export function fragmentSource(source: string, webgl2 = false): string {
   const portable = /uniform\s+sampler2D\s+screenTexture\b/.test(source);
   const origin = portable ? 'vec2(0.0)' : 'vec2(0.0, 0.0333)';
   const size = portable ? 'vec2(1.0)' : 'vec2(0.7031, 1.0 / 1.2)';
@@ -53,17 +110,17 @@ void main() {
     .replace(/texture2D\b/g, 'texture').replace('uniform sampler2D u_texture;', 'out vec4 rpeFragColor;\nuniform sampler2D u_texture;') : adapted;
 }
 
-export function shaderViewport(view, width, height) {
+export function shaderViewport(view: PreviewViewport, width: number, height: number): ShaderRect {
   return { min: [view.left / width, 1 - (view.top + view.height) / height], max: [(view.left + view.width) / width, 1 - view.top / height] };
 }
 
-export function shaderDefaults(source) {
-  return Object.fromEntries([...source.matchAll(/uniform\s+\w+\s+(\w+)\s*;[^\r\n%]*%([^%\r\n]+)%/g)].map(([, name, value]) => {
+export function shaderDefaults(source: string): Record<string, number | number[]> {
+  return Object.fromEntries([...source.matchAll(/uniform\s+\w+\s+(\w+)\s*;[^\r\n%]*%([^%\r\n]+)%/g)].map(([, name, value]): [string, number | number[]] => {
     const numbers = value.split(',').map(Number); return [name, numbers.length === 1 ? numbers[0] : numbers];
   }).filter(([, value]) => (Array.isArray(value) ? value : [value]).every(Number.isFinite)));
 }
 
-function normaliseUniformValue(name, value) {
+function normaliseUniformValue(name: string, value: UniformValue): UniformValue {
   if (!Array.isArray(value)) return value;
   const result = value.map(Number);
   if (result.length === 4 && (name === 'color' || name.endsWith('Color') || result.some(entry => Math.abs(entry) > 1))) {
@@ -73,9 +130,38 @@ function normaliseUniformValue(name, value) {
 }
 
 export class ShaderPipeline {
-  constructor(invalidate = () => {}) { this.invalidate = invalidate; this.gl = null; this.canvas = null; this.programs = new Map(); this.sourceTexture = null; this.pingTexture = null; this.pongTexture = null; this.framebuffer = null; this.buffer = null; this.disabled = false; }
+  /**
+   * Every field is declared explicitly: the GL handles start as `null` until `ensure` runs, and the
+   * programs/textures are keyed collections, so inference from the constructor alone would narrow
+   * each one to the type of its first assignment and break every later use.
+   */
+  /** Called whenever the pipeline needs a repaint; `preview.ts` installs an invalidate callback. */
+  invalidate: () => void;
+  /** The context in use, `null` before `ensure` runs or when WebGL is unavailable. */
+  gl: WebGLRenderingContext | null;
+  /** The canvas `gl` was created from, used to detect a swap without recreating the context. */
+  canvas: ShaderCanvas | null;
+  /** GLSL source to its compiled program; the source string is the cache key. */
+  programs: Map<string, ShaderProgram>;
+  sourceTexture: WebGLTexture | null;
+  pingTexture: WebGLTexture | null;
+  pongTexture: WebGLTexture | null;
+  framebuffer: WebGLFramebuffer | null;
+  /** The full-screen quad's vertex buffer. */
+  buffer: WebGLBuffer | null;
+  /** Set when the context could not be created; the caller falls back to the 2D path. */
+  disabled: boolean;
+  /** True when the context came from `getContext('webgl2')`, which needs the GLSL 300 sources. */
+  webgl2: boolean;
+  /** The last shader/program info log, read back by the regression harness. */
+  lastError: string | undefined;
+  /** The size the ping/pong textures currently hold, so they are only reallocated on a change. */
+  textureWidth: number | undefined;
+  textureHeight: number | undefined;
 
-  ensure(canvas) {
+  constructor(invalidate: () => void = () => {}) { this.invalidate = invalidate; this.gl = null; this.canvas = null; this.programs = new Map(); this.sourceTexture = null; this.pingTexture = null; this.pongTexture = null; this.framebuffer = null; this.buffer = null; this.disabled = false; }
+
+  ensure(canvas: ShaderCanvas): boolean {
     if (this.canvas === canvas && this.gl) return true;
     this.canvas = canvas;
     try {
@@ -93,24 +179,24 @@ export class ShaderPipeline {
     return true;
   }
 
-  configureTexture(texture) {
+  configureTexture(texture: WebGLTexture | null): void {
     const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, texture); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
-  resizeTexture(texture, width, height) {
+  resizeTexture(texture: WebGLTexture | null, width: number, height: number): void {
     const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
-  compile(name, source) {
+  compile(name: string, source: string): ShaderProgram | null {
     const key = source;
-    if (this.programs.has(key)) return this.programs.get(key);
-    const gl = this.gl; const vertex = gl.createShader(gl.VERTEX_SHADER); const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+    if (this.programs.has(key)) return this.programs.get(key)!;
+    const gl = this.gl!; const vertex = gl.createShader(gl.VERTEX_SHADER)!; const fragment = gl.createShader(gl.FRAGMENT_SHADER)!;
     gl.shaderSource(vertex, this.webgl2 ? '#version 300 es\n' + VERTEX_SOURCE.replace(/attribute\b/g, 'in').replace(/varying\b/g, 'out') : VERTEX_SOURCE); gl.compileShader(vertex);
     gl.shaderSource(fragment, fragmentSource(source, this.webgl2)); gl.compileShader(fragment);
     if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS) || !gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) { this.lastError = gl.getShaderInfoLog(vertex) + gl.getShaderInfoLog(fragment); gl.deleteShader(vertex); gl.deleteShader(fragment); return null; }
     const program = gl.createProgram(); gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program); gl.deleteShader(vertex); gl.deleteShader(fragment);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { this.lastError = gl.getProgramInfoLog(program); gl.deleteProgram(program); return null; }
-    const uniforms = new Map(); const types = new Map();
+    const uniforms: Map<string, WebGLUniformLocation | null> = new Map(); const types: Map<string, number> = new Map();
     for (let index = 0; index < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); index++) { const info = gl.getActiveUniform(program, index); const name = info.name.replace(/\[0\]$/, ''); uniforms.set(name, gl.getUniformLocation(program, info.name)); types.set(name, info.type); }
     const defaults = shaderDefaults(source);
     const result = { program, uniforms, types, defaults }; this.programs.set(key, result); return result;
