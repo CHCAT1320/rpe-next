@@ -3,13 +3,39 @@ import { easing, bezier } from '../core/easing.ts';
 import { EVENT_TYPES } from '../core/chart.ts';
 import { snapTime } from '../core/edit-grid.ts';
 import { eventList, eventKey, selectedEvents, commitEventLists } from './event-commands.ts';
+import type { EventEditSession } from './event-commands.ts';
+import type { ChartEvent } from '../core/types.ts';
 
-const cutTypes = new Set([...EVENT_TYPES, 'scaleXEvents', 'scaleYEvents', 'colorEvents']);
-export function canCutEvent(type, event) {
+/** The tracks the cut tool understands: every base track plus the numeric extended ones. */
+const cutTypes = new Set<string>([...EVENT_TYPES, 'scaleXEvents', 'scaleYEvents', 'colorEvents']);
+
+/** What {@link cutEventParts} needs from a tempo map; matches `TempoMap`. */
+interface CutTempo {
+  seconds(beat: number, factor?: number): number;
+  beat(seconds: number, factor?: number): number;
+}
+
+/** Options for {@link cutEventParts}; `tempo` is omitted at call sites that work in raw beats. */
+export interface CutOptions {
+  division?: number;
+  density?: number;
+  beat?: number;
+  tempo?: CutTempo;
+  factor?: number;
+}
+
+/** How many events a cut or stick pass rewrote, generated and left alone. */
+export interface CutResult {
+  changed: number;
+  generated: number;
+  skipped: number;
+}
+
+export function canCutEvent(type: string, event: ChartEvent): boolean {
   return cutTypes.has(type) && beatValue(event.endTime) > beatValue(event.startTime);
 }
 
-export function cutEventParts(type, event, { division = 4, density = 4, beat, tempo, factor = 1 } = {}) {
+export function cutEventParts(type: string, event: ChartEvent, { division = 4, density = 4, beat, tempo, factor = 1 }: CutOptions = {}): ChartEvent[] | null {
   if (!canCutEvent(type, event)) return null;
   if (!Number.isFinite(density) || density <= 0 || !Number.isFinite(division) || division < 1) throw new Error('切割密度和横线细分必须大于零');
   const subdivisions = Math.max(1, Math.trunc(division * density));
@@ -26,21 +52,29 @@ export function cutEventParts(type, event, { division = 4, density = 4, beat, te
     if (point > start + 1e-9) cuts.push(point);
   }
   cuts.push(end);
-  const sample = position => {
+  // Samples the event's own interpolation. Colour events interpolate per channel, numeric tracks
+  // interpolate once; `alphaEvents` truncates because alpha is stored as an integer.
+  const sample = (position: number): EventValue => {
     const progress = (position - start) / (end - start);
     const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1);
-    if (Array.isArray(event.start)) return event.start.map((value, index) => Math.trunc(value + (event.end[index] - value) * amount));
-    const value = event.start + (event.end - event.start) * amount;
+    if (Array.isArray(event.start)) {
+      const from = event.start as number[]; const to = event.end as number[];
+      // Channel-wise sample of a colour event; `cutTypes` only admits three-channel tracks here.
+      return from.map((value, index) => Math.trunc(value + (to[index] - value) * amount)) as Color;
+    }
+    const value = (event.start as number) + ((event.end as number) - (event.start as number)) * amount;
     return type === 'alphaEvents' ? Math.trunc(value) : value;
   };
-  return cuts.slice(0, -1).map((point, index) => ({ ...structuredClone(event), startTime: fromNumber(point), endTime: fromNumber(cuts[index + 1]),
+  return cuts.slice(0, -1).map((point, index): ChartEvent => ({ ...structuredClone(event), startTime: fromNumber(point), endTime: fromNumber(cuts[index + 1]),
     start: sample(point), end: sample(cuts[index + 1]), easingType: 1, easingLeft: 0, easingRight: 1, bezier: 0, bezierPoints: [0, 0, 1, 1], linkgroup: 0, inst: 0 }));
 }
 
-export function cutSelectedEvents(session, options = {}) {
-  const updates = new Map(); const selection = new Set(); let changed = 0; let generated = 0; let skipped = 0;
+export function cutSelectedEvents(session: EventEditSession, options: CutOptions = {}): CutResult {
+  const updates = new Map(); const selection = new Set<string>(); let changed = 0; let generated = 0; let skipped = 0;
   for (const type of new Set(selectedEvents(session).map(entry => entry.type))) {
-    const events = [];
+    // Keeps each produced piece paired with the selection flag of the event it came from, so the
+    // replacement segments of a selected event stay selected after the sort below.
+    const events: { item: ChartEvent; selected: boolean }[] = [];
     eventList(session, type).forEach((event, index) => {
       const selected = session.eventSelection.has(eventKey(type, index));
       const parts = selected ? cutEventParts(type, event, options) : null;
@@ -57,7 +91,8 @@ export function cutSelectedEvents(session, options = {}) {
   return { changed, generated, skipped };
 }
 
-export function stickSelectedEvents(session) {
+/** Snaps each selected event's start value onto the end value of the event before it. */
+export function stickSelectedEvents(session: EventEditSession): { changed: number; skipped: number } {
   const updates = new Map(); let changed = 0; let skipped = 0;
   for (const type of new Set(selectedEvents(session).map(entry => entry.type))) {
     const events = [...eventList(session, type)];

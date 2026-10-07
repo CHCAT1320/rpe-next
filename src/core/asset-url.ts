@@ -7,6 +7,6 @@
 // directly), where `import.meta.env` does not exist and the domain root is the correct fallback.
 const base = import.meta.env?.BASE_URL ?? '/';
 
-export function assetUrl(path) {
+export function assetUrl(path: string): string {
   return `${base}assets/${path}`;
 }

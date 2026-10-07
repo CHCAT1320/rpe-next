@@ -1,14 +1,32 @@
-export function createSettingsPanel() {
+/**
+ * One row of a settings group.
+ *
+ * Tuples rather than objects because the group tables below are dense and positional; the trailing
+ * three entries are the HTML `min`/`max`/`step` attributes and are omitted for `checkbox` rows,
+ * which have no range.
+ */
+export type SettingsFieldType = 'range' | 'checkbox' | 'number';
+export type SettingsField = [
+  id: string,
+  text: string,
+  type: SettingsFieldType,
+  value: number | boolean,
+  minimum?: number,
+  maximum?: number,
+  step?: number,
+];
+
+export function createSettingsPanel(): HTMLDialogElement {
   const dialog = document.createElement('dialog'); dialog.id = 'settings-modal';
   const title = document.createElement('h2'); title.textContent = '设置'; dialog.append(title);
   const body = document.createElement('div'); body.className = 'settings-body'; dialog.append(body);
-  const group = (heading, fields) => {
+  const group = (heading: string, fields: SettingsField[]): void => {
     const section = document.createElement('section'); const title = document.createElement('h3'); title.textContent = heading; section.append(title);
     for (const [id, text, type, value, minimum, maximum, step] of fields) {
       const label = document.createElement('label'); label.className = 'field'; label.append(text);
       const input = document.createElement('input'); input.id = id; input.type = type; input.setAttribute('aria-label', text);
-      if (type === 'checkbox') input.checked = value; else input.value = value;
-      if (minimum !== undefined) input.min = minimum; if (maximum !== undefined) input.max = maximum; if (step !== undefined) input.step = step;
+      if (type === 'checkbox') input.checked = Boolean(value); else input.value = String(value);
+      if (minimum !== undefined) input.min = String(minimum); if (maximum !== undefined) input.max = String(maximum); if (step !== undefined) input.step = String(step);
       label.append(input); section.append(label);
     }
     body.append(section);
@@ -20,10 +38,12 @@ export function createSettingsPanel() {
   group('事件编辑', [['event-cut-density', '事件切割密度（每横线间隔的段数）', 'number', 4, 0.1, 128, 0.1]]);
   group('判定线切换', [['line-switcher-enabled', 'Ctrl+滚轮切线时显示附近线缩略图', 'checkbox', true]]);
   group('剪贴板', [['clipboard-history-enabled', '启用剪贴板历史（长按 Ctrl+V）', 'checkbox', true]]);
-  const clipboardHint = document.createElement('p'); clipboardHint.className = 'hint'; clipboardHint.textContent = '历史仅保存在本机浏览器。固定项不会被新记录挤出；关闭功能暂停记录，保留已有历史。'; body.lastElementChild.append(clipboardHint);
+  const clipboardHint = document.createElement('p'); clipboardHint.className = 'hint'; clipboardHint.textContent = '历史仅保存在本机浏览器。固定项不会被新记录挤出；关闭功能暂停记录，保留已有历史。'; body.lastElementChild?.append(clipboardHint);
   group('自动保存', [['autosave-enabled', '启用自动保存', 'checkbox', true], ['autosave-seconds', '自动保存间隔（秒）', 'number', 60, 1, 3600, 1], ['autosave-limit', '每谱保留备份数', 'number', 10, 1, 100, 1]]);
   const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '按固定间隔保存包含媒体的恢复副本，持续编辑不会推迟保存；手动保存更新谱面库。Y 缩放为绝对像素/秒，不随 BPM 或预览比例变化。'; body.append(hint);
-  for (const selector of ['.preview-settings', '.display-settings', '.compatibility-details']) body.append(document.querySelector(selector));
+  // The markup ships these three sections inside the settings dialog's origin; they are moved in
+  // here so the panel owns the whole dialog body. Absent sections are skipped.
+  for (const selector of ['.preview-settings', '.display-settings', '.compatibility-details']) { const section = document.querySelector(selector); if (section) body.append(section); }
   const hotkeys = document.createElement('button'); hotkeys.id = 'advanced-preferences'; hotkeys.textContent = '热键与原版配置';
   const close = document.createElement('button'); close.textContent = '完成'; close.onclick = () => dialog.close();
   const actions = document.createElement('div'); actions.className = 'modal-actions'; actions.append(hotkeys, close); dialog.append(actions); document.body.append(dialog);
