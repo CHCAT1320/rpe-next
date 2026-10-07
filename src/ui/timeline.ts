@@ -177,6 +177,24 @@ export class Timeline {
   indexedLayer?: number;
   shaderLanes?: unknown[];
   bulkPreview?: { session: TimelineSession } | null;
+  /**
+   * The hooks and extra display state the composition root installs after construction.
+   *
+   * These are declared here rather than in a `declare module` merge in `app.ts`, so the class owns
+   * every member it carries and the editor cannot grow the type from a distance.
+   */
+  /** Placement type the next event edit uses; pushed by the event editing commands and layer buttons. */
+  eventPlacementType: string;
+  /** Which clipboard gesture the keyup handler is mirroring; `{}` when none is active. */
+  clipboardMode: { mirror?: boolean; keepTime?: boolean };
+  /** Notifies the user; the timeline calls it with no arguments. */
+  notify: (message?: string, level?: string) => void;
+  /** Callback that offers the note under the preview cursor; `false` means "not handled". */
+  previewPick?: (event: PointerEvent) => boolean;
+  /** Callback that supplies the curve editor's anchor ghost notes. */
+  curveGhost?: () => Note[];
+  /** The note texture skin, installed once the document is loaded. */
+  skin?: unknown;
 
   constructor(notesCanvas: HTMLCanvasElement, eventsCanvas: HTMLCanvasElement, getSession: () => TimelineSession,
     onEvent: (event: unknown, canvas: HTMLCanvasElement) => void, changed: () => void,
