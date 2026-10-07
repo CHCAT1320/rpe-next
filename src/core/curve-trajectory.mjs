@@ -42,7 +42,35 @@ export function normalizeCurveExpression(source) {
 }
 
 export function presetOptions(preset) {
-  return { ...TRAJECTORY_DEFAULTS, ...preset, parameters: Object.fromEntries((preset.parameters ?? []).map(entry => [entry.key, entry.value])) };
+  return editableTrajectoryOptions({ ...preset, parameters: Object.fromEntries((preset.parameters ?? []).map(entry => [entry.key, entry.value])) });
+}
+
+export function editableTrajectoryOptions(input) {
+  const options = { ...TRAJECTORY_DEFAULTS, ...structuredClone(input) };
+  if (!options.shape) return options;
+  if (!['star', 'random-polygon'].includes(options.shape)) throw new Error('未知 shape 类型');
+  const star = options.shape === 'star';
+  const sides = `(clamp(round(points),3,40)${star ? '*2' : ''})`;
+  const amount = `(((t%1+1)%1)*${sides})`;
+  const index = `floor(${amount})`;
+  const vertex = (step, axis) => {
+    const wrapped = `((${step})%${sides})`;
+    const noise = `(sin(${wrapped}*127.1+seed*311.7)*43758.5453)`;
+    const radius = star ? `radius*(${wrapped}%2?inner:1)` : `radius*(1-randomness*(${noise}-floor(${noise})))`;
+    return `${radius}*${axis === 'x' ? 'cos' : 'sin'}(2*pi*${wrapped}/${sides})`;
+  };
+  for (const axis of ['x', 'y']) options[`${axis}Expression`] = `lerp(${vertex(index, axis)},${vertex(`${index}+1`, axis)},${amount}-${index})`;
+  options.parameters = { radius: 200, points: 5, ...(star ? { inner: 0.4 } : {}), ...options.parameters };
+  if (options.rotationExpression?.trim()) {
+    const polar = options.mode === 'polar';
+    const begin = polar ? options.angleStart : options.parameterStart;
+    const end = polar ? options.angleEnd : options.parameterEnd;
+    const coordinate = `((${begin})+((${end})-(${begin}))*ease(t,${options.easingX}))`;
+    options.rotationExpression = normalizeCurveExpression(options.rotationExpression).replace(/\b(t|theta)\b/g, token => polar && token === 't' ? 't' : coordinate);
+  }
+  options.mode = 'parametric'; options.parameterStart = '0'; options.parameterEnd = '1'; options.easingX = 1; options.easingY = 1;
+  delete options.shape;
+  return options;
 }
 
 export function compileTrajectory(input = {}) {
@@ -117,10 +145,24 @@ export function sampleCurveTrajectory(options = {}, count = 257) {
 
 export function validateCurvePreset(preset) {
   if (!preset || typeof preset !== 'object' || typeof preset.name !== 'string' || !preset.name.trim() || preset.name.length > 80) throw new Error('预设需要 1–80 字的名称');
+  const allowed = new Set([...Object.keys(TRAJECTORY_DEFAULTS), 'name', 'category', 'id', 'shape']);
+  for (const key of Object.keys(preset)) if (!allowed.has(key)) throw new Error(`未知预设字段：${key}`);
+  if (preset.mode !== undefined && !['parametric', 'polar'].includes(preset.mode)) throw new Error('mode 必须为 parametric 或 polar');
+  if (preset.shape !== undefined && !['star', 'random-polygon'].includes(preset.shape)) throw new Error('未知 shape 类型');
+  for (const [key, fallback] of Object.entries(TRAJECTORY_DEFAULTS)) {
+    if (key === 'parameters' || !Object.hasOwn(preset, key)) continue;
+    if (typeof preset[key] !== typeof fallback) throw new Error(`${key} 必须为${typeof fallback === 'string' ? '字符串' : typeof fallback === 'boolean' ? '布尔值' : '数字'}`);
+  }
+  const required = preset.shape ? [] : preset.mode === 'polar' ? ['radiusExpression'] : ['xExpression', 'yExpression'];
+  for (const key of required) if (typeof preset[key] !== 'string' || !preset[key].trim()) throw new Error(`缺少曲线表达式：${key}`);
   if (!Array.isArray(preset.parameters) || preset.parameters.length > 32) throw new Error('预设参数声明必须是数组，至多 32 项');
   const keys = new Set();
   for (const entry of preset.parameters) {
     if (!entry || keys.has(entry.key) || !/^[A-Za-z_][A-Za-z_0-9]*$/.test(entry.key) || ['t', 'u', 'theta', 'pi', 'seed', 'randomness'].includes(entry.key) || !Number.isFinite(entry.value)) throw new Error('预设参数名重复、保留或默认值无效');
+    for (const key of Object.keys(entry)) if (!['key', 'label', 'value', 'min', 'max', 'step'].includes(key)) throw new Error(`参数 ${entry.key} 的未知字段：${key}`);
+    if (entry.label !== undefined && typeof entry.label !== 'string') throw new Error(`参数 ${entry.key} 的 label 必须为字符串`);
+    for (const key of ['min', 'max', 'step']) if (entry[key] !== undefined && !Number.isFinite(entry[key])) throw new Error(`参数 ${entry.key} 的 ${key} 必须为有限数字`);
+    if (entry.step <= 0 || entry.min > entry.max || entry.value < entry.min || entry.value > entry.max) throw new Error(`参数 ${entry.key} 的范围、步长或默认值无效`);
     keys.add(entry.key);
   }
   const clean = { name: preset.name.trim(), parameters: structuredClone(preset.parameters), category: '自定义' };

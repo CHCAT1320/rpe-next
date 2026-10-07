@@ -1,4 +1,4 @@
-import { CURVE_PRESETS, TRAJECTORY_DEFAULTS, sampleCurveTrajectory, presetOptions, validateCurvePreset } from '../core/curve-trajectory.mjs';
+import { CURVE_PRESETS, TRAJECTORY_DEFAULTS, sampleCurveTrajectory, presetOptions, validateCurvePreset, editableTrajectoryOptions } from '../core/curve-trajectory.mjs';
 import { createTrajectoryEvent, trajectoryChart, splitTrajectoryChart } from '../application/trajectory-commands.mjs';
 import { parseBeat, formatBeat } from '../core/beat.mjs';
 import { SceneRuntime } from '../core/scene.mjs';
@@ -6,6 +6,7 @@ import { previewViewport } from '../core/editor-display.mjs';
 import { download } from '../platform/files.mjs';
 import { prepareCanvas } from './timeline.mjs';
 import { trajectorySplitSettings } from '../core/trajectory-simplify.mjs';
+import { parseCurvePreset, saveCurvePreset, deleteCurvePreset, copyCurvePreset } from '../core/trajectory-presets.mjs';
 
 const STORAGE_KEY = 'rpe-next-trajectory-presets-v1';
 const COMMON_FIELDS = [
@@ -72,7 +73,7 @@ export class TrajectoryPanel {
     const { session, timeline } = this.getContext();
     this.active = true; this.editing = event; this.presetDraft = null;
     this.lineIndex = lineIndex ?? session.lineIndex; this.layerIndex = layerIndex ?? Math.min(3, timeline.layer);
-    if (event) { this.options = structuredClone(event.trajectory.options); this.startTime = [...event.startTime]; this.endTime = [...event.endTime]; this.segments = event.trajectory.segments ?? 128; this.splitSettings = trajectorySplitSettings(event.trajectory.split); }
+    if (event) { this.options = editableTrajectoryOptions(event.trajectory.options); this.startTime = [...event.startTime]; this.endTime = [...event.endTime]; this.segments = event.trajectory.segments ?? 128; this.splitSettings = trajectorySplitSettings(event.trajectory.split); }
     this.render(); this.activate('trajectory'); this.refresh();
   }
 
@@ -132,9 +133,11 @@ export class TrajectoryPanel {
   }
 
   renderPresets() {
+    const expanded = new Set([...this.gallery.querySelectorAll('details[open]')].map(group => group.dataset.category));
     this.gallery.replaceChildren();
     for (const category of ['基本图形', '进阶图形', '其他', '自定义']) {
       const group = document.createElement('details'); const title = document.createElement('summary'); title.textContent = category; group.append(title);
+      group.dataset.category = category; group.open = expanded.has(category);
       const grid = document.createElement('div'); grid.className = 'trajectory-preset-grid'; group.append(grid);
       for (const preset of [...CURVE_PRESETS, ...this.custom].filter(entry => entry.category === category)) {
         const card = action(preset.name, () => this.expandPreset(preset, card, grid)); card.setAttribute('aria-expanded', 'false');
@@ -156,6 +159,16 @@ export class TrajectoryPanel {
     const panel = document.createElement('div'); panel.className = 'trajectory-preset-editor';
     grid.insertBefore(panel, card.nextSibling);
     const title = document.createElement('strong'); title.textContent = preset.name + ' · 调整后填入'; panel.append(title);
+    if (this.custom.includes(preset)) {
+      panel.append(action('编辑预设定义', () => this.loadCustom(preset, preset.name)), action('删除此预设', () => {
+        try {
+          const custom = deleteCurvePreset(this.custom, preset.name);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
+          if (this.customEditingName === preset.name) { this.customEditingName = null; this.validateCustom(); }
+          this.presetDraft = null; this.renderPresets(); this.refresh(); this.notify('自定义预设已删除', 'success');
+        } catch (error) { this.customError(error); }
+      }));
+    }
     const base = presetOptions(preset);
     const parameters = document.createElement('div'); panel.append(parameters);
     for (const entry of preset.parameters) field(parameters, entry.key, entry.label ?? entry.key, entry.value, 'number', entry.min, entry.max, entry.step ?? 1);
@@ -165,7 +178,7 @@ export class TrajectoryPanel {
     const error = document.createElement('p'); error.className = 'hint'; panel.append(error);
     const update = () => {
       try {
-        const options = { ...base, ...readFields(common, {}), parameters: readFields(parameters, {}) };
+        const options = { ...base, ...readFields(common, {}), parameters: { ...base.parameters, ...readFields(parameters, {}) } };
         const points = sampleCurveTrajectory(options, 257);
         this.presetDraft = { options, points, canvas, preset }; error.textContent = '当前仅预览预设草稿；正式填入后才更改上方参数。'; this.refresh();
       } catch (problem) { error.textContent = problem.message; this.presetDraft = null; this.error(problem); }
@@ -185,19 +198,59 @@ export class TrajectoryPanel {
   }
 
   renderCustom() {
-    const group = document.createElement('details'); const title = document.createElement('summary'); title.textContent = '编写 / 保存 / 导入自定义预设'; group.append(title);
-    const name = field(group, 'name', '预设名称', '我的轨迹');
+    const group = document.createElement('details'); const title = document.createElement('summary'); title.textContent = '自定义预设编辑器'; group.append(title);
+    this.customGroup = group;
     const source = document.createElement('textarea'); source.className = 'trajectory-preset-source'; source.setAttribute('aria-label', '自定义预设 JSON');
-    source.value = JSON.stringify({ name: '我的轨迹', mode: 'parametric', xExpression: 'radius*cos(2*pi*t)', yExpression: 'radius*sin(2*pi*t)', parameters: [{ key: 'radius', label: '半径', value: 200, min: 1, max: 2000, step: 1 }] }, null, 2); group.append(source);
-    const help = document.createElement('p'); help.className = 'hint'; help.textContent = 'parameters 声明每个预设的独立控件：key、label、value 和可选 min/max/step。表达式只允许数学计算，不执行 JavaScript。预设仅保存在本机；导出单个 JSON 可分享。'; group.append(help);
-    const save = preset => { const valid = validateCurvePreset(preset); const custom = [...this.custom.filter(entry => entry.name !== valid.name), valid]; localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom; this.renderPresets(); this.notify('自定义轨迹预设已保存', 'success'); };
-    const guarded = callback => () => { try { callback(); } catch (error) { this.error(error); } };
-    group.append(action('保存上方参数为预设', guarded(() => save({ ...this.options, name: name.value, parameters: Object.entries(this.options.parameters ?? {}).map(([key, value]) => ({ key, label: key, value })) }))),
-      action('保存编写的预设', guarded(() => save(JSON.parse(source.value)))),
-      action('导出当前预设', guarded(() => { const preset = validateCurvePreset({ ...this.options, name: name.value, parameters: Object.entries(this.options.parameters ?? {}).map(([key, value]) => ({ key, label: key, value })) }); download(new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' }), preset.name + '.trajectory.json'); })));
+    this.customInput = source;
+    source.value = this.customSource ?? JSON.stringify({ name: '我的轨迹', mode: 'parametric', xExpression: 'radius*cos(2*pi*t)', yExpression: 'radius*sin(2*pi*t)', parameters: [{ key: 'radius', label: '半径', value: 200, min: 1, max: 2000, step: 1 }] }, null, 2); group.append(source);
+    const help = document.createElement('p'); help.className = 'hint'; help.textContent = '保存、另存和导出使用本框 JSON。保存修改会更新正在编辑的预设（name 改名也更新原项）；另存为新预设会立即添加，重名自动加副本编号。参数方程填写 xExpression、yExpression；极坐标填写 mode: "polar" 和 radiusExpression。parameters 声明 key、label、value 和可选 min/max/step。'; group.append(help);
+    this.customMessage = document.createElement('p'); this.customMessage.className = 'hint'; this.customMessage.setAttribute('role', 'status'); group.append(this.customMessage);
+    this.customCanvas = document.createElement('canvas'); this.customCanvas.width = 500; this.customCanvas.height = 180; this.customCanvas.className = 'trajectory-preview'; this.customCanvas.setAttribute('aria-label', '自定义预设预览'); group.append(this.customCanvas);
+    const guarded = callback => () => { try { callback(); } catch (error) { this.customError(error); } };
+    const save = (preset, originalName) => {
+      const custom = saveCurvePreset(this.custom, preset, originalName);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
+      this.customEditingName = preset.name; source.value = JSON.stringify(preset, null, 2);
+      this.presetDraft = null; this.renderPresets(); this.refresh(); this.validateCustom();
+      this.gallery.querySelector('[data-category="自定义"]').open = true;
+      this.customMessage.textContent = `已保存：${preset.name}。可在“自定义”分类选用或继续编辑。`; this.notify('自定义轨迹预设已保存', 'success');
+    };
+    this.customSave = action('添加到自定义预设', guarded(() => save(parseCurvePreset(source.value), this.customEditingName ?? null)));
+    this.customCopy = action('另存为新预设', guarded(() => save(copyCurvePreset(this.custom, parseCurvePreset(source.value)), null)));
+    this.customExport = action('导出编写的预设', guarded(() => { const preset = parseCurvePreset(source.value); download(new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' }), preset.name + '.trajectory.json'); }));
+    group.append(this.customSave, this.customCopy, this.customExport);
+    const load = action('用当前轨迹填充 JSON', guarded(() => this.loadCustom(copyCurvePreset(this.custom, validateCurvePreset({ ...this.options, name: this.options.name ?? '我的轨迹', parameters: Object.entries(this.options.parameters ?? {}).map(([key, value]) => ({ key, label: key, value })) })))));
+    load.title = '将上方轨迹参数复制到下面的编辑框；之后点击添加到自定义预设才会保存';
+    group.insertBefore(load, source);
+    source.oninput = () => this.validateCustom();
     const file = document.createElement('input'); file.type = 'file'; file.accept = '.json'; file.hidden = true;
-    file.onchange = async () => { try { const selected = file.files[0]; if (!selected) return; if (selected.size > 65536) throw new Error('预设文件不能超过 64 KiB'); save(JSON.parse(await selected.text())); } catch (error) { this.error(error); } finally { file.value = ''; } };
+    file.onchange = async () => { try { const selected = file.files[0]; if (!selected) return; if (selected.size > 65536) throw new Error('预设文件不能超过 64 KiB'); this.loadCustom(parseCurvePreset(await selected.text())); } catch (error) { this.customError(error); } finally { file.value = ''; } };
     group.append(action('导入单个预设', () => file.click()), file); this.content.append(group);
+    this.validateCustom();
+  }
+
+  loadCustom(preset, originalName = null) {
+    this.customEditingName = originalName; this.customInput.value = JSON.stringify(preset, null, 2);
+    this.customGroup.open = true; this.validateCustom(); this.customGroup.scrollIntoView({ block: 'start' });
+  }
+
+  customError(error) {
+    this.customGroup.open = true; this.customMessage.textContent = error.message; this.customMessage.classList.add('error');
+  }
+
+  validateCustom() {
+    this.customSource = this.customInput.value;
+    this.customSave.textContent = this.customEditingName ? '保存修改（更新原预设）' : '添加到自定义预设';
+    try {
+      const preset = parseCurvePreset(this.customSource);
+      this.customCopy.hidden = !this.customEditingName && !this.custom.some(entry => entry.name === preset.name);
+      drawPath(this.customCanvas, sampleCurveTrajectory(presetOptions(preset), 257));
+      this.customMessage.textContent = this.customEditingName ? `正在编辑：${this.customEditingName}。保存修改更新此项；另存为新预设保留原项。` : '新预设草稿，尚未保存。点击“添加到自定义预设”保存到本机。';
+      this.customMessage.classList.remove('error'); this.customSave.disabled = false; this.customCopy.disabled = false; this.customExport.disabled = false; this.customInput.removeAttribute('aria-invalid');
+    } catch (error) {
+      this.customError(error); drawPath(this.customCanvas, null);
+      this.customSave.disabled = true; this.customCopy.disabled = true; this.customExport.disabled = true; this.customInput.setAttribute('aria-invalid', 'true');
+    }
   }
 
   error(error) { this.message.textContent = error.message; this.message.classList.add('error'); this.previewChart = null; this.points = null; this.worldPoints = null; this.applyButton.disabled = true; this.invalidate(); }
@@ -217,7 +270,7 @@ export class TrajectoryPanel {
       this.worldPoints = this.points.map((point, index) => this.scene.sample(this.beginSeconds + (this.endSeconds - this.beginSeconds) * index / (this.points.length - 1))[this.lineIndex]);
       this.message.textContent = this.presetDraft ? '预设草稿预览中；生成前请先正式填入参数。' : 'X 轨道保存一个整体轨迹事件，包含 Y 和可选角度；拖动端点可整体改变时长。';
       this.message.classList.remove('error'); this.applyButton.disabled = Boolean(this.presetDraft);
-      for (const key of ['xExpression', 'yExpression', 'parameterStart', 'parameterEnd']) this.fields.querySelector('[data-key="' + key + '"]').closest('label').hidden = this.options.mode === 'polar' || Boolean(this.options.shape);
+      for (const key of ['xExpression', 'yExpression', 'parameterStart', 'parameterEnd']) this.fields.querySelector('[data-key="' + key + '"]').closest('label').hidden = this.options.mode === 'polar';
       for (const key of ['radiusExpression', 'angleStart', 'angleEnd']) this.fields.querySelector('[data-key="' + key + '"]').closest('label').hidden = this.options.mode !== 'polar';
       this.fields.querySelector('[data-key="rotationExpression"]').disabled = Boolean(this.options.tangentRotation);
       this.fields.querySelector('[data-key="tolerance"]').disabled = !this.splitSettings.simplify;
