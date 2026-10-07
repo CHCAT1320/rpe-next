@@ -1,32 +1,33 @@
 import { beatValue, fromNumber } from './beat.ts';
 import { TempoMap } from './tempo.ts';
+import type { Chart, ChartEvent, ControlPoint, EventLayer, EventType, ExtendedType, JudgeLine, Note, NoteType } from './types.ts';
 
-export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'];
-export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'];
-export const NOTE_NAMES = { 1: 'Tap', 2: 'Hold', 3: 'Flick', 4: 'Drag' };
+export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'] as const satisfies readonly EventType[];
+export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'] as const satisfies readonly ExtendedType[];
+export const NOTE_NAMES: Record<number, string> = { 1: 'Tap', 2: 'Hold', 3: 'Flick', 4: 'Drag' };
 
-export function createEvent(start = 0, end = start, startBeat = 0, endBeat = startBeat + 1) {
+export function createEvent(start = 0, end = start, startBeat = 0, endBeat = startBeat + 1): ChartEvent {
   return { startTime: fromNumber(startBeat), endTime: fromNumber(endBeat), start, end, easingType: 1,
     easingLeft: 0, easingRight: 1, bezier: 0, bezierPoints: [0, 0, 1, 1], linkgroup: 0 };
 }
 
-export function createLine(name = '判定线') {
-  const layer = Object.fromEntries(EVENT_TYPES.map(type => [type, [createEvent(type === 'alphaEvents' ? 255 : type === 'speedEvents' ? 10 : 0, undefined, 0, 1)]]));
+export function createLine(name = '判定线'): JudgeLine {
+  const layer: EventLayer = Object.fromEntries(EVENT_TYPES.map(type => [type, [createEvent(type === 'alphaEvents' ? 255 : type === 'speedEvents' ? 10 : 0, undefined, 0, 1)]]));
   return { Name: name, Group: 0, Texture: 'line.png', bpmfactor: 1, father: -1, rotateWithFather: true,
     isCover: 1, zOrder: 0, anchor: [0.5, 0.5], isGif: false, eventLayers: [layer], extended: {}, notes: [], numOfNotes: 0 };
 }
 
-export function createChart() {
+export function createChart(): Chart {
   return { META: { RPEVersion: 170, name: '未命名谱面', composer: '', charter: '', illustration: '', level: '', song: '', background: '', offset: 0 },
     BPMList: [{ bpm: 120, startTime: [0, 0, 1] }], judgeLineGroup: ['Default'], judgeLineList: [createLine('Line 1')] };
 }
 
-export function createNote(type, beat, positionX, endBeat = beat + 1) {
+export function createNote(type: NoteType, beat: number, positionX: number, endBeat = beat + 1): Note {
   return { type, startTime: fromNumber(beat), endTime: fromNumber(type === 2 ? endBeat : beat), positionX,
     above: 1, isFake: 0, speed: 1, size: 1, yOffset: 0, visibleTime: 999999, alpha: 255 };
 }
 
-export function parseChart(text) {
+export function parseChart(text: string): Chart {
   let chart;
   try { chart = JSON.parse(text.replace(/^\uFEFF/, '')); }
   catch { throw new Error('无效的 RPE JSON 文档'); }

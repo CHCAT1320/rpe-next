@@ -1,7 +1,24 @@
 import { beatValue, upperBound } from './beat.ts';
+import type { Beat, BpmEntry } from './types.ts';
 
+/** A tempo entry resolved to absolute beats, with its precomputed wall-clock position. */
+interface TempoPoint {
+  beat: number;
+  secondsPerBeat: number;
+  seconds: number;
+}
+
+/**
+ * Converts between beats and seconds under a piecewise-constant tempo, per line BPM factor.
+ *
+ * Tempo changes only ever apply from their own beat onward, so the map sorts its entries once and
+ * then integrates them into cumulative `seconds`, which makes every later lookup a binary search
+ * plus one linear step rather than a walk over the whole list.
+ */
 export class TempoMap {
-  constructor(entries) {
+  points: TempoPoint[];
+
+  constructor(entries: BpmEntry[]) {
     if (!Array.isArray(entries) || !entries.length) throw new Error('BPMList: 至少需要一个 BPM');
     this.points = entries.map((entry, index) => {
       if (!Number.isFinite(entry.bpm) || entry.bpm <= 0) throw new Error(`BPMList[${index}].bpm: 必须大于零`);
@@ -19,7 +36,7 @@ export class TempoMap {
     }
   }
 
-  seconds(beat, factor = 1) {
+  seconds(beat: number | Beat, factor = 1): number {
     this.checkFactor(factor);
     const value = Array.isArray(beat) ? beatValue(beat) : beat;
     if (!Number.isFinite(value)) throw new Error('时间必须为有限数字');
@@ -27,7 +44,7 @@ export class TempoMap {
     return (point.seconds + (value - point.beat) * point.secondsPerBeat) * factor;
   }
 
-  beat(seconds, factor = 1) {
+  beat(seconds: number, factor = 1): number {
     this.checkFactor(factor);
     if (!Number.isFinite(seconds)) throw new Error('时间必须为有限数字');
     const value = seconds / factor;
@@ -35,7 +52,7 @@ export class TempoMap {
     return point.beat + (value - point.seconds) / point.secondsPerBeat;
   }
 
-  checkFactor(factor) {
+  checkFactor(factor: number): void {
     if (!Number.isFinite(factor) || factor <= 0) throw new Error('bpmfactor 必须大于零');
   }
 }

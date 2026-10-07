@@ -23,10 +23,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "resolveJsonModule": true,
-    "jsx": "preserve",
-
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] }
+    "jsx": "preserve"
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "test/**/*.ts", "*.ts"]
 }
