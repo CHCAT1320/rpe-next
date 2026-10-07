@@ -12,7 +12,7 @@
     "url": "https://github.com/kclg-YSJ/rpe-next.git"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.18"
   },
   "scripts": {
     "start": "vite --open",

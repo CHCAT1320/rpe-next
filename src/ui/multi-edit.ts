@@ -19,8 +19,52 @@ export type MultiEditKind = BatchKind;
 /** A `<select>`/`<input>` pair, which is what the panel's `control()` helper hands back. */
 export type ControlElement = HTMLInputElement | HTMLSelectElement;
 
+/**
+ * Narrows a batch change's payload to the note it is in notes mode.
+ *
+ * A `Note` carries a numeric `positionX` and a numeric `type`; a `ChartEvent` carries neither, so the
+ * check separates the two arms of `Note | ChartEvent` exactly. It is a runtime check rather than an
+ * assertion because the payload's type follows `MultiEditKind`, which is not part of the value.
+ */
+function isNote(item: Note | ChartEvent): item is Note {
+  return typeof item.positionX === 'number';
+}
+
 /** One `[value, label]` option pair, as `BATCH_OPERATIONS` and friends supply them. */
 type ControlOption = [string | number, string];
+
+/**
+ * Narrows the 事件种类 `<select>`'s value to the union `MultiEditRead` declares.
+ *
+ * The control is populated from {@link EVENT_BATCH_TYPES}, so its value is always one of those
+ * entries' names or the `'all'` wildcard; the list is what states that for the compiler. A value
+ * outside the list cannot be produced by the panel, and `'all'` is the fallback the wildcard case
+ * already used, so the reader stays total.
+ */
+function batchEventType(value: string): AnyEventType | 'all' {
+  const known: string[] = EVENT_BATCH_TYPES.map(([name]) => name);
+  return known.includes(value) ? value as AnyEventType | 'all' : 'all';
+}
+
+/**
+ * The members {@link drawEventGhost} reads off a batch change's `before`/`after` payload.
+ *
+ * Those payloads are `Note | ChartEvent` depending on the panel's kind. Both carry `startTime` and
+ * `endTime`, and a `ChartEvent` additionally carries the numeric `start`/`end` value pair the ghost
+ * curve spans — a note has none, which is why those two are optional and why the drawer's own
+ * `typeof` guard is what narrows them before any arithmetic. The easing fields are on both.
+ */
+interface GhostEvent {
+  readonly startTime: unknown;
+  readonly endTime: unknown;
+  readonly start?: unknown;
+  readonly end?: unknown;
+  readonly easingType?: number;
+  readonly easingLeft?: number;
+  readonly easingRight?: number;
+  readonly bezier?: unknown;
+  readonly bezierPoints?: unknown;
+}
 
 /**
  * The `{ lower, easingType, cycle, disturbance }` bag {@link distributionFields} reads and writes.
@@ -72,8 +116,7 @@ export interface MultiEditRead {
    * `string`: the `<select>` is populated from `EVENT_BATCH_TYPES`, so it only ever holds these.
    */
   eventType: AnyEventType | 'all';
-  condition: string;
-  script: string;
+  condition: string;  script: string;
   seed: number;
   /**
    * The raw 目标线号序列 text from the control, which `sequence()` splits itself. `CloneOptions`
@@ -283,7 +326,7 @@ export class MultiEditPanel {
     cancel.onclick = () => this.close();
     this.read = (): MultiEditRead => ({ ...readDistribution(), mode: mode.value, field: field.value, operation: operation.value,
       eventApplicationMode: applicationMode?.value ?? 'per-line',
-      noteType: kind === 'notes' ? Number(filter.value) : 0, eventType: kind === 'events' ? filter.value : 'all',
+      noteType: kind === 'notes' ? Number(filter.value) : 0, eventType: kind === 'events' ? batchEventType(filter.value) : 'all',
       condition: condition.value, script: script.value, seed: this.seed, targets: targets.value, increment: increment.value, retainSource: retainSource.checked,
       division: this.timeline.division, channels: Object.fromEntries([...channels].map(([key, read]) => [key, read()])) });
     const updateMode = (): void => {
@@ -363,15 +406,23 @@ export class MultiEditPanel {
     const timeline = this.timeline; const session = this.getSession();
     const canvas = this.kind === 'notes' ? timeline.notesCanvas : timeline.eventsCanvas;
     if (!canvas.clientWidth || this.kind === 'events' && timeline.notesOnly) return;
-    const context = canvas.getContext('2d'); context.save(); context.setLineDash([5, 3]); context.lineWidth = 2;
+    // `getContext('2d')` only returns null for a context type the canvas cannot provide, and the
+    // editor's own timeline canvases are always created as 2D; the original dereferenced it
+    // unguarded here.
+    const context = canvas.getContext('2d')!; context.save(); context.setLineDash([5, 3]); context.lineWidth = 2;
     context.beginPath(); context.rect(0, this.kind === 'events' ? 23 : 0, canvas.clientWidth, canvas.clientHeight); context.clip();
-    const ranges = new Map();
+    // Keyed `<lineIndex>:<type>`; each value is the numeric span the ghost curves are drawn
+    // against, grown from the change's own start/end values and the line's chain range.
+    const ranges = new Map<string, [number, number]>();
     if (this.kind === 'events') for (const change of this.result.changes) {
       const rangeKey = `${change.lineIndex}:${change.type}`;
       const range = ranges.get(rangeKey) ?? [Infinity, -Infinity];
-      const chain = change.lineIndex === session.lineIndex ? timeline.chainRanges?.[timeline.eventTypes.indexOf(change.type)]?.get(change.index) : null;
-      if (Number.isFinite(chain?.min) && Number.isFinite(chain?.max)) { range[0] = Math.min(range[0], chain.min); range[1] = Math.max(range[1], chain.max); }
-      for (const item of [change.before, change.after]) if (Number.isFinite(item.start) && Number.isFinite(item.end)) {
+      // `type` is optional on a batch change; a change without one has no track to look a chain up on,
+      // and `indexOf(undefined)` returned -1 there, which is what the guard reproduces.
+      const column = change.type === undefined ? -1 : timeline.eventTypes.indexOf(change.type);
+      const chain = change.lineIndex === session.lineIndex && column >= 0 ? timeline.chainRanges?.[column]?.get(change.index) : null;
+      if (typeof chain?.min === 'number' && typeof chain?.max === 'number') { range[0] = Math.min(range[0], chain.min); range[1] = Math.max(range[1], chain.max); }
+      for (const item of [change.before, change.after]) if (typeof item.start === 'number' && typeof item.end === 'number') {
         range[0] = Math.min(range[0], item.start, item.end); range[1] = Math.max(range[1], item.start, item.end);
       }
       ranges.set(rangeKey, range);
@@ -383,16 +434,25 @@ export class MultiEditPanel {
       const width = canvas.clientWidth;
       const panelWidth = multiArea ? timeline.panelWidth(width, this.kind) : width;
       const panelOffset = multiArea ? timeline.panelIndex(lineIndex, this.kind) * timeline.panelStride(width, this.kind) - timeline.multiLineViewportOffset(width, this.kind) : 0;
-      const vertical = beat => multiArea ? timeline.verticalForLine(beat, lineIndex, canvas.clientHeight) : change.type === 'paintEvents' ? timeline.eventVertical(beat, change.type) : timeline.vertical(beat);
+      // `change.type` is optional, but every branch that reaches here is events mode, where the
+      // producer always sets it; the `paintEvents` comparison below is the only reader and an absent
+      // type simply is not `paintEvents`, which is what the untyped property read did.
+      const type = change.type;
+      const vertical = (beat: number): number => multiArea ? timeline.verticalForLine(beat, lineIndex, canvas.clientHeight) : type === 'paintEvents' ? timeline.eventVertical(beat, type) : timeline.vertical(beat);
       const top = vertical(beatValue(item.endTime)); const bottom = vertical(beatValue(item.startTime));
       if (top > canvas.clientHeight || bottom < 0) continue;
       if (this.kind === 'notes') {
+        // The notes branch only ever receives note payloads: `kind` is the discriminator the producer
+        // used to build `before`/`after`. The check below is what states that for the compiler; a
+        // note always carries a numeric `positionX`, which no `ChartEvent` has, so skipping a
+        // payload without one cannot discard a real note.
+        if (!isNote(item)) continue;
         context.strokeStyle = NOTE_COLORS[item.type] ?? '#fff';
         const noteWidth = timeline.noteWidth(item);
         const horizontal = timeline.clampNoteHorizontal(timeline.noteHorizontal(item.positionX, lineIndex), noteWidth, canvas.clientWidth, lineIndex);
         if (horizontal != null) context.strokeRect(horizontal - noteWidth / 2 - 3, Math.max(-10, top - 7), noteWidth + 6, Math.min(canvas.clientHeight + 20, Math.max(14, bottom - Math.max(-10, top) + 14)));
       } else {
-        const column = timeline.eventTypes.indexOf(change.type); if (column < 0) continue;
+        const column = type === undefined ? -1 : timeline.eventTypes.indexOf(type); if (column < 0) continue;
         const localBounds = timeline.eventColumnBounds(column, panelWidth);
         const bounds = { x: panelOffset + localBounds.x, width: localBounds.width };
         context.save(); context.beginPath(); context.rect(bounds.x, 23, bounds.width, canvas.clientHeight); context.clip();
@@ -402,9 +462,12 @@ export class MultiEditPanel {
         context.strokeStyle = '#8effd0'; context.setLineDash([5, 3]); context.lineWidth = 2.5;
         drawEventGhost(context, item, bounds.x, bounds.width, vertical, ranges.get(`${lineIndex}:${change.type}`));
         context.font = '12px RPE, sans-serif'; context.textAlign = 'center';
-        const format = value => Number.isFinite(value) ? Number(value.toFixed(3)).toString() : Array.isArray(value) ? value.join(',') : String(value ?? '');
+        // The value shown is an event's numeric start/end, or its shader name; the formatter renders
+        // a finite number to three decimals and anything else as text, as it did untyped.
+        const format = (value: unknown): string => typeof value === 'number' && Number.isFinite(value) ? Number(value.toFixed(3)).toString() : Array.isArray(value) ? value.join(',') : String(value ?? '');
         if (bottom - top > 24) {
-          for (const [value, position] of [[item.end ?? item.shader, Math.max(36, top + 13)], [item.start ?? item.shader, Math.min(canvas.clientHeight - 5, bottom - 4)]]) {
+          const labels: [unknown, number][] = [[item.end ?? item.shader, Math.max(36, top + 13)], [item.start ?? item.shader, Math.min(canvas.clientHeight - 5, bottom - 4)]];
+          for (const [value, position] of labels) {
             context.fillStyle = '#203c33'; context.fillRect(bounds.x + 2, position - 11, bounds.width - 4, 14);
             context.fillStyle = '#baffdf'; context.fillText(format(value), bounds.x + bounds.width / 2, position, bounds.width - 8);
           }
@@ -416,17 +479,36 @@ export class MultiEditPanel {
   }
 }
 
-function drawEventGhost(context, event, horizontal, width, vertical, range = [Math.min(event.start, event.end), Math.max(event.start, event.end)]) {
+/**
+ * Draws one event's ghost curve.
+ *
+ * `event` is either a `ChartEvent` (events mode) or a `Note` (notes mode); both carry the same
+ * start/end times, easing fields and optional Bezier control points this reads, which is the shape
+ * `GhostEvent` names.
+ */
+/**
+ * Draws one event's ghost curve.
+ *
+ * `event` is a `ChartEvent` (events mode) or a `Note` (notes mode); see {@link GhostEvent}. The
+ * `range` default is computed from the event's own `start`/`end`, which a note does not carry — the
+ * original read them unguarded there, so a note yields the `NaN` pair `Math.min(undefined, …)`
+ * produces and the curve below is skipped by the `typeof` guard, exactly as before.
+ */
+function drawEventGhost(context: CanvasRenderingContext2D, event: GhostEvent, horizontal: number, width: number, vertical: (beat: number) => number, range?: [number, number]): void {
   const start = beatValue(event.startTime); const end = beatValue(event.endTime);
   const top = vertical(end); const bottom = vertical(start);
   context.strokeRect(horizontal, top, width, Math.max(2, bottom - top));
   if (typeof event.start !== 'number' || typeof event.end !== 'number') return;
+  // Bound after the guard, so the values are known numbers and the pair matches the original's
+  // `Math.min(event.start, event.end)` / `Math.max(…)` default exactly.
+  const bounds: [number, number] = range ?? [Math.min(event.start, event.end), Math.max(event.start, event.end)];
   context.beginPath();
+  const from = event.start; const to = event.end;
   for (let step = 0; step <= 30; step++) {
     const progress = step / 30;
     const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType ?? 1, event.easingLeft ?? 0, event.easingRight ?? 1);
-    const value = event.start + (event.end - event.start) * amount;
-    const position = horizontal + 5 + (range[0] === range[1] ? 0.5 : (value - range[0]) / (range[1] - range[0])) * (width - 10);
+    const value = from + (to - from) * amount;
+    const position = horizontal + 5 + (bounds[0] === bounds[1] ? 0.5 : (value - bounds[0]) / (bounds[1] - bounds[0])) * (width - 10);
     if (!step) context.moveTo(position, vertical(start)); else context.lineTo(position, vertical(start + (end - start) * progress));
   }
   context.stroke();

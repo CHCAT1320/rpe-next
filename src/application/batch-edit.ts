@@ -84,7 +84,15 @@ export interface SelectionEditResult {
   selection: Set<number>;
   eventSelection: Set<string>;
   multiEventSelection: Map<number, Set<string>>;
-  multiLineSelection: Map<number, Set<number>>;
+  /**
+   * The per-line note selections a multi-line edit produced.
+   *
+   * Optional because not every producer has one: `editCapturedSelection` always fills it in, while a
+   * `MultiEditResult` batches one layer at a time and carries no per-line selection at all.
+   * `commitSelectionEdit` already reads it as optional (it only assigns the session's map when the
+   * member is present), so the batch panel can hand its result straight over.
+   */
+  multiLineSelection?: Map<number, Set<number>>;
 }
 
 /** Per-line note deltas of a control drag. */

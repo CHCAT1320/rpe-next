@@ -128,7 +128,14 @@ export const EVENT_BATCH_FIELDS: [string, string][] = [
   ['t1', 'StartTime · 开始拍'], ['t2', 'EndTime · 结束拍'], ['line', 'Line · 复制到线'],
   ['linkgroup', 'LinkGroup · 绑定组'], ['duration', 'Duration · 时长并首尾相接'], ['order', 'Order · 重排内容（保留时间槽）'],
 ];
-export const EVENT_BATCH_TYPES = [
+/**
+ * The `[value, label]` pairs the "事件种类" selector is populated from.
+ *
+ * The first entry is the `'all'` wildcard the panel's own filter accepts; every other entry names a
+ * real event track. Annotated as pairs so the literal does not widen to `string[][]`, which the
+ * `<option>` builder cannot consume.
+ */
+export const EVENT_BATCH_TYPES: [string, string][] = [
   ['all', '全部'], ['moveXEvents', 'X'], ['moveYEvents', 'Y'], ['rotateEvents', '旋转'], ['alphaEvents', '透明度'],
   ['speedEvents', '速度'], ['scaleXEvents', '缩放 X'], ['scaleYEvents', '缩放 Y'], ['paintEvents', '着色器'],
   ['colorEvents', '颜色'], ['textEvents', '文字'],

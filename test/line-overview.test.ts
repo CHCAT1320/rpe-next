@@ -6,6 +6,7 @@ import { createChart, createLine, createNote, createEvent } from '../src/core/ch
 import { TempoMap } from '../src/core/tempo.ts';
 import { normalizeEditorPreferences } from '../src/platform/editor-preferences.ts';
 import { shortcutAction, shortcutMatches, shortcutReleased, migratePreferences } from '../src/core/preferences.ts';
+import type { HotkeySource } from '../src/core/preferences.ts';
 import { isTypingText, releaseShortcutFocus } from '../src/ui/keyboard.ts';
 
 test('线号上下切换首尾循环；附近线窗口有界且始终包含当前线', () => {
@@ -66,7 +67,7 @@ test('筛选不会擅自改变当前线，滚轮使用筛选结果；关闭速�
   const switcher = Object.create(LineSwitcher.prototype);
   Object.assign(switcher, { cache: new Map(), cards: new Map(), notesOnly: true, eventsOnly: false,
     filterInputs: new Map([['notesOnly', { checked: true }], ['eventsOnly', { checked: false }]]),
-    host: { hidden: false }, getContext: () => ({ chart, tempo, selected, start, end }), select: index => { selected = index; return true; } });
+    host: { hidden: false }, getContext: () => ({ chart, tempo, selected, start, end }), select: (index: number) => { selected = index; return true; } });
   assert.deepEqual(switcher.filteredLines(switcher.getContext()), [1]); assert.equal(selected, 0);
   switcher.release(); assert.equal(switcher.notesOnly, true);
   switcher.step(-1); assert.equal(selected, 1);
@@ -106,16 +107,36 @@ test('拖滑条只改变浏览行，当前线可在视野外；回到跟随模�
   switcher.show(); assert.equal(switcher.browseRow, null); assert.equal(switcher.animateFollow, true);
 });
 
+/**
+ * Restores a `globalThis` member the test replaced, or removes it when the test installed one where
+ * none existed.
+ *
+ * The DOM lib declares these members non-optional, which makes `delete` a type error even though the
+ * properties are configurable at runtime. The removal therefore goes through a `Partial` view of the
+ * global, which is the honest annotation for "this key may be absent".
+ */
+function restoreGlobal(name: 'requestAnimationFrame' | 'cancelAnimationFrame', original: unknown): void {
+  const target: Partial<Record<typeof name, unknown>> = globalThis;
+  if (original) target[name] = original;
+  else delete target[name];
+}
+
 test('跨行滚动在 140ms 内平滑到达，快速反向可中断且隐藏立即取消动画', context => {
-  let callback; let cancelled = 0; const started = performance.now();
+  // The frame callback is optional because the code under test only registers it before the first
+  // `callback(...)` call below; the assertions pin that down at each use.
+  let callback: ((time: number) => void) | undefined; let cancelled = 0; const started = performance.now();
   context.mock.method(performance, 'now', () => started);
-  const originalRequest = globalThis.requestAnimationFrame; const originalCancel = globalThis.cancelAnimationFrame;
+  // `requestAnimationFrame`/`cancelAnimationFrame` are optional on `globalThis` once removed, and the
+  // original test deletes them again in the `finally` below.
+  const originalRequest: typeof globalThis.requestAnimationFrame | undefined = globalThis.requestAnimationFrame;
+  const originalCancel: typeof globalThis.cancelAnimationFrame | undefined = globalThis.cancelAnimationFrame;
   globalThis.requestAnimationFrame = frame => { callback = frame; return 1; };
   globalThis.cancelAnimationFrame = () => { cancelled++; };
   try {
     const switcher = Object.create(LineSwitcher.prototype);
     Object.assign(switcher, { viewport: { scrollTop: 0 }, layout: { rows: 3 }, stride: 100, animation: null, renderWindow() {}, host: { hidden: false }, active: true });
     switcher.scrollTo(100, true); assert.equal(switcher.viewport.scrollTop, 0);
+    assert.ok(callback);
     callback(started + 70); assert.ok(switcher.viewport.scrollTop > 50 && switcher.viewport.scrollTop < 100);
     const intermediate = switcher.viewport.scrollTop;
     switcher.scrollTo(0, true); assert.equal(switcher.viewport.scrollTop, intermediate); assert.equal(cancelled, 1);
@@ -123,8 +144,11 @@ test('跨行滚动在 140ms 内平滑到达，快速反向可中断且隐藏立�
     switcher.scrollTo(100, true); switcher.hide(); assert.equal(switcher.animation, null); assert.equal(switcher.host.hidden, true);
     switcher.scrollTo(10000, true); assert.equal(switcher.viewport.scrollTop, 10000); assert.equal(switcher.animation, null);
   } finally {
-    if (originalRequest) globalThis.requestAnimationFrame = originalRequest; else delete globalThis.requestAnimationFrame;
-    if (originalCancel) globalThis.cancelAnimationFrame = originalCancel; else delete globalThis.cancelAnimationFrame;
+    // The globals are declared non-optional by the DOM lib, so `delete` is rejected even though the
+    // property really is configurable at runtime. `restoreGlobal` below writes the original value
+    // back, or removes the key when there was none, which is what the original `delete` did.
+    restoreGlobal('requestAnimationFrame', originalRequest);
+    restoreGlobal('cancelAnimationFrame', originalCancel);
   }
 });
 
@@ -139,7 +163,11 @@ test('附近线索引按真实秒对齐 BPM 倍率，统计跨屏 Hold、各层�
   const sample = index.sample(seconds - 0.1, seconds - 0.2, seconds + 0.2);
   assert.equal(sample.notes.length, 2); assert.equal(sample.events.length, 4);
   assert.equal(sample.notesLeft, 2); assert.equal(sample.eventsLeft, 4);
-  assert.equal(sample.notes.find(entry => entry.item.type === 4).start, seconds);
+  // `notes` holds the entries whose item is a note; the type-4 note is in range, so the lookup
+  // resolves. `Sample.notes` elements carry the item plus its resolved start.
+  const crossScreen = sample.notes.find(entry => entry.item.type === 4);
+  assert.ok(crossScreen);
+  assert.equal(crossScreen.start, seconds);
   assert.equal(index.sample(100, 100, 110).notes.length, 0);
   assert.equal(index.sample(100, 100, 110).eventsLeft, 0);
   const layerOnly = new LineOverviewIndex(line, tempo, [], 1, false);
@@ -149,21 +177,30 @@ test('附近线索引按真实秒对齐 BPM 倍率，统计跨屏 Hold、各层�
 });
 
 test('旧热键配置缺项和无效项不阻塞其他快捷键；输入法 Process 按物理键识别', () => {
-  const preferences = migratePreferences(); delete preferences.hotkeys.ClipboardHistory;
+  // `MigratedPreferences.hotkeys` is the complete `DefaultHotkeys` map; the test deletes one entry to
+  // model a legacy file that omitted it, so the map is viewed through the partial `HotkeySource` the
+  // lookup itself accepts.
+  const preferences = migratePreferences(); const hotkeys: HotkeySource = preferences.hotkeys;
+  delete hotkeys.ClipboardHistory;
+  const source = { hotkeys };
   for (const [code, expected] of [['KeyQ', 'AddTap'], ['KeyW', 'AddDrag'], ['KeyA', 'NumberMirror'], ['KeyS', 'NumberFill'], ['KeyI', 'StartView'], ['KeyO', 'EndView'], ['Escape', 'Esc']]) {
-    assert.equal(shortcutAction({ key: 'Process', code, isComposing: true }, preferences), expected);
+    assert.equal(shortcutAction({ key: 'Process', code, isComposing: true }, source), expected);
   }
-  assert.equal(shortcutAction({ key: 'Process', code: 'KeyV', ctrlKey: true, isComposing: true }, preferences), 'Paste');
+  assert.equal(shortcutAction({ key: 'Process', code: 'KeyV', ctrlKey: true, isComposing: true }, source), 'Paste');
   assert.equal(shortcutMatches({ key: 'q' }, null), false);
   assert.equal(shortcutReleased({ key: 'Process', code: 'KeyT', isComposing: true }, 'T'), true);
-  assert.equal(shortcutAction({ key: 'w' }, { hotkeys: { AddTap: 42 } }), 'AddDrag');
+  // `HotkeySource` entries are `string | null | undefined`, which is exactly the "invalid entry"
+  // case: a numeric shortcut is treated as a miss so the default applies.
+  assert.equal(shortcutAction({ key: 'w' }, { hotkeys: { AddTap: 42 as unknown as string } }), 'AddDrag');
 });
 
 test('非文本控件触发快捷键时结束编辑锁，文本输入和输入法编辑不丢焦点', () => {
   let blurred = 0;
-  const control = { closest: selector => selector === 'input,select,button' ? control : null, blur: () => blurred++ };
+  // `closest` receives the selector the keyboard helper probes with; the doubles below echo
+  // themselves back for the one selector each models.
+  const control = { closest: (selector: string) => selector === 'input,select,button' ? control : null, blur: () => blurred++ };
   releaseShortcutFocus(control); assert.equal(blurred, 1); assert.equal(isTypingText(control), false);
-  const text = { type: 'text', closest: selector => selector === 'input' ? text : null, blur: () => blurred++ };
+  const text = { type: 'text', closest: (selector: string) => selector === 'input' ? text : null, blur: () => blurred++ };
   releaseShortcutFocus(text); assert.equal(blurred, 1); assert.equal(isTypingText(text), true);
   assert.equal(isTypingText({ isContentEditable: true }), true);
 });

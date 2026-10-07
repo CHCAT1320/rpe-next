@@ -81,38 +81,28 @@ interface PointerDouble {
 }
 
 /**
- * The double as `Timeline.updateRectangle`/`finishRectangle` see it.
+ * The double as the timeline's pointer handlers see it.
  *
- * Both are declared as taking a real `PointerEvent | MouseEvent`, which this partial is not: it
- * carries only the six members the handlers read. The bridge is confined to these two calls.
+ * `Timeline.down`/`up`/`updateRectangle`/`finishRectangle` and `EventInteraction.down`/`up` all take
+ * a real pointer event, which this partial is not: it carries only the six members the handlers
+ * read. The bridge is confined to these call sites.
  */
 function pointerEvent(double: PointerDouble): PointerEvent {
   return double as unknown as PointerEvent;
 }
 
 /**
- * The double as `EventInteraction.down`/`up` see it.
- *
- * Those take the module's own `PointerLike`, which is not exported; it requires `ctrlKey`, which the
- * partial here omits because no handler under test reads it. Bridged through `unknown` at the call
- * sites, in the same one documented place as the `PointerEvent` bridge above.
- */
-function pointerLike(double: PointerDouble): Parameters<Timeline['eventInteraction']['down']>[0] {
-  const open: unknown = double;
-  return open as Parameters<Timeline['eventInteraction']['down']>[0];
-}
-
-/**
  * The `eventRects` entries the fixture installs.
  *
- * `EventInteraction.hit` reads `type`, `index`, `x`, `y`, `width`, `height` and `lineIndex`; the
- * fixture sets all of them. Spelled out here so the literal is checked against what the hit test
- * consumes rather than against the timeline's `unknown[]`.
+ * `EventInteraction.hit` reads `type`, `index`, `x`, `y`, `width` and `height`, and the multi-line
+ * paths additionally compare `lineIndex`; the fixture's rectangle predates the multi-line view and
+ * deliberately carries no `lineIndex`, so the field is optional here and stays absent at runtime.
+ * Spelled out so the literal is checked against what the hit test consumes.
  */
 interface EventRectEntry {
   type: AnyEventType;
   index: number;
-  lineIndex: number;
+  lineIndex?: number;
   x: number;
   y: number;
   width: number;
@@ -245,20 +235,26 @@ function selectionFixture() {
   assert.ok(line);
   line.eventLayers[0] = { moveXEvents: [createEvent(0, 10, 0.5, 0.8)] };
   const timeline = new Timeline(timelineSurface(canvas(0)), timelineSurface(canvas(520)), () => timelineSession(session), () => {}, () => {});
-  const rectangles: EventRectEntry[] = [{ type: 'moveXEvents', index: 0, lineIndex: 0, x: 110, y: 350, width: 60, height: 100 }];
-  timeline.eventRects = rectangles;
+  // No `lineIndex`: the original fixture carried none, and `EventInteraction`'s multi-line paths
+  // compare the rectangle's line against the session's, so adding one would change which events the
+  // stroke selects. The field is left absent to keep the hit test exactly as it was.
+  const rectangles: EventRectEntry[] = [{ type: 'moveXEvents', index: 0, x: 110, y: 350, width: 60, height: 100 }];
+  // `Timeline.eventRects` is declared as `EventRectangle[]`, which requires `lineIndex`; the fixture
+  // above deliberately omits it, so the assignment is bridged through `unknown` in this one spot
+  // rather than adding a field that would change the hit test.
+  timeline.eventRects = rectangles as unknown as Timeline['eventRects'];
   return { session, timeline };
 }
 
 test('音符框选跨到事件区结束，选框越过边界且不创建事件框选', () => {
   const { session, timeline } = selectionFixture();
-  timeline.down(pointer(100, 550, true)); timeline.up(pointer(100, 550, true));
+  timeline.down(pointerEvent(pointer(100, 550, true))); timeline.up(pointerEvent(pointer(100, 550, true)));
   timeline.updateRectangle(pointerEvent(pointer(900, 300)));
   // `Timeline.drag` is nullable and the assertion above has just proved a rectangle drag is open.
   const drag = timeline.drag;
   assert.ok(drag);
   assert.equal(drag.current?.x, 900);
-  timeline.eventInteraction.down(pointerLike(pointer(900, 300)));
+  timeline.eventInteraction.down(pointerEvent(pointer(900, 300)));
   assert.deepEqual([...session.selection], [0]); assert.equal(session.eventSelection.size, 0);
   assert.equal(session.focus, 'notes'); assert.equal(timeline.drag, null); assert.equal(timeline.eventInteraction.drag, null);
 });
@@ -279,7 +275,8 @@ test('框选起点在滚轮滚动后保持绝对时间，选中跨越视野的�
     const horizontal = kind === 'notes' ? 220 : 530;
     const endHorizontal = kind === 'notes' ? 280 : 605;
     const interaction = kind === 'notes' ? timeline : timeline.eventInteraction;
-    X
+    interaction.down(pointerEvent(pointer(horizontal, timeline.vertical(first), true)));
+    interaction.up(pointerEvent(pointer(horizontal, timeline.vertical(first), true)));
     const selection = timeline.rectangleSelection();
     assert.ok(selection);
     const drag = selection.drag;
@@ -294,12 +291,12 @@ test('框选起点在滚轮滚动后保持绝对时间，选中跨越视野的�
 
 test('放置模式也可 Shift 开始事件框选，跨到音符区结束时只选中事件', () => {
   const { session, timeline } = selectionFixture(); timeline.tool = 1;
-  timeline.eventInteraction.down(pointerLike(pointer(950, 550, true))); timeline.eventInteraction.up(pointerLike(pointer(950, 550, true)));
+  timeline.eventInteraction.down(pointerEvent(pointer(950, 550, true))); timeline.eventInteraction.up(pointerEvent(pointer(950, 550, true)));
   timeline.updateRectangle(pointerEvent(pointer(100, 300)));
   const drag = timeline.eventInteraction.drag;
   assert.ok(drag);
   assert.equal(drag.current?.x, -420);
-  timeline.down(pointer(100, 300));
+  timeline.down(pointerEvent(pointer(100, 300)));
   assert.deepEqual([...session.eventSelection], ['moveXEvents:0']); assert.equal(session.selection.size, 0);
   assert.equal(session.focus, 'events'); assert.equal(timeline.eventInteraction.drag, null); assert.equal(timeline.drag, null);
   assert.equal(session.notes.length, 1);
