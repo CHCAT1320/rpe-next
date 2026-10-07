@@ -7,7 +7,7 @@
     <div id="document-name">未命名谱面</div>
     <nav aria-label="文件">
       <button id="new">新建</button><button id="open" data-icon="folder">打开 JSON / PEZ</button>
-      <button id="save" data-icon="save">保存 <kbd>Ctrl S</kbd></button><button id="export-json">另存 JSON</button><button id="package">导出 PEZ</button>
+      <button id="save" data-icon="save">保存 <kbd>Ctrl S</kbd></button><button id="export">导出</button>
       <button id="library" class="home-back" title="返回主界面，管理谱面">← 返回主界面</button><button id="migrate">迁移旧 RPE</button><button id="recover">恢复备份</button>
       <button id="preferences" data-icon="setting" title="热键与设置">设置</button><button id="help" data-icon="help" title="帮助">帮助</button>
     </nav>
@@ -40,10 +40,10 @@
       </div>
       <div class="timeline-head"><span>音符 <small id="note-count">0 notes</small><output id="cursor-position"></output><span id="line-group-label" class="line-group-label" aria-live="polite"></span></span><span>事件 <span id="layer" class="layer-buttons" aria-label="事件层"></span></span><span class="multi-line-head-controls"><button id="multi-line-toggle" title="开启多线并打开右侧页面">多线</button><button id="multi-line-prev-add" title="加入最小线号的上一条">◀＋</button><button id="multi-line-prev-remove" title="移除最小线号">◀−</button><button id="multi-line-next-remove" title="移除最大线号">−▶</button><button id="multi-line-next-add" title="加入最大线号的下一条">＋▶</button><button id="multi-line-merge" title="合并多线音符视图">合并</button><button id="multi-line-open" title="打开多线编辑页面">☷ <small id="multi-line-count">0</small></button></span></div>
       <div class="stage">
-        <canvas id="realtime-preview" aria-label="背景实时谱面预览"></canvas>
+        <canvas id="realtime-preview" aria-label="背景实时谱面预览"></canvas><canvas id="audio-analysis-overlay" aria-label="音频波形或频谱" hidden></canvas>
         <div class="canvases"><canvas id="note-density" class="timeline-strip" aria-label="音符与当前层事件分布密度"></canvas><canvas id="notes" tabindex="0" aria-label="音符编辑区域"></canvas><canvas id="events" tabindex="0" aria-label="事件编辑区域"></canvas><canvas id="history-strip" class="timeline-strip" aria-label="编辑操作历史"></canvas><div id="notifications" aria-live="polite"></div></div>
         <div id="multi-line-labels" aria-hidden="true"></div><input id="multi-line-scroll" type="range" min="0" max="0" step="1" value="0" hidden aria-label="多线编辑横向滚动">
-        <div id="line-info-overlay" hidden aria-live="polite"></div><div class="preview-wrap" hidden><canvas id="preview" aria-label="谱面播放预览"></canvas><div class="preview-overlay"><span id="preview-title"></span><button id="close-preview">结束预览并保留时间</button></div></div>
+        <div id="line-info-overlay" hidden aria-live="polite"></div><button id="note-source-toast" hidden type="button" aria-live="polite"></button><div class="preview-wrap" hidden><canvas id="preview" aria-label="谱面播放预览"></canvas><div class="preview-overlay"><span id="preview-title"></span><button id="close-preview">结束预览并保留时间</button></div></div>
       </div>
       <div class="editor-footer"><span id="selection-info">未选择</span><button id="undo" title="Ctrl+Z">撤销</button><button id="redo" title="Ctrl+Y">重做</button><button id="copy" data-icon="copy">复制</button><button id="cut" data-icon="shear">剪切</button><button id="paste" data-icon="paste">粘贴</button><button id="mirror">镜像</button><button id="delete" data-icon="delete0">删除</button><button id="clear-clipboard" title="清空当前剪贴板并隐藏虚影；历史记录可在剪贴板历史中删除">清空剪贴板</button></div>
     </main>
@@ -54,12 +54,14 @@
         <p class="hint">事件区按 R 定起点，再按 R 定终点；Q 也可定位，第二次用 1–0 指定缓动编号。Esc 取消。</p>
       </section>
       <section data-panel="lines" hidden><div id="line-panel"></div></section>
-      <section data-panel="chart"><div class="panel-title">谱面工具</div><div class="action-grid"><button id="metadata" data-icon="info">谱面信息</button><button id="bpm">BPM 列表</button><button id="assets" data-icon="folder">素材库</button><button id="music" data-icon="waves">载入音乐</button><button id="background">载入封面</button><button id="curve-notes" data-icon="bezier">生成曲线</button><button id="multi-line-tool" data-icon="addline">多线编辑</button><button id="diagnose">谱面检查</button><button id="history-panel">编辑历史</button></div><p id="music-name" class="hint">无音乐 · 时钟预览</p></section>
+      <section data-panel="chart"><div class="panel-title"><span id="chart-tools-title">谱面工具</span><small id="chart-material-hint" class="chart-material-hint"></small></div><div class="action-grid"><button id="metadata" data-icon="info">谱面信息</button><button id="bpm">BPM 列表</button><button id="assets" data-icon="folder">素材库</button><button id="audio-analysis-tool" data-icon="waves">波形 / 频谱</button><button id="curve-notes" data-icon="bezier">填充曲线音符</button><button id="curve-trajectory">生成曲线轨迹</button><button id="multi-line-tool" data-icon="addline">多线编辑</button><button id="diagnose">谱面检查</button><button id="history-panel">编辑历史</button></div><p id="music-name" class="hint">无音乐 · 时钟预览</p></section>
       <section data-panel="assets" hidden><div id="asset-library"></div></section>
+      <section data-panel="audio-analysis" hidden><div class="panel-title">波形图 / 频谱</div><div id="audio-analysis-panel"></div><button class="wide-button" data-return-chart>返回谱面工具</button></section>
       <section data-panel="multi" hidden><div id="multi-editor"></div></section>
       <section data-panel="multi-line" hidden><div id="multi-line-editor"></div></section>
-      <section data-panel="metadata" hidden><div class="panel-title">谱面信息</div><div id="metadata-editor"></div><button class="wide-button" data-return-chart>返回谱面工具</button></section>
+      <section data-panel="metadata" hidden><div class="panel-title">谱面信息</div><div id="metadata-editor"></div><div class="metadata-media-actions"><button id="music" data-icon="waves">载入音乐</button><button id="background">载入封面</button></div><p id="metadata-media-status" class="hint"></p><button class="wide-button" data-return-chart>返回谱面工具</button></section>
       <section data-panel="bpm" hidden><div class="panel-title">BPM 列表</div><div id="bpm-editor"></div><button class="wide-button" data-return-chart>返回谱面工具</button></section>
+      <section data-panel="trajectory" hidden><div class="panel-title">生成曲线轨迹</div><div id="trajectory-editor"></div></section>
       <section data-panel="curve" hidden><div class="panel-title">曲线音符</div><p class="hint">先选择起点和终点，再在左侧点击对应音符。中间音符会实时预览，端点不会重复生成。</p><div class="curve-pick-actions"><button id="curve-start">选曲线起点</button><button id="curve-end">选曲线终点</button></div><div id="curve-editor"></div><div class="action-grid"><button id="curve-generate" class="primary">生成音符</button><button id="curve-cancel">取消</button></div></section>
       <section data-panel="diagnose" hidden><div class="panel-title">谱面检查</div><label class="field diagnose-filter"><input id="diagnose-show-low" type="checkbox" checked> 显示最低级问题</label><div id="diagnose-results"></div><button id="diagnose-close" class="wide-button">返回谱面工具</button></section>
       <section data-panel="history" hidden><div class="panel-title">编辑历史</div><p class="hint">点击记录可回退或重做到对应步骤。</p><div id="history-results" class="history-results"></div><button id="history-close" class="wide-button">返回谱面工具</button></section>
@@ -75,9 +77,9 @@
     <div class="home-filters"><input id="project-search" type="search" placeholder="搜索曲名、谱师或分组" aria-label="搜索谱面"><select id="project-group" aria-label="项目分组"><option value="">全部分组</option></select><select id="project-sort" aria-label="谱面排序"><option value="recent">最近编辑</option><option value="name">曲名</option></select><label><input id="show-archived" type="checkbox">显示归档</label><output id="project-count"></output></div>
     <div id="project-cards"></div><p id="home-empty" class="hint"></p>
   </section>
-  <footer><button id="chart-info-toggle" type="button" aria-expanded="false">谱面信息</button><dl id="chart-info" class="chart-info" aria-label="谱面信息" hidden></dl><span id="status" role="status">就绪</span><span id="performance"></span><span id="tips" aria-live="polite"></span><span>Re:PhiEdit Next · 0.7.1</span></footer>
-  <div id="timeline-context-menu" class="timeline-context-menu" hidden><button id="timeline-add-marker" type="button">添加时间标记</button><button id="timeline-delete-marker" type="button">删除此标记</button></div>
+  <footer><button id="chart-info-toggle" type="button" aria-expanded="false">谱面信息</button><dl id="chart-info" class="chart-info" aria-label="谱面信息" hidden></dl><span id="status" role="status">就绪</span><span id="performance"></span><span id="tips" aria-live="polite"></span><span>Re:PhiEdit Next · 0.8.0</span></footer>
+  <div id="timeline-context-menu" class="timeline-context-menu" hidden><button id="timeline-add-marker" type="button">添加时间标记</button><button id="trajectory-context-split" hidden>拆分曲线轨迹</button><button id="timeline-delete-marker" type="button">删除此标记</button></div>
   <input id="file-input" type="file" multiple accept=".json,.pec,.pez,.zip,audio/*,image/*" hidden><input id="music-input" type="file" accept="audio/*" hidden><input id="background-input" type="file" accept="image/*" hidden><input id="directory-input" type="file" webkitdirectory multiple hidden>
-  <dialog id="modal"><form method="dialog"><div class="modal-heading"><h2 id="modal-title"></h2><button value="cancel" aria-label="关闭">×</button></div><p id="modal-description"></p><div id="modal-content"></div><p id="modal-error" role="alert"></p><div class="modal-actions"><button value="cancel">取消 / 关闭</button><button id="modal-delete" type="button" hidden>删除</button><button id="modal-apply" type="button" class="primary">应用</button></div></form></dialog>
+  <dialog id="modal"><form method="dialog"><div class="modal-heading"><h2 id="modal-title"></h2><button value="cancel" aria-label="关闭" formnovalidate>×</button></div><p id="modal-description"></p><div id="modal-content"></div><p id="modal-error" role="alert"></p><div class="modal-actions"><button value="cancel" formnovalidate>取消 / 关闭</button><button id="modal-delete" type="button" hidden>删除</button><button id="modal-apply" type="button" class="primary">应用</button></div></form></dialog>
   <script type="module" src="./src/ui/app.mjs"></script>
 </body></html>

@@ -108,7 +108,7 @@ export class EventInteraction {
     this.timeline.hoverArea = 'events';
     if (this.drag) {
       const previous = this.drag.current; this.drag.current = point; this.drag.currentWorldX = point.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-      if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - 42 - this.drag.current.y) / this.timeline.scale;
+      if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - (this.timeline.judgementOffset ?? 42) - this.drag.current.y) / this.timeline.scale;
       if (this.drag.kind === 'multi-pan') {
         const current = this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
         this.timeline.multiLineScroll.events = Math.max(0, current - (point.x - previous.x));
@@ -135,7 +135,7 @@ export class EventInteraction {
     if (this.drag.kind === 'stroke' && !this.drag.remove && !this.drag.tracing && this.timeline.previewPick?.(event)) { this.drag = null; this.timeline.changed(); return; }
     this.drag.current = this.timeline.point(event, this.canvas);
     this.drag.currentWorldX = this.drag.current.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-    if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - 42 - this.drag.current.y) / this.timeline.scale;
+    if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - (this.timeline.judgementOffset ?? 42) - this.drag.current.y) / this.timeline.scale;
     if (this.drag.kind === 'stroke' && this.drag.remove && !this.drag.tracing) {
       this.drag = { ...this.drag, kind: 'rectangle', area: 'events', startSeconds: this.timeline.timeAt(this.drag.start.y), append: true, remove: false }; this.timeline.changed(); return;
     }

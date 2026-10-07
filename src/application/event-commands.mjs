@@ -1,5 +1,6 @@
 import { EVENT_TYPES, assertChart, createEvent } from '../core/chart.mjs';
 import { beatValue, fromNumber } from '../core/beat.mjs';
+import { trajectoryHasRotation } from '../core/curve-trajectory.mjs';
 import { EventTrack } from '../core/events.mjs';
 import { shaderEvents, replaceShaderEvents, alignShaderParameters } from '../core/shader-events.mjs';
 
@@ -99,7 +100,8 @@ export function placedEvent(session, type, first, second, easingType, lineIndex 
   if (end - start < 0.001) return null;
   const events = eventListAt(session, lineIndex, type);
   if (type === 'paintEvents') return { startTime: fromNumber(start), endTime: fromNumber(end), shader: 'chromatic', global: false, order: 0, vars: {} };
-  if (events.some(event => start < beatValue(event.endTime) && end > beatValue(event.startTime))) throw new Error('该时间范围与同轨道已有事件重叠，请调整终点或按 Esc 取消');
+  const trajectories = ['moveYEvents', 'rotateEvents'].includes(type) ? eventListAt(session, lineIndex, 'moveXEvents').filter(event => event.trajectory && (type !== 'rotateEvents' || trajectoryHasRotation(event.trajectory.options))) : [];
+  if ([...events, ...trajectories].some(event => start < beatValue(event.endTime) && end > beatValue(event.startTime))) throw new Error('该时间范围与同轨道已有事件或整体轨迹重叠，请调整终点或按 Esc 取消');
   const previous = events.filter(event => beatValue(event.endTime) <= start).sort((left, right) => beatValue(right.startTime) - beatValue(left.startTime))[0];
   const fallback = type === 'alphaEvents' ? 255 : type.startsWith('scale') ? 1 : type === 'speedEvents' ? 10 : type === 'textEvents' ? '' : type === 'colorEvents' ? [255, 255, 255] : 0;
   const value = structuredClone(previous?.end ?? fallback);

@@ -99,7 +99,8 @@ export class LineSwitcher {
     }
     const started = performance.now();
     const frame = timestamp => {
-      const progress = Math.min(1, Math.max(0, (timestamp - started) / 140));
+      const elapsed = timestamp - started;
+      const progress = elapsed >= 140 - Number.EPSILON * Math.max(1, Math.abs(started)) ? 1 : Math.min(1, Math.max(0, elapsed / 140));
       this.viewport.scrollTop = start + distance * (1 - (1 - progress) ** 3);
       this.renderWindow();
       this.animation = progress < 1 ? requestAnimationFrame(frame) : null;
