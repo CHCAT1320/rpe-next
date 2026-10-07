@@ -1,5 +1,6 @@
 import { beatValue } from './beat.ts';
 import { easing } from './easing.ts';
+import { trajectoryEventValue } from './curve-trajectory.ts';
 import type { TempoMap } from './tempo.ts';
 import type { Chart, ChartEvent, Note } from './types.ts';
 
@@ -63,10 +64,13 @@ export function eventChains(events: readonly ChartEvent[]): EventChain[] {
   for (const entry of events.map((event, index): IndexedEvent => ({ event, index })).sort((left, right) => beatValue(left.event.startTime) - beatValue(right.event.startTime))) {
     let group: EventChain | undefined = groups.at(-1);
     const last: IndexedEvent | undefined = group?.entries.at(-1);
-    if (!group || !last || Math.abs(beatValue(last.event.endTime) - beatValue(entry.event.startTime)) > 1e-8) {
+    // A trajectory both starts its own chain and ends the previous one: its curve is its own reading,
+    // so it must not be merged into a neighbouring chain's value range.
+    if (!group || !last || entry.event.trajectory || last.event.trajectory || Math.abs(beatValue(last.event.endTime) - beatValue(entry.event.startTime)) > 1e-8) {
       group = { entries: [], min: Infinity, max: -Infinity }; groups.push(group);
     }
     group.entries.push(entry);
+    if (entry.event.trajectory) for (let index = 0; index <= 64; index++) { const value = trajectoryEventValue(entry.event, index / 64); group.min = Math.min(group.min, value); group.max = Math.max(group.max, value); }
     for (const value of [entry.event.start, entry.event.end]) if (typeof value === 'number') { group.min = Math.min(group.min, value); group.max = Math.max(group.max, value); }
   }
   return groups;

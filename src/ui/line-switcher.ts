@@ -227,7 +227,11 @@ export class LineSwitcher {
     }
     const started = performance.now();
     const frame: FrameRequest = timestamp => {
-      const progress = Math.min(1, Math.max(0, (timestamp - started) / 140));
+      // The final frame can report a timestamp a hair under `started + 140`, which would leave
+      // `progress` below 1 and keep the animation alive forever. The epsilon-scaled bound below is
+      // what makes the last step land exactly on 1, so `animation` is cleared as intended.
+      const elapsed = timestamp - started;
+      const progress = elapsed >= 140 - Number.EPSILON * Math.max(1, Math.abs(started)) ? 1 : Math.min(1, Math.max(0, elapsed / 140));
       this.viewport.scrollTop = start + distance * (1 - (1 - progress) ** 3);
       this.renderWindow();
       this.animation = progress < 1 ? requestAnimationFrame(frame) : null;

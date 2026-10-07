@@ -16,7 +16,7 @@ Thumbs.db
 *.pez
 
 # Throwaway scripts and directories used to probe behaviour by hand; never part of the project.
-.probe*.ts
+.probe*
 .scratch-*/
 .tmp-*
 .*-errors.txt

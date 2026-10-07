@@ -72,6 +72,12 @@ export interface MigratedSettings {
   fpsLimit: number;
   showHotkey: boolean;
   showGameUI: boolean;
+  /**
+   * Read by the note-source hover toast, but never written by `migratePreferences` — there is no
+   * legacy `Settings.json` key behind it. It is therefore always `undefined` and the reader's `?? true`
+   * is what actually decides, which is the behaviour the original had.
+   */
+  noteSourceHover?: boolean;
 }
 
 /** What the migration did to each legacy key: applied, or kept only in the exported file. */

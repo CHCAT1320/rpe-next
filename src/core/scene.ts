@@ -3,6 +3,7 @@ import { IntervalIndex } from './interval-index.ts';
 import { easing } from './easing.ts';
 import { upperBound } from './beat.ts';
 import { noteIsAbove } from './chart.ts';
+import { trajectoryHasRotation } from './curve-trajectory.ts';
 import type { TempoMap } from './tempo.ts';
 import type { IndexedInterval } from './interval-index.ts';
 import type { HitEntry } from './hit-effects.ts';
@@ -100,8 +101,18 @@ export class LineRuntime {
   constructor(line: JudgeLine, tempo: TempoMap) {
     this.line = line;
     const factor = line.bpmfactor ?? 1;
-    const tracks = Object.fromEntries(TRACK_TYPES.map(type =>
-      [type, (line.eventLayers ?? []).map(layer => new EventTrack(layer?.[type], tempo, factor))]));
+    const tracks = Object.fromEntries(TRACK_TYPES.map(type => {
+      const wantsRotation = type === 'moveYEvents' || type === 'rotateEvents';
+      return [type, (line.eventLayers ?? []).map(layer => {
+        // A trajectory event lives on the X track but drives Y and rotation too, so each of those two
+        // tracks gets a virtual copy of it tagged with the axis it should be read on. The rotation copy
+        // is only added when the trajectory actually produces an angle.
+        const virtual: ChartEvent[] = wantsRotation
+          ? (layer?.moveXEvents ?? []).filter(event => event.trajectory && (type !== 'rotateEvents' || trajectoryHasRotation(event.trajectory!.options))).map(event => ({ ...event, trajectoryAxis: type === 'moveYEvents' ? 'y' as const : 'rotation' as const }))
+          : [];
+        return new EventTrack([...(layer?.[type] ?? []), ...virtual], tempo, factor);
+      })];
+    }));
     this.tracks = tracks as unknown as LineTracks;
     this.speeds = (line.eventLayers ?? []).map(layer => new SpeedIntegral(layer?.speedEvents, tempo, factor));
     const defaultColor: Color = line.attachUI || line.extended?.textEvents?.length || line.Texture && line.Texture !== 'line.png' ? [255, 255, 255] : [241, 216, 148];

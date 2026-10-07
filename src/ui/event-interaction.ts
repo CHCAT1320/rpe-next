@@ -117,6 +117,11 @@ interface EventTimeline {
   point(event: PointerLike, canvas?: HTMLCanvasElement): CanvasPoint;
   timeAt(vertical: number): number;
   viewHeight(): number;
+  /**
+   * Pixels between the pane's bottom and the judgement line, read as `?? 42` because a timeline that
+   * has not been configured yet leaves it unset; 42 was the hard-coded value this replaced.
+   */
+  judgementOffset?: number;
   factorForLine(lineIndex: number): number;
   verticalForLine(beat: BeatLike, lineIndex: number, height?: number): number;
   eventVertical(beat: BeatLike, type: AnyEventType): number;
@@ -258,7 +263,7 @@ export class EventInteraction {
     this.timeline.hoverArea = 'events';
     if (this.drag) {
       const drag = this.drag; const previous = drag.current; drag.current = point; drag.currentWorldX = point.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-      if (drag.startFactor !== undefined) drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, drag.startFactor) + (this.timeline.viewHeight() - 42 - drag.current.y) / this.timeline.scale;
+      if (drag.startFactor !== undefined) drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, drag.startFactor) + (this.timeline.viewHeight() - (this.timeline.judgementOffset ?? 42) - drag.current.y) / this.timeline.scale;
       if (drag.kind === 'multi-pan') {
         const current = this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
         // `multiLineScroll` holds one shared offset or one per area (`notes` / `events`); both forms
@@ -289,7 +294,7 @@ export class EventInteraction {
     if (this.drag.kind === 'stroke' && !this.drag.remove && !this.drag.tracing && this.timeline.previewPick?.(event)) { this.drag = null; this.timeline.changed(); return; }
     this.drag.current = this.timeline.point(event, this.canvas);
     this.drag.currentWorldX = this.drag.current.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-    if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - 42 - this.drag.current.y) / this.timeline.scale;
+    if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - (this.timeline.judgementOffset ?? 42) - this.drag.current.y) / this.timeline.scale;
     if (this.drag.kind === 'stroke' && this.drag.remove && !this.drag.tracing) {
       this.drag = { ...this.drag, kind: 'rectangle', area: 'events', startSeconds: this.timeline.timeAt(this.drag.start.y), append: true, remove: false }; this.timeline.changed(); return;
     }

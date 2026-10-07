@@ -143,6 +143,21 @@ interface LineTextEventSource {
  */
 type ShaderPass = Omit<ShaderEffectRecord, 'shader'> & { shader: string; sourceName: string };
 
+/**
+ * One note's clickable capsule in canvas pixels.
+ *
+ * `x1,y1` is the head and `x2,y2` the tail, so a hold note's whole length is hittable; `radius` is
+ * widened for long notes by the caller. `lineIndex` is what a hit reports back.
+ */
+export interface NoteHitArea {
+  lineIndex: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  radius: number;
+}
+
 export class Preview {
   /**
    * Every field is declared explicitly rather than inferred from the constructor's assignments: the
@@ -172,6 +187,13 @@ export class Preview {
   applyShaders: boolean;
   opacity: number;
   showHitEffects: boolean;
+  /**
+   * The screen-space capsules the notes drawn this frame occupy.
+   *
+   * Rebuilt on every frame so `pickNote` can map a click back to a judge line. Each entry is the note
+   * head's screen point and its tail's, plus the radius the hit test allows.
+   */
+  noteHitAreas: NoteHitArea[];
   /**
    * The display toggles. The constructor never assigns any of them — they are installed from the
    * saved editor preferences by `app.ts` before the first frame, and `view-controls.ts` augmentates
@@ -224,6 +246,7 @@ export class Preview {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
     this.backgroundFrame = new PreviewBackground();
     this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
+    this.noteHitAreas = [];
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]] as const) {
@@ -273,6 +296,9 @@ export class Preview {
     // an out-of-range index `undefined`, which the call already tolerates: `radius` is only read
     // from `states` at that index, and the `undefined` state itself is passed straight through.
     const visibleNotes = new Map<number, HitEntry[]>(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index] as ScreenState, 1600 * divisor + Math.hypot(states[index]?.x ?? 0, states[index]?.y ?? 0)) ?? []]));
+    // The hit areas describe the frame about to be drawn, so they are rebuilt from scratch here
+    // rather than accumulated across frames.
+    this.noteHitAreas = [];
     for (const pass of this.passes ?? []) for (const index of pass.kind === 'line' ? [pass.index ?? 0] : order) {
       if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || chart.judgeLineList[index].attachUI || (states[index]?.alpha ?? 0) <= 0 || states[index]?.scaleX === 0 || states[index]?.scaleY === 0)) continue;
       const runtime = this.scene.lines[index];
@@ -303,6 +329,17 @@ export class Preview {
         if (position.alpha <= 0 || position.size === 0) continue;
         const noteWidth = this.noteSize * scale * position.size;
         const horizontal = position.x * scale;
+        // The note is placed in the line's rotated frame, so the hit capsule has to be rotated the
+        // same way: `worldX`/`worldY` mirror the transform the draw calls below apply.
+        const rotation = state.rotation * Math.PI / 180;
+        const worldX = state.x + position.x * Math.cos(rotation) + position.y * Math.sin(rotation);
+        const worldY = -state.y + position.x * Math.sin(rotation) - position.y * Math.cos(rotation);
+        const screenX = width / 2 + worldX * scale;
+        const screenY = height / 2 + worldY * scale;
+        const tail = Number.isFinite(position.tail) ? position.tail : position.y;
+        const tailWorldX = state.x + position.x * Math.cos(rotation) + tail * Math.sin(rotation);
+        const tailWorldY = -state.y + position.x * Math.sin(rotation) - tail * Math.cos(rotation);
+        this.noteHitAreas.push({ lineIndex: index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
         context.save();
         context.globalAlpha = clamp(position.alpha);
         // `Note` indexes unknown keys, so a chart-supplied per-note tint has no declared type. The
@@ -402,6 +439,26 @@ export class Preview {
     const view = this.viewport;
     if (point.x < view.left || point.x > view.left + view.width || point.y < view.top || point.y > view.top + view.height) return null;
     return pickGuide(this.guides ?? [], point, this.selectedLine ?? -1);
+  }
+
+  /**
+   * Maps a click to the judge line of the note under it, or `null` for empty space.
+   *
+   * The areas are tested newest-first, so the note drawn on top wins, and the distance is measured to
+   * the head-to-tail segment rather than to the head alone, which is what makes a hold note's length
+   * clickable.
+   */
+  pickNote(clientX: number, clientY: number): number | null {
+    if (!this.visible || !this.noteHitAreas?.length) return null;
+    const rectangle = this.canvas.getBoundingClientRect();
+    const point = { x: clientX - rectangle.left, y: clientY - rectangle.top };
+    const distanceToSegment = (area: NoteHitArea): number => {
+      const dx = area.x2 - area.x1; const dy = area.y2 - area.y1;
+      const length = dx * dx + dy * dy;
+      const amount = length ? Math.max(0, Math.min(1, ((point.x - area.x1) * dx + (point.y - area.y1) * dy) / length)) : 0;
+      return Math.hypot(point.x - (area.x1 + amount * dx), point.y - (area.y1 + amount * dy));
+    };
+    return this.noteHitAreas.slice().reverse().find(area => distanceToSegment(area) <= area.radius)?.lineIndex ?? null;
   }
 
   drawGuides(context: CanvasRenderingContext2D, scale: number, selectedLine: number): void {

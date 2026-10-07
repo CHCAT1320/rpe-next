@@ -31,10 +31,10 @@ export function createSettingsPanel(): HTMLDialogElement {
     }
     body.append(section);
   };
-  group('显示与网格', [['bar-width', '节拍线宽度', 'range', 3, 0.5, 10, 0.1], ['bar-alpha', '节拍线亮度', 'range', 1, 0.1, 2, 0.05], ['event-value-size', '事件数值字号', 'range', 13, 8, 28, 1], ['event-value-threshold', '事件数值最小宽度', 'range', 30, 10, 180, 1], ['event-curve-threshold', '事件曲线最小宽度', 'range', 24, 8, 180, 1], ['event-opacity', '事件条不透明度', 'range', 0.25, 0.05, 1, 0.05], ['event-bar-width', '事件条宽度比例', 'range', 0.82, 0.35, 1, 0.01], ['highlight-notes', '同时音符高亮', 'checkbox', true], ['seamless-events', '连续事件无接缝', 'checkbox', true], ['background-blur', '背景高斯模糊', 'range', 10.5, 0, 30, 0.5]]);
+  group('显示与网格', [['bar-width', '节拍线宽度', 'range', 3, 0.5, 10, 0.1], ['bar-alpha', '节拍线亮度', 'range', 1, 0.1, 2, 0.05], ['judgement-offset', '底部判定线高度', 'range', 92, 42, 240, 1], ['event-value-size', '事件数值字号', 'range', 13, 8, 28, 1], ['event-value-threshold', '事件数值最小宽度', 'range', 30, 10, 180, 1], ['event-curve-threshold', '事件曲线最小宽度', 'range', 24, 8, 180, 1], ['event-opacity', '事件条不透明度', 'range', 0.25, 0.05, 1, 0.05], ['event-bar-width', '事件条宽度比例', 'range', 0.82, 0.35, 1, 0.01], ['highlight-notes', '同时音符高亮', 'checkbox', true], ['seamless-events', '连续事件无接缝', 'checkbox', true], ['background-blur', '背景高斯模糊', 'range', 10.5, 0, 30, 0.5]]);
   group('音频与播放', [['volume', '音乐音量', 'range', 0.75, 0, 1, 0.01], ['hit-volume', '打击音效音量', 'range', 0.3, 0, 1, 0.01], ['hit-enabled', '启用打击音效', 'checkbox', true], ['autoplay-view', '进入预览自动播放', 'checkbox', true], ['scroll-speed', '滚轮时间调整速度', 'range', 5, 0.1, 100, 0.1]]);
   group('实时预览判定线', [['line-numbers', '显示判定线编号', 'checkbox', true], ['line-arrows', '显示方向箭头', 'checkbox', true], ['line-tint', '当前判定线染色', 'checkbox', true], ['merge-line-numbers', '合并相近且同向的编号', 'checkbox', true], ['pick-preview-lines', '点击预览判定线切换编辑线', 'checkbox', true]]);
-  group('提示与通知', [['tips-enabled', '显示右下角 Tips', 'checkbox', true], ['success-notifications', '显示绿色完成通知', 'checkbox', true]]);
+  group('提示与通知', [['tips-enabled', '显示右下角 Tips', 'checkbox', true], ['success-notifications', '显示绿色完成通知', 'checkbox', true], ['note-source-hover', '悬停音符显示来源线', 'checkbox', true]]);
   group('事件编辑', [['event-cut-density', '事件切割密度（每横线间隔的段数）', 'number', 4, 0.1, 128, 0.1]]);
   group('判定线切换', [['line-switcher-enabled', 'Ctrl+滚轮切线时显示附近线缩略图', 'checkbox', true]]);
   group('剪贴板', [['clipboard-history-enabled', '启用剪贴板历史（长按 Ctrl+V）', 'checkbox', true]]);

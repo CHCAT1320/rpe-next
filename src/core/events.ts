@@ -1,5 +1,6 @@
 import { upperBound } from './beat.ts';
 import { easing, bezier } from './easing.ts';
+import { trajectoryEventValue } from './curve-trajectory.ts';
 import type { TempoMap } from './tempo.ts';
 import type { ChartEvent, Color, EventValue } from './types.ts';
 
@@ -51,6 +52,10 @@ export class EventTrack {
    */
   sample(entry: ResolvedEvent, seconds: number): TrackValue {
     const event = entry.event;
+    // A whole-curve trajectory owns its own value on every axis, so it replaces the easing below
+    // rather than being read through it. `trajectoryAxis` is set on the virtual copies the line
+    // runtime builds for the Y and rotation tracks.
+    if (event.trajectory) return trajectoryEventValue(event, entry.end <= entry.start ? 1 : Math.max(0, Math.min(1, (seconds - entry.start) / (entry.end - entry.start))));
     if (typeof event.start === 'number' && event.start === event.end) return event.start;
     if (Array.isArray(event.start) && Array.isArray(event.end) && event.start.every((value, index) => value === (event.end as Color)[index])) return event.start;
     const progress = entry.end <= entry.start ? 1 : Math.max(0, Math.min(1, (seconds - entry.start) / (entry.end - entry.start)));

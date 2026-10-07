@@ -1,5 +1,6 @@
 import { EVENT_TYPES, assertChart, createEvent } from '../core/chart.ts';
 import { beatValue, fromNumber } from '../core/beat.ts';
+import { trajectoryHasRotation } from '../core/curve-trajectory.ts';
 import { EventTrack } from '../core/events.ts';
 import type { ResolvedEvent } from '../core/events.ts';
 import { shaderEvents, replaceShaderEvents, alignShaderParameters } from '../core/shader-events.ts';
@@ -175,7 +176,11 @@ export function placedEvent(session: EventEditSession, type: AnyEventType, first
   if (type === 'paintEvents') return { startTime: fromNumber(start), endTime: fromNumber(end), start: fromNumber(start), end: fromNumber(end),
     easingType: 1, easingLeft: 0, easingRight: 1, bezier: 0, bezierPoints: [], linkgroup: -1,
     shader: 'chromatic', global: false, order: 0, vars: {} } as ChartEvent;
-  if (events.some(event => start < beatValue(event.endTime) && end > beatValue(event.startTime))) throw new Error('该时间范围与同轨道已有事件重叠，请调整终点或按 Esc 取消');
+  // A trajectory occupies the Y and rotation tracks as well as its own X track, so placing an event on
+  // either of those has to respect it too. Only a trajectory that really produces an angle blocks the
+  // rotation track.
+  const trajectories = ['moveYEvents', 'rotateEvents'].includes(type) ? eventListAt(session, lineIndex, 'moveXEvents').filter(event => event.trajectory && (type !== 'rotateEvents' || trajectoryHasRotation(event.trajectory!.options))) : [];
+  if ([...events, ...trajectories].some(event => start < beatValue(event.endTime) && end > beatValue(event.startTime))) throw new Error('该时间范围与同轨道已有事件或整体轨迹重叠，请调整终点或按 Esc 取消');
   const previous = events.filter(event => beatValue(event.endTime) <= start).sort((left, right) => beatValue(right.startTime) - beatValue(left.startTime))[0];
   const fallback = type === 'alphaEvents' ? 255 : type.startsWith('scale') ? 1 : type === 'speedEvents' ? 10 : type === 'textEvents' ? '' : type === 'colorEvents' ? [255, 255, 255] : 0;
   const value = structuredClone(previous?.end ?? fallback) as number;

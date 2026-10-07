@@ -4,7 +4,8 @@ import { assertChart, createChart, diagnose, EVENT_TYPES, EXTENDED_TYPES, previe
 import { beatValue, parseBeat, formatBeat, fromNumber, upperBound } from '../core/beat.ts';
 import { TempoMap } from '../core/tempo.ts';
 import { AudioTransport } from '../platform/audio.ts';
-import { openFiles, exportChart, exportPackage, assetBytes, resourceReferences, attachExternalEffects } from '../platform/files.ts';
+import { openFiles, assetBytes, resourceReferences, attachExternalEffects } from '../platform/files.ts';
+import { showExportDialog } from './export-dialog.ts';
 import { listDrafts, readDraft, saveSnapshot } from '../platform/recovery.ts';
 import { Timeline, prepareCanvas } from './timeline.ts';
 import type { MoveDrag } from './timeline.ts';
@@ -43,7 +44,7 @@ import { BatchControls } from './batch-controls.ts';
 import { MultiEditPanel } from './multi-edit.ts';
 import { MultiLinePanel } from './multi-line.ts';
 import { clipboardBeat } from './clipboard-preview.ts';
-import { shaderEvents, replaceShaderEvents } from '../core/shader-events.ts';
+import { shaderEvents, replaceShaderEvents, shaderIdentity } from '../core/shader-events.ts';
 import { renderMetadataPanel, renderBpmPanel } from './forms.ts';
 import { EditorPlayback } from '../application/playback.ts';
 import { readEditorPreferences, writeEditorPreferences } from '../platform/editor-preferences.ts';
@@ -61,6 +62,8 @@ import { SceneRuntime } from '../core/scene.ts';
 import type { LineTracks } from '../core/scene.ts';
 import { TimelineActivity } from '../core/timeline-activity.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import { AudioAnalysis } from './audio-analysis.ts';
+import { TrajectoryPanel } from './trajectory-panel.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, JudgeLine, Note, NoteType } from '../core/types.ts';
 import type { Timeline as TimelineClass, TimelineSession, CursorPosition } from './timeline.ts';
 import type { AudioContextLike } from '../platform/audio.ts';
@@ -292,11 +295,13 @@ const element = <T extends HTMLElement = HTMLElement>(selector: string): T => do
  */
 const displayFields: [string, keyof EditorPreferences, number | boolean][] = [
   ['event-cut-density', 'cutDensity', 4],
+  ['judgement-offset', 'judgementOffset', 92],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
   ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
   ['background-blur', 'backgroundBlur', 10.5], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
   ['line-numbers', 'lineNumbers', true], ['line-arrows', 'lineArrows', true], ['line-tint', 'lineTint', true], ['merge-line-numbers', 'mergeLineNumbers', true], ['pick-preview-lines', 'pickPreviewLines', true],
+  ['note-source-hover', 'noteSourceHover', true],
   ['preserve-pitch', 'preservePitch', true], ['autoplay-view', 'autoplayView', true], ['highlight-notes', 'highlight', true],
   ['autosave-enabled', 'autoSave', true], ['autosave-seconds', 'autoSaveSeconds', 60], ['autosave-limit', 'autoSaveLimit', 10],
 ];
@@ -365,6 +370,36 @@ const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, (message: string) => status(message));
 const timelineSession = (): TimelineSession => session;
 const timeline = new Timeline(element<HTMLCanvasElement>('#notes'), element<HTMLCanvasElement>('#events'), timelineSession, (...args: unknown[]) => (editEvent as (...parameters: unknown[]) => unknown)(...args), invalidate, reportError, (...args: unknown[]) => (openTimelineContextMenu as (...parameters: unknown[]) => unknown)(...args));
+const audioAnalysis = new AudioAnalysis(element<HTMLCanvasElement>('#audio-analysis-overlay'), () => timeline, () => audio, () => persistEditor());
+/** The pending note-source hover timer; `null` when no reveal is scheduled. */
+let noteHoverTimer: number | ReturnType<typeof globalThis.setTimeout> | null = null;
+let noteHoverKey: string | null = null;
+function clearNoteSourceToast(): void {
+  if (noteHoverTimer) { clearTimeout(noteHoverTimer as number); noteHoverTimer = null; }
+  noteHoverKey = null;
+  const toast = element<HTMLElement>('#note-source-toast');
+  if (toast) { toast.hidden = true; toast.onclick = null; }
+}
+timeline.onNoteHover = entry => {
+  clearTimeout(noteHoverTimer as number); noteHoverTimer = null;
+  const toast = element<HTMLElement>('#note-source-toast');
+  const hoverEnabled = editorPreferences.noteSourceHover ?? preferences.settings.noteSourceHover ?? true;
+  if (!hoverEnabled) { clearNoteSourceToast(); return; }
+  if (!entry || atHome || !preview.visible || session.multiLineActive || !toast) { clearNoteSourceToast(); return; }
+  const key = `${entry.lineIndex}:${entry.index}`;
+  if (key === noteHoverKey && !toast.hidden) return;
+  noteHoverKey = key; toast.hidden = true;
+  noteHoverTimer = setTimeout(() => {
+    // The entry is re-read from the key rather than captured: a chart edit replaces the document, so
+    // the captured object would be stale by the time the timer fires.
+    if (noteHoverKey !== key || !entry?.lineIndex && entry?.lineIndex !== 0) return;
+    const line = session.chart.judgeLineList?.[entry.lineIndex];
+    if (!line) return;
+    toast.textContent = `该音符来自 ${entry.lineIndex} 号线 · 点击切换`;
+    toast.hidden = false;
+    toast.onclick = () => { session.selectLine(entry.lineIndex); clearNoteSourceToast(); invalidate(); };
+  }, 1000);
+};
 timeline.multiLineLabels = element('#multi-line-labels');
 timeline.multiLineScrollElement = element<HTMLInputElement>('#multi-line-scroll');
 const multiLineScrollElement = timeline.multiLineScrollElement as HTMLInputElement;
@@ -403,6 +438,7 @@ const batchControls = new BatchControls(element('.stage'), timeline, () => sessi
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify,
 });
+const trajectoryPanel = new TrajectoryPanel(element('#trajectory-editor'), () => ({ session, timeline, tempo, previewVisible: preview.visible }), { invalidate, notify, activate: activatePane });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => { images.load(session.chart, assets, chartName); } });
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
@@ -649,7 +685,31 @@ const pickPreviewLine = (renderer: Preview, event: MouseEvent) => {
   if (index === null) return false;
   timeline.cancelPlacement(); session.selectLine(index); return true;
 };
-element<HTMLCanvasElement>('#preview').addEventListener('click', event => { if (preview.visible) pickPreviewLine(preview, event); });
+element<HTMLCanvasElement>('#preview').addEventListener('click', (event: MouseEvent) => {
+  if (!preview.visible) return;
+  // A note drawn in the preview wins over the line guide behind it, so the note hit test runs first.
+  const noteLine = preview.pickNote(event.clientX, event.clientY);
+  if (noteLine !== null) { timeline.cancelPlacement(); session.selectLine(noteLine); clearNoteSourceToast(); invalidate(); return; }
+  pickPreviewLine(preview, event);
+});
+element<HTMLCanvasElement>('#preview').addEventListener('pointermove', (event: PointerEvent) => {
+  if (!preview.visible || (editorPreferences.noteSourceHover ?? preferences.settings.noteSourceHover ?? true) === false) { clearNoteSourceToast(); return; }
+  const lineIndex = preview.pickNote(event.clientX, event.clientY);
+  if (lineIndex === null) { clearNoteSourceToast(); return; }
+  const key = `preview:${lineIndex}`;
+  clearTimeout(noteHoverTimer as number); noteHoverTimer = null;
+  if (key === noteHoverKey && !element<HTMLElement>('#note-source-toast')?.hidden) return;
+  noteHoverKey = key;
+  const toast = element<HTMLElement>('#note-source-toast'); if (!toast) return;
+  toast.hidden = true;
+  noteHoverTimer = setTimeout(() => {
+    if (noteHoverKey !== key || !preview.visible) return;
+    toast.textContent = `该音符来自 ${lineIndex} 号线 · 点击切换`;
+    toast.hidden = false;
+    toast.onclick = () => { session.selectLine(lineIndex); clearNoteSourceToast(); invalidate(); };
+  }, 1000);
+});
+element<HTMLCanvasElement>('#preview').addEventListener('pointerleave', (event: PointerEvent) => { if (!element<HTMLElement>('#note-source-toast')?.contains(event.relatedTarget as Node | null)) clearNoteSourceToast(); });
 timeline.previewPick = () => false;
 const home = new ProjectHome(async id => {
   const project = await readProject(id);
@@ -671,6 +731,7 @@ const home = new ProjectHome(async id => {
 
 function setHome(visible: boolean) {
   atHome = visible;
+  if (visible) clearNoteSourceToast();
   if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element<HTMLButtonElement>('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element<HTMLButtonElement>('#mute-current-line')?.classList.remove('active'); }
   if (visible) { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); }
   element('#document-name').textContent = visible ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
@@ -678,7 +739,7 @@ function setHome(visible: boolean) {
   element('.workspace').hidden = visible;
   element('.transport').hidden = visible;
   element('#resume-editor').hidden = !hasDocument;
-  for (const selector of ['#save', '#export-json', '#package']) element<HTMLButtonElement>(selector).disabled = !hasDocument;
+  for (const selector of ['#save', '#export']) element<HTMLButtonElement>(selector).disabled = !hasDocument;
   if (visible) { playback.pause(); timeline.cancelPlacement(); home.refresh().catch(reportError); }
   invalidate();
 }
@@ -715,6 +776,16 @@ function openTimelineContextMenu(event: MouseEvent, canvas: HTMLCanvasElement | 
   pendingTimelineMenu = { time: point ? timeline.timeAt(point.y) : null, markerIndex };
   element<HTMLButtonElement>('#timeline-add-marker').hidden = !canvas;
   element<HTMLButtonElement>('#timeline-delete-marker').hidden = markerIndex === null;
+  // The split action only applies to a single selected whole-curve trajectory on the events canvas,
+  // so the selection is resolved back to its event before the button is shown.
+  const selections = session.multiLineActive && session.multiLineMode === 'events'
+    ? [...session.multiEventSelection].flatMap(([lineIndex, keys]) => [...keys].map(key => ({ lineIndex, key })))
+    : [...session.eventSelection].map(key => ({ lineIndex: session.lineIndex, key }));
+  const selection = selections.length === 1 ? selections[0] : null;
+  const [type, index] = selection?.key.split(':') ?? [];
+  const selected = type === 'moveXEvents' && selection ? session.chart.judgeLineList[selection.lineIndex]?.eventLayers?.[timeline.layer]?.moveXEvents?.[Number(index)] ?? null : null;
+  const split = element<HTMLButtonElement>('#trajectory-context-split'); split.hidden = !selected?.trajectory || canvas !== timeline.eventsCanvas;
+  split.onclick = () => { closeTimelineContextMenu(); if (!selected || !selection) return; trajectoryPanel.open(selected, selection.lineIndex, timeline.layer); trajectoryPanel.split(); };
   menu.style.left = `${Math.max(4, Math.min(window.innerWidth - 190, event.clientX))}px`;
   menu.style.top = `${Math.max(4, Math.min(window.innerHeight - 90, event.clientY))}px`;
   menu.hidden = false;
@@ -744,14 +815,16 @@ element<HTMLButtonElement>('#timeline-add-marker').addEventListener('click', add
 element<HTMLButtonElement>('#timeline-delete-marker').addEventListener('click', deleteTimelineMarker);
 
 function persistEditor() {
-  editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
+  editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, judgementOffset: timeline.judgementOffset, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element<HTMLInputElement>('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'icons',
+    analysisEnabled: audioAnalysis.enabled, analysisMode: audioAnalysis.mode, analysisAlpha: audioAnalysis.alpha, analysisWidth: audioAnalysis.width };
   try { writeEditorPreferences(editorPreferences); } catch (failure) { status(`设置保存失败：${failureMessage(failure)}`); }
 }
 
 function activatePane(name: string) {
   if (name !== 'multi') multiEdit.hide();
+  if (name !== 'trajectory') trajectoryPanel.hide();
   activePaneName = name;
   for (const panel of document.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
@@ -780,6 +853,7 @@ for (const form of document.querySelectorAll<HTMLFormElement>('#properties, #eve
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
 function togglePreview(force?: boolean, stay = false, replay = false) {
   const visible = force ?? !preview.visible;
+  if (visible) clearNoteSourceToast();
   if (visible && (!preview.visible || replay)) {
     previewReturnTime = audio.time; timeline.cancelPlacement();
     if (replay) playback.seek(0);
@@ -881,7 +955,17 @@ function updateLineInfo() {
   }
   const eventSpeed = selectedSpeeds.length ? selectedSpeeds : activeSpeeds;
   const eventText = `X Y R Speed: ${lineInfoNumber(xSpeed)}, ${lineInfoNumber(ySpeed)}, ${lineInfoNumber(rotateSpeed)}${eventSpeed.length ? `\nEvent Speed: ${eventSpeed.slice(0, 6).join(', ')}` : ''}`;
-  overlay.textContent = `${lineText}\n${eventText}`;
+  const globalShaders = [];
+  for (const index of session.chart.judgeLineList?.keys?.() ?? []) {
+    const eventBeat = tempo.beat(seconds, session.chart.judgeLineList[index]?.bpmfactor ?? 1);
+    for (const event of shaderEvents(session.chart, index)) {
+      if (!event.global) continue;
+      const start = beatValue(event.startTime); const end = beatValue(event.endTime ?? event.startTime);
+      if (eventBeat >= start && eventBeat < end) globalShaders.push(shaderIdentity(event));
+    }
+  }
+  const shaderText = globalShaders.length ? `\nShader: ${globalShaders.join(', ')}` : '';
+  overlay.textContent = `${lineText}\n${eventText}${shaderText}`;
   overlay.hidden = false;
 }
 
@@ -927,6 +1011,15 @@ function renderSession() {
     description.textContent = value;
     return [term, description];
   }));
+  // The metadata panel reports which of the two media slots are still empty, so a chart whose music
+  // or cover never made it into the archive says so instead of rendering silently without them.
+  const songName = session.chart.META?.song;
+  const backgroundName = session.chart.META?.background;
+  const missingMedia = [!songName || !assets.has(songName) ? '音乐' : '', !backgroundName || !assets.has(backgroundName) ? '封面' : ''].filter(Boolean);
+  const materialHint = element<HTMLElement>('#chart-material-hint');
+  if (materialHint) materialHint.textContent = missingMedia.length ? `缺少${missingMedia.join('、')} · 进入谱面信息添加` : '';
+  const mediaStatus = element<HTMLElement>('#metadata-media-status');
+  if (mediaStatus) mediaStatus.textContent = `音乐：${songName && assets.has(songName) ? songName : '未载入'}　封面：${backgroundName && assets.has(backgroundName) ? backgroundName : '未载入'}`;
   if (!session.liveBeatEdit) element<HTMLInputElement>('#offset').value = String(session.chart.META.offset ?? 0);
   element('#selection-info').textContent = session.focus === 'events' ? `${session.eventSelection.size} 个事件已选` : `${session.selection.size} 个音符已选`;
   element<HTMLButtonElement>('#undo').disabled = !session.history.undoStack.length;
@@ -990,10 +1083,23 @@ function renderSession() {
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
     if (multiEdit.committing) multiEdit.sync();
+    else if (trajectoryPanel.active && selectionCount !== 1) activatePane('trajectory');
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
     else if (selectionCount > 1) { activatePane('multi'); multiEdit.open(session.focus === 'events' ? 'events' : 'notes'); }
-    else if (selectionCount === 1) activatePane(session.focus === 'events' ? 'events' : 'notes');
+    else if (selectionCount === 1) {
+      const entries = session.multiLineActive && session.multiLineMode === 'events'
+        ? [...session.multiEventSelection].flatMap(([lineIndex, keys]) => [...keys].map(key => ({ lineIndex, key })))
+        : [...session.eventSelection].map(key => ({ lineIndex: session.lineIndex, key }));
+      const selected = entries.length === 1 ? entries[0] : null;
+      // The selection key is `<track>:<index>`; both halves are only read once `selected` proves the
+      // single-selection case, which is also what the original relied on when it indexed directly.
+      const [type, index] = selected?.key.split(':') ?? [];
+      const track = selected && type ? session.chart.judgeLineList[selected.lineIndex]?.eventLayers?.[timeline.layer]?.[type as AnyEventType] : undefined;
+      const event = track?.[Number(index)];
+      if (session.focus === 'events' && event?.trajectory && selected) { curveEditorOpen = false; trajectoryPanel.open(event, selected.lineIndex, timeline.layer); }
+      else activatePane(session.focus === 'events' ? 'events' : 'notes');
+    }
     else if (!['multi-line', 'lines', 'assets'].includes(activePaneName)) activatePane('chart');
   }
   const limits = previewLimitations(session.chart);
@@ -1007,6 +1113,7 @@ function replaceChart(chart: Chart, name: string, nextAssets: Map<string, Uint8A
   assertChart(chart);
   lineSwitcher.reset();
   playback.pause(); audio.clear();
+  audioAnalysis.setBuffer(null);
   hitSounds.stop(); hitSounds.onlyCurrentLine = false; element<HTMLButtonElement>('#mute-current-line').setAttribute('aria-pressed', 'false'); element<HTMLButtonElement>('#mute-current-line').classList.remove('active'); images.clear(); libraryProject = null;
   session.removeEventListener('change', renderSession);
   session = new EditorSession(chart);
@@ -1073,6 +1180,7 @@ async function loadMusic(bytes: Uint8Array, name: string, updateMetadata = true)
   const buffer = bytes.buffer as ArrayBuffer;
   const loaded = await audio.load(buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), name);
   if (!loaded || session !== loadingSession) return;
+  audioAnalysis.setBuffer(audio.buffer);
   assets.set(name, bytes);
   element('#music-name').textContent = name;
   element<HTMLInputElement>('#scrubber').max = String(audio.duration);
@@ -1092,24 +1200,17 @@ async function togglePlayback() {
   invalidate();
 }
 
-async function save(packageMode = false, exportOnly = false) {
-  if (!packageMode && !exportOnly) {
-    if (saving) return;
-    saving = true;
-    const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
-    const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
-      chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
-    try {
-      await storeProject(project);
-      savingSession.history.markSaved(savingSession.chart);
-      if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
-    } finally { saving = false; }
-    return;
-  }
-  const snapshot = { ...session.chart }; delete snapshot.chartTime;
-  if (packageMode) exportPackage(snapshot, assets, chartName);
-  else exportChart(snapshot, chartName);
-  status(packageMode ? '已发起 PEZ 下载；包含当前载入的附属资源' : '已发起 JSON 下载；音乐和图片请另行保留');
+async function save() {
+  if (saving) return;
+  saving = true;
+  const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
+  const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
+    chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
+  try {
+    await storeProject(project);
+    savingSession.history.markSaved(savingSession.chart);
+    if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
+  } finally { saving = false; }
 }
 
 function validateCommit(label: string, next: Chart) { assertChart(next); session.commit(label, next); }
@@ -1150,8 +1251,7 @@ element<HTMLInputElement>('#file-input').addEventListener('change', async event 
   finally { input.value = ''; }
 });
 listen('#save', () => save());
-listen('#export-json', () => save(false, true));
-listen('#package', () => save(true));
+listen('#export', () => showExportDialog(session.chart, assets, chartName, name => status(`已发起下载：${name}`)));
 listen('#view-toggle', () => togglePreview());
 listen('#close-preview', () => togglePreview(false, true));
 listen('#background', () => element<HTMLInputElement>('#background-input').click());
@@ -1331,6 +1431,7 @@ function travel(direction: 'undo' | 'redo', silent = false) {
 listen('#undo', () => travel('undo'));
 listen('#redo', () => travel('redo'));
 listen('#curve-notes', openCurvePanel);
+listen('#curve-trajectory', () => { curveEditorOpen = false; trajectoryPanel.open(); });
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
@@ -1413,6 +1514,9 @@ listen('#mirror', () => {
 listen('#metadata', () => { activatePane('metadata'); renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); }); });
 listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); }); });
 listen('#assets', () => { activatePane('assets'); assetLibrary.render(); });
+listen('#audio-analysis-tool', () => {
+  audioAnalysis.enabled = true; activatePane('audio-analysis'); audioAnalysis.render(element('#audio-analysis-panel')); audioAnalysis.draw(offsetSeconds()); persistEditor();
+});
 function renderHistoryPanel() {
   const host = element('#history-results'); if (!host) return;
   host.replaceChildren();
@@ -1765,7 +1869,7 @@ function frame(timestamp: number) {
   if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
-  if (!atHome && (audio.playing || dirtyFrame) && timestamp - lastFrameTime >= 1000 / preferences.settings.fpsLimit) {
+  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active) && timestamp - lastFrameTime >= 1000 / preferences.settings.fpsLimit) {
     lastFrameTime = timestamp;
     const start = performance.now();
     const beat = currentBeat();
@@ -1778,12 +1882,20 @@ function frame(timestamp: number) {
       selectionOverlay.draw();
       drawTimelineStrips();
       updateLayerButtons();
+      audioAnalysis.draw(offsetSeconds());
     }
     preview.duration = realtimePreview.duration = audio.duration;
     const viewSession = timeline.getSession();
-    const viewChart = multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart;
-    preview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
-    if (!preview.visible) realtimePreview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
+    const trajectoryView = trajectoryPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
+    const viewChart = trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
+    const viewSeconds = trajectoryView?.seconds ?? chartSeconds();
+    preview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+    if (!preview.visible) {
+      const visible = realtimePreview.visible;
+      if (trajectoryView) realtimePreview.visible = true;
+      realtimePreview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+      realtimePreview.visible = visible;
+    }
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
     element('#play').dataset.playing = String(audio.playing);
     element('#play').title = audio.playing ? '暂停' : '播放';
@@ -1840,6 +1952,10 @@ function applyPreferences(next: MigratedPreferences) {
   element<HTMLInputElement>('#realtime-enabled').checked = realtimePreview.visible; element<HTMLCanvasElement>('#realtime-preview').hidden = !realtimePreview.visible;
   element<HTMLInputElement>('#realtime-alpha').value = String(editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha);
   realtimePreview.opacity = Number(element<HTMLInputElement>('#realtime-alpha').value);
+  audioAnalysis.enabled = Boolean(editorPreferences.analysisEnabled ?? false);
+  audioAnalysis.mode = editorPreferences.analysisMode === 'spectrum' ? 'spectrum' : 'waveform';
+  audioAnalysis.alpha = Number.isFinite(Number(editorPreferences.analysisAlpha)) ? Number(editorPreferences.analysisAlpha) : 0.2;
+  audioAnalysis.width = Number.isFinite(Number(editorPreferences.analysisWidth)) ? Number(editorPreferences.analysisWidth) : 0.62;
   hitSounds.enabled = Boolean(editorPreferences.hitEnabled ?? true); element<HTMLInputElement>('#hit-enabled').checked = hitSounds.enabled;
   preview.allLines = realtimePreview.allLines = Boolean(editorPreferences.allLines ?? true); element<HTMLSelectElement>('#preview-mode').value = preview.allLines ? 'all' : 'current';
   timeline.scrollSpeed = next.settings.scrollSpeed / 5;
@@ -1960,7 +2076,7 @@ function applyDisplaySettings() {
   element('.editor-toolbar').classList.remove('mode-compact', 'mode-icons', 'mode-wide');
   element('.editor-toolbar').classList.add(`mode-${toolbarMode}`);
   element<HTMLButtonElement>('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;
-  timeline.barWidth = Number(element<HTMLInputElement>('#bar-width').value); timeline.barAlpha = Number(element<HTMLInputElement>('#bar-alpha').value);
+  timeline.barWidth = Number(element<HTMLInputElement>('#bar-width').value); timeline.barAlpha = Number(element<HTMLInputElement>('#bar-alpha').value); timeline.judgementOffset = Number(element<HTMLInputElement>('#judgement-offset').value);
   timeline.eventValueFontSize = Number(element<HTMLInputElement>('#event-value-size').value); timeline.eventValueThreshold = Number(element<HTMLInputElement>('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element<HTMLInputElement>('#event-curve-threshold').value); timeline.eventOpacity = Number(element<HTMLInputElement>('#event-opacity').value); timeline.eventBarWidth = Number(element<HTMLInputElement>('#event-bar-width').value);
   timeline.seamlessEvents = element<HTMLInputElement>('#seamless-events').checked;
   session.cutDensity = Number(element<HTMLInputElement>('#event-cut-density').value);

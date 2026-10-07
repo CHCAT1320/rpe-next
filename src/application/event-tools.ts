@@ -43,7 +43,7 @@ export interface CutResult {
 }
 
 export function canCutEvent(type: string, event: ChartEvent): boolean {
-  return cutTypes.has(type) && beatValue(event.endTime) > beatValue(event.startTime);
+  return !event.trajectory && cutTypes.has(type) && beatValue(event.endTime) > beatValue(event.startTime);
 }
 
 export function cutEventParts(type: string, event: ChartEvent, { division = 4, density = 4, beat, tempo, factor = 1 }: CutOptions = {}): ChartEvent[] | null {

@@ -1,10 +1,13 @@
 import { serializeChart } from '../core/chart.ts';
 import { parseDocument } from '../core/formats.ts';
 import { readZip, writeZip } from './archive.ts';
-import type { ArchiveEntries } from './archive.ts';
 import { decodeLegacy, parseInfo } from './legacy-text.ts';
 import { serializeShaderEvent } from '../core/shader-events.ts';
-import type { Chart } from '../core/types.ts';
+import { expandTrajectory } from '../application/trajectory-commands.ts';
+import { TempoMap } from '../core/tempo.ts';
+import { beatValue } from '../core/beat.ts';
+import type { ArchiveEntries } from './archive.ts';
+import type { Chart, TrajectorySplit } from '../core/types.ts';
 
 /** A parsed chart together with the archive path it was found at. */
 export interface ChartCandidate {
@@ -111,6 +114,35 @@ export function exportChart(chart: Chart, name: string): void {
   download(new Blob([serializeChart(chart)], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
 }
 
+/**
+ * Rewrites a chart so that pre-0.8.0 readers can open it.
+ *
+ * Every whole-curve trajectory on the X track is expanded into the ordinary per-event fragments those
+ * readers understand, and the trajectory event itself is dropped. `splitSettings` is merged over each
+ * trajectory's own recorded split by `trajectorySplitSettings`.
+ */
+export function legacyChart(chart: Chart, splitSettings: Partial<TrajectorySplit> = {}): Chart {
+  const next = structuredClone(chart);
+  if (next.META.RPEVersion >= 200) next.META = { ...next.META, RPEVersion: 170 };
+  const tempo = new TempoMap(next.BPMList);
+  for (const line of next.judgeLineList ?? []) {
+    for (const layer of line.eventLayers ?? []) {
+      if (!layer) continue;
+      const trajectories = (layer.moveXEvents ?? []).filter(event => event.trajectory);
+      if (!trajectories.length) continue;
+      // `trajectories` is non-empty here, so the track it was filtered from is present too; the `!`
+      // records that the original dereferenced it unguarded.
+      layer.moveXEvents = layer.moveXEvents!.filter(event => !event.trajectory);
+      for (const event of trajectories) for (const [type, fragments] of expandTrajectory(event, tempo, line.bpmfactor ?? 1, splitSettings)) layer[type] = [...(layer[type] ?? []), ...fragments].sort((left, right) => beatValue(left.startTime) - beatValue(right.startTime));
+    }
+  }
+  return next;
+}
+
+export function exportLegacyChart(chart: Chart, name: string): void {
+  download(new Blob([serializeChart(legacyChart(chart))], { type: 'application/json' }), name.replace(/\.(json|pec|pez|zip)$/i, '') + '.rpe.json');
+}
+
 /** Resolves `.`/`..` segments and case, so paths from different archives compare equal. */
 function normalizePath(path: string): string {
   const parts: string[] = [];
@@ -204,4 +236,38 @@ export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: 
 
 export function exportPackage(chart: Chart, assets: ArchiveEntries, chartName: string): void {
   download(writeZip(packageEntries(chart, assets, chartName)), 'RPE-export.pez');
+}
+
+/** A finished export, ready to be handed to `download`. */
+export interface ChartExportResult {
+  blob: Blob;
+  name: string;
+}
+
+/**
+ * The four export combinations the dialog offers.
+ *
+ * `compatibility: 'rpe'` rewrites the chart through `legacyChart` so a pre-0.8.0 reader can open it;
+ * `'next'` keeps whole-curve trajectories. It lives here rather than in the dialog because it is this
+ * function's own parameter shape, and the two values are re-validated below rather than trusted — the
+ * dialog is not the only possible caller.
+ */
+export interface ChartExportOptions {
+  compatibility: 'next' | 'rpe';
+  format: 'json' | 'pez';
+  name: string;
+  split: Partial<TrajectorySplit>;
+}
+
+export function createChartExport(chart: Chart, assets: ArchiveEntries, chartName: string, options: Partial<ChartExportOptions> = {}): ChartExportResult {
+  const { format = 'pez', compatibility = 'next', name = chartName, split = {} } = options;
+  if (!['json', 'pez'].includes(format) || !['next', 'rpe'].includes(compatibility)) throw new Error('导出格式无效');
+  // `chartTime` is a scratch field some callers hang off the document; it is optional here so it can
+  // be deleted, which is what the original did before serializing.
+  const snapshot: Chart & { chartTime?: unknown } = compatibility === 'rpe' ? legacyChart(chart, split) : { ...chart };
+  delete snapshot.chartTime;
+  const stem = String(name).trim().replace(/\.(json|pez|pec|zip)$/i, '');
+  if (!stem) throw new Error('请输入导出文件名');
+  const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName)) : new Blob([serializeChart(snapshot)], { type: 'application/json' });
+  return { blob, name: stem + '.' + format };
 }

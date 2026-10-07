@@ -1,5 +1,7 @@
 import { beatValue, fromNumber } from './beat.ts';
 import { TempoMap } from './tempo.ts';
+import { sampleCurveTrajectory } from './curve-trajectory.ts';
+import { trajectorySplitSettings } from './trajectory-simplify.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, ChartMeta, ControlPoint, EventLayer, EventType, EventValue, ExtendedType, JudgeLine, Note, NoteType } from './types.ts';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'] as const satisfies readonly EventType[];
@@ -168,6 +170,14 @@ export function assertChart(chart: unknown): asserts chart is Chart {
         const track = layer[type];
         if (track != null && !Array.isArray(track)) throw new Error(`${path}.${type} 必须为数组`);
         for (const [index, event] of (track ?? []).entries()) {
+          // A whole-curve trajectory is validated through the same sampler and split rules the editor
+          // uses, so a hand-edited file cannot smuggle in an expression that only fails at draw time.
+          if (event?.trajectory) {
+            if (type !== 'moveXEvents' || event.trajectory.version !== 1) throw new Error('整体轨迹必须位于 X 轨道，且使用受支持的版本');
+            sampleCurveTrajectory(event.trajectory.options, 65);
+            trajectorySplitSettings(event.trajectory.split);
+            if (!Number.isInteger(event.trajectory.segments) || event.trajectory.segments < 4 || event.trajectory.segments > 8192) throw new Error('轨迹拆分段数无效');
+          }
           beatValue(event?.startTime, `${path}.${type}[${index}].startTime`);
           beatValue(event?.endTime, `${path}.${type}[${index}].endTime`);
           const validValue = (value: unknown): boolean => type === 'textEvents' ? typeof value === 'string' : type === 'colorEvents' ? Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) : Number.isFinite(value);

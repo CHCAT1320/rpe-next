@@ -11,6 +11,7 @@ import { snapPosition, snapTime, verticalGrid, placementRange } from '../core/ed
 import { SPECIAL_TRACKS, eventChains, simultaneousNotes, strokeIntersects } from '../core/editor-display.ts';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.ts';
 import { lineDisplayLabel } from '../core/line-groups.ts';
+import { trajectoryEventValue } from '../core/curve-trajectory.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, EventLayer, JudgeLine, Note } from '../core/types.ts';
 import type { IndexedInterval } from '../core/interval-index.ts';
 import type { EventChain } from '../core/editor-display.ts';
@@ -309,6 +310,14 @@ export class Timeline {
   scaleAxisLine: number | null;
   onDragScroll?: (seconds: number) => void;
   onWheel: (event: WheelEvent) => void;
+  /**
+   * Reports the note under the pointer, or `null` when the pointer leaves or hits nothing.
+   *
+   * 0.8.0 added this so the editor can show which line a note came from; it is called on every move
+   * and on pointer-leave. `hit` reports `undefined` for empty space and the leave handler passes
+   * `null`, so both absences are part of the signature. `app.ts` installs the real handler.
+   */
+  onNoteHover?: (entry: NoteHitEntry | null | undefined) => void;
   origin: number;
   scale: number;
   division: number;
@@ -408,6 +417,14 @@ export class Timeline {
   eventCurveThreshold?: number;
   eventValueThreshold?: number;
   eventValueFontSize?: number;
+  /**
+   * Pixels between the bottom of the pane and the judgement line.
+   *
+   * The vertical mapping used to subtract a hard-coded 42 in every one of its call sites; 0.8.0 made
+   * it a setting, and the constructor still initialises it to that same 42 so an unset preference
+   * reproduces the previous geometry exactly.
+   */
+  judgementOffset: number;
   /** The simultaneous-note set and the tempo it was computed for, cached across frames. */
   highlightTempo?: TempoMap;
   simultaneous?: Set<Note>;
@@ -436,6 +453,7 @@ export class Timeline {
     this.scaleAxis = null;
     this.scaleAxisLine = null;
     this.onWheel = () => {};
+    this.onNoteHover = () => {};
     this.curvePick = null;
     this.eventRects = [];
     this.eventInteraction = new EventInteraction(this, reportError);
@@ -449,6 +467,7 @@ export class Timeline {
     this.multiLineLabels = null;
     this.multiLineScrollElement = null;
     this.scrollSpeed = 1;
+    this.judgementOffset = 42;
     this.gridCount = 11;
     // `view-controls.ts`'s declaration merge requires these two to be non-optional, and it writes
     // the same defaults (`0` / `false`) whenever the stored preference is absent — which is what the
@@ -464,7 +483,7 @@ export class Timeline {
       canvas.addEventListener('contextmenu', event => { event.preventDefault(); this.onContextMenu(event, canvas); });
     }
     notesCanvas.addEventListener('pointermove', event => this.move(event));
-    notesCanvas.addEventListener('pointerleave', () => { if (!this.drag) this.cursor = null; changed(); });
+    notesCanvas.addEventListener('pointerleave', () => { if (!this.drag) this.cursor = null; this.onNoteHover?.(null); changed(); });
     notesCanvas.addEventListener('pointerdown', event => this.down(event));
     notesCanvas.addEventListener('pointerup', event => this.up(event));
     notesCanvas.addEventListener('pointercancel', () => { this.drag = null; changed(); });
@@ -519,7 +538,7 @@ export class Timeline {
     const scroll = drag.startWorldX === undefined ? 0 : this.multiLineViewportOffset((drag.area === 'events' ? this.eventsCanvas : this.notesCanvas).clientWidth, drag.area ?? 'notes');
     const height = (drag.area === 'events' ? this.eventsCanvas : this.notesCanvas).clientHeight;
     const factor = drag.startFactor ?? this.factor;
-    return { x: drag.startWorldX === undefined ? drag.start.x : drag.startWorldX - scroll, y: drag.startSeconds === undefined ? drag.start.y : height - 42 - (drag.startSeconds - this.tempo.seconds(this.origin, factor)) * this.scale };
+    return { x: drag.startWorldX === undefined ? drag.start.x : drag.startWorldX - scroll, y: drag.startSeconds === undefined ? drag.start.y : height - this.judgementOffset - (drag.startSeconds - this.tempo.seconds(this.origin, factor)) * this.scale };
   }
 
   rectangleTimes(drag: RectangleTimesDrag): [number, number] {
@@ -527,7 +546,7 @@ export class Timeline {
     const start = drag.startSeconds ?? this.timeAt(drag.start.y);
     // `current` is set by the pointer move that precedes every caller; the original dereferenced it
     // unguarded, so `!` records that behaviour instead of adding a branch.
-    const current = drag.currentSeconds ?? (this.tempo.seconds(this.origin, factor) + (this.viewHeight() - 42 - drag.current!.y) / this.scale);
+    const current = drag.currentSeconds ?? (this.tempo.seconds(this.origin, factor) + (this.viewHeight() - this.judgementOffset - drag.current!.y) / this.scale);
     return [this.tempo.beat(Math.min(start, current), factor) - 1e-8, this.tempo.beat(Math.max(start, current), factor) + 1e-8];
   }
 
@@ -535,7 +554,7 @@ export class Timeline {
     const selection = this.rectangleSelection(); if (!selection) return;
     selection.drag.current = this.point(event, selection.canvas);
     selection.drag.currentWorldX = selection.drag.current.x + this.multiLineViewportOffset(selection.canvas.clientWidth, selection.area);
-    if (selection.drag.startFactor !== undefined) selection.drag.currentSeconds = this.tempo.seconds(this.origin, selection.drag.startFactor) + (this.viewHeight() - 42 - selection.drag.current.y) / this.scale;
+    if (selection.drag.startFactor !== undefined) selection.drag.currentSeconds = this.tempo.seconds(this.origin, selection.drag.startFactor) + (this.viewHeight() - this.judgementOffset - selection.drag.current.y) / this.scale;
     this.changed();
   }
 
@@ -574,7 +593,7 @@ export class Timeline {
   get factor(): number { return this.getSession().line?.bpmfactor ?? 1; }
   viewHeight(): number { return this.getSession().multiLineActive && this.getSession().multiLineMode === 'events' ? this.eventsCanvas.clientHeight : this.notesCanvas.clientHeight; }
   factorForLine(lineIndex: number): number { return this.getSession().chart.judgeLineList?.[lineIndex]?.bpmfactor ?? 1; }
-  verticalForLine(beat: number, lineIndex: number, height = this.viewHeight()): number { const factor = this.factorForLine(lineIndex); return height - 42 - (this.tempo.seconds(beat, factor) - this.tempo.seconds(this.origin, factor)) * this.scale; }
+  verticalForLine(beat: number, lineIndex: number, height = this.viewHeight()): number { const factor = this.factorForLine(lineIndex); return height - this.judgementOffset - (this.tempo.seconds(beat, factor) - this.tempo.seconds(this.origin, factor)) * this.scale; }
   beatRangeForLine(lineIndex: number, height: number = this.viewHeight()): [number, number] {
     const factor = this.factorForLine(lineIndex);
     const bottom = this.tempo.beat(this.timeAt(height), factor);
@@ -626,10 +645,10 @@ export class Timeline {
   panelHorizontal(horizontal: number, lineIndex: number, width: number, area: string = 'notes'): number {
     return this.panelIndex(lineIndex, area) * this.panelStride(width, area) - this.multiLineViewportOffset(width, area) + horizontal;
   }
-  timeAt(vertical: number): number { return this.tempo.seconds(this.origin, this.factor) + (this.viewHeight() - 42 - vertical) / this.scale; }
+  timeAt(vertical: number): number { return this.tempo.seconds(this.origin, this.factor) + (this.viewHeight() - this.judgementOffset - vertical) / this.scale; }
   beatAt(vertical: number): number { return this.tempo.beat(this.timeAt(vertical), this.factor); }
   snappedBeat(vertical: number): number { return beatValue(snapTime(this.timeAt(vertical), this.division, this.tempo, this.factor)); }
-  vertical(beat: number | Beat, height: number = this.viewHeight()): number { return height - 42 - (this.tempo.seconds(beat, this.factor) - this.tempo.seconds(this.origin, this.factor)) * this.scale; }
+  vertical(beat: number | Beat, height: number = this.viewHeight()): number { return height - this.judgementOffset - (this.tempo.seconds(beat, this.factor) - this.tempo.seconds(this.origin, this.factor)) * this.scale; }
   eventVertical(beat: number | Beat, type: AnyEventType): number { return this.vertical(beat); }
   eventBeatAt(vertical: number, type: AnyEventType, snap = false): number {
     const factor = this.factor;
@@ -794,7 +813,7 @@ export class Timeline {
       const previous: CanvasPoint = drag.current ?? cursor;
       drag.current = cursor;
       drag.currentWorldX = cursor.x + this.multiLineViewportOffset(this.notesCanvas.clientWidth, 'notes');
-      if (drag.startFactor !== undefined) drag.currentSeconds = this.tempo.seconds(this.origin, drag.startFactor) + (this.viewHeight() - 42 - drag.current.y) / this.scale;
+      if (drag.startFactor !== undefined) drag.currentSeconds = this.tempo.seconds(this.origin, drag.startFactor) + (this.viewHeight() - this.judgementOffset - drag.current.y) / this.scale;
       if (drag.kind === 'multi-pan') {
         const current = this.multiLineViewportOffset(this.notesCanvas.clientWidth, 'notes');
         // `multiLineScroll` holds one shared offset or one per area; the notes pane writes `notes`.
@@ -814,6 +833,8 @@ export class Timeline {
         this.getSession().notify();
       }
     }
+    const hover = !this.drag ? this.hit(this.cursor) : null;
+    this.onNoteHover?.(hover);
     this.changed();
     if (!active && this.notesCanvas.style) {
       const hit = this.hit(cursor);
@@ -898,7 +919,7 @@ export class Timeline {
     // The pointer move just above set `current`; the original dereferenced it unguarded from here on.
     const moved: CanvasPoint = drag.current;
     drag.currentWorldX = moved.x + this.multiLineViewportOffset(this.notesCanvas.clientWidth, 'notes');
-    if (drag.startFactor !== undefined) drag.currentSeconds = this.tempo.seconds(this.origin, drag.startFactor) + (this.viewHeight() - 42 - moved.y) / this.scale;
+    if (drag.startFactor !== undefined) drag.currentSeconds = this.tempo.seconds(this.origin, drag.startFactor) + (this.viewHeight() - this.judgementOffset - moved.y) / this.scale;
     const session = this.getSession();
     if (drag.kind === 'rectangle') {
       if (!drag.finished) { this.changed(); return; }
@@ -993,7 +1014,7 @@ export class Timeline {
   gridForLine(context: CanvasRenderingContext2D, left: number, width: number, height: number, playBeat: number, lineIndex: number, showBeatLabels = true): void {
     const factor = this.factorForLine(lineIndex);
     const originSeconds = this.tempo.seconds(this.origin, factor);
-    const secondsAt = (vertical: number): number => originSeconds + (height - 42 - vertical) / this.scale;
+    const secondsAt = (vertical: number): number => originSeconds + (height - this.judgementOffset - vertical) / this.scale;
     const beatAt = (vertical: number): number => this.tempo.beat(secondsAt(vertical), factor);
     const first = Math.floor(beatAt(height) * this.division);
     const last = Math.ceil(beatAt(0) * this.division);
@@ -1035,7 +1056,7 @@ export class Timeline {
     for (const [panel, lineIndex] of this.getSession().targetLineIndices.entries()) {
       if (panel >= this.panelCount(area) - 1) continue;
       const factor = this.factorForLine(lineIndex); const originSeconds = this.tempo.seconds(this.origin, factor);
-      const secondsAt = (vertical: number): number => originSeconds + (height - 42 - vertical) / this.scale;
+      const secondsAt = (vertical: number): number => originSeconds + (height - this.judgementOffset - vertical) / this.scale;
       const beatAt = (vertical: number): number => this.tempo.beat(secondsAt(vertical), factor);
       const first = Math.floor(beatAt(height) * this.division); const last = Math.ceil(beatAt(0) * this.division);
       const localBeatHeight = Math.abs(this.verticalForLine(this.origin + 1, lineIndex, height) - this.verticalForLine(this.origin, lineIndex, height));
@@ -1075,14 +1096,17 @@ export class Timeline {
     for (let index = firstGrid; index <= lastGrid; index++) lanes.add((index + grid.first) * grid.spacing);
     lanes.add(cameraX - extent); lanes.add(cameraX + extent); lanes.add(cameraX);
     for (const lineIndex of this.getSession().targetLineIndices.slice(0, this.panelCount('notes'))) {
-      const panel = this.panelIndex(lineIndex, 'notes'); const panelWidth = this.panelWidth(width, 'notes');
       for (const lane of lanes) {
         const center = Math.abs(lane - cameraX) < 1e-7;
         const boundary = Math.abs(Math.abs(lane - cameraX) - extent) < 1e-7;
         context.strokeStyle = center ? '#9ba5b0' : boundary ? '#737d88' : '#555555'; context.lineWidth = center ? 2 : boundary ? 1.5 : 1;
         context.beginPath(); context.moveTo(this.noteHorizontal(lane, lineIndex), 0); context.lineTo(this.noteHorizontal(lane, lineIndex), height); context.stroke();
       }
-       if (this.panelCount('notes') > 1) { context.strokeStyle = '#333b45'; context.lineWidth = 2; context.beginPath(); context.moveTo(panel * this.panelStride(width, 'notes') + panelWidth - this.multiLineViewportOffset(width, 'notes'), 0); context.lineTo(panel * this.panelStride(width, 'notes') + panelWidth - this.multiLineViewportOffset(width, 'notes'), height); context.stroke(); }
+    }
+    if (this.panelCount('notes') > 1) {
+      const panelWidth = this.panelWidth(width, 'notes'); const offset = this.multiLineViewportOffset(width, 'notes');
+      context.strokeStyle = '#333b45'; context.lineWidth = 2;
+      for (let panel = 0; panel < this.panelCount('notes') - 1; panel++) { const separator = panel * this.panelStride(width, 'notes') + panelWidth - offset; context.beginPath(); context.moveTo(separator, 0); context.lineTo(separator, height); context.stroke(); }
     }
     context.lineWidth = 1;
     if (this.highlightChart !== session.chart || this.highlightTempo !== this.tempo) {
@@ -1260,7 +1284,8 @@ export class Timeline {
           context.globalAlpha = this.eventOpacity ?? 0.25;
           context.fillStyle = type === 'paintEvents' ? '#c6a1ff' : selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24'; if (!seamless) context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
           context.globalAlpha = 1; context.strokeStyle = selected ? '#fff2bd' : type === 'paintEvents' ? '#c6a1ff' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1; if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-           if (type !== 'paintEvents' && channelWidth >= (this.eventCurveThreshold ?? 24) && Number.isFinite(event.start) && Number.isFinite(event.end)) {
+          if (event.trajectory) this.drawTrajectoryEvent(context, rectangle, event);
+          if (!event.trajectory && type !== 'paintEvents' && channelWidth >= (this.eventCurveThreshold ?? 24) && Number.isFinite(event.start) && Number.isFinite(event.end)) {
             // The guard above is what proves both ends are numbers; the chain is looked up once so
             // the value range it carries is available to the curve maths below.
             const group = ranges.get(index);
@@ -1425,7 +1450,8 @@ export class Timeline {
         if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
         context.setLineDash([]);
         context.globalAlpha = 1;
-        if (channelWidth >= (this.eventCurveThreshold ?? 24)) {
+        if (entry.item.trajectory) this.drawTrajectoryEvent(context, rectangle, entry.item);
+        if (!entry.item.trajectory && channelWidth >= (this.eventCurveThreshold ?? 24)) {
           context.lineWidth = 2;
           context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip();
           const group = ranges.get(entry.index);
@@ -1491,6 +1517,30 @@ export class Timeline {
       } context.setLineDash([]);
     }
     this.eventInteraction.draw(context, width);
+  }
+
+  /**
+   * Draws a whole-curve trajectory's own bar and its X/Y readings.
+   *
+   * The curve replaces the usual per-event curve, so this draws in its place: the two sampled
+   * readings are normalised against each axis' own range rather than the shared chain range.
+   */
+  drawTrajectoryEvent(context: CanvasRenderingContext2D, rectangle: EventRectangle, event: ChartEvent): void {
+    const verticalAt = (beat: number): number => this.getSession().multiLineActive && this.getSession().multiLineMode === 'events'
+      ? this.verticalForLine(beat, rectangle.lineIndex, this.viewHeight()) : this.eventVertical(beat, 'moveXEvents');
+    const startY = verticalAt(beatValue(event.startTime)); const endY = verticalAt(beatValue(event.endTime));
+    context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip();
+    context.strokeStyle = '#83edca'; context.globalAlpha = 0.95; context.lineWidth = 2; context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+    context.fillStyle = '#a0ffdb'; context.font = '12px RPE, sans-serif'; context.textAlign = 'center'; context.fillText('轨迹 X / Y', rectangle.x + rectangle.width / 2, rectangle.y + 30, Math.max(1, rectangle.width - 4));
+    if (rectangle.width > 20 && rectangle.height > 42) {
+      const axes: ['x' | 'y', string][] = [['x', '#86efbf'], ['y', '#baacff']];
+      for (const [axis, color] of axes) {
+        const samples = Array.from({ length: 65 }, (unused, index) => trajectoryEventValue(event, index / 64, axis));
+        const minimum = Math.min(...samples); const maximum = Math.max(...samples); context.strokeStyle = color; context.beginPath();
+        samples.forEach((value, index) => { const horizontal = rectangle.x + 5 + (value - minimum) / (maximum - minimum || 1) * (rectangle.width - 10); const vertical = startY + index / 64 * (endY - startY); if (index) context.lineTo(horizontal, vertical); else context.moveTo(horizontal, vertical); }); context.stroke();
+      }
+    }
+    context.restore();
   }
 
   drawShaderEvents(context: CanvasRenderingContext2D, entries: IndexedInterval<ChartEvent>[], channel: number, width: number, height: number): void {

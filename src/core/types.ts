@@ -36,6 +36,78 @@ export type NoteType = 1 | 2 | 3 | 4;
 export type EventValue = number | Color | string;
 
 /**
+ * One editable parameter a curve preset declares.
+ *
+ * A preset ships a list of these so the trajectory panel can build a control per parameter; `value`
+ * is the default the preset starts from, and `min`/`max`/`step` bound the slider.
+ */
+export interface CurveParameter {
+  key: string;
+  label?: string;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+/**
+ * The settings a whole-curve trajectory is compiled from.
+ *
+ * This mirrors `TRAJECTORY_DEFAULTS` in `curve-trajectory.ts`. The expressions are user-authored
+ * scripts and are therefore stored as strings; `mode` and the optional `shape` select which of them
+ * are read. Every member is present on a compiled trajectory — `compileTrajectory` fills the
+ * defaults in — while a preset or a saved document may carry only some of them, which is what
+ * `editableTrajectoryOptions` reconciles.
+ */
+export interface CurveTrajectoryOptions {
+  mode: 'parametric' | 'polar';
+  /** Set by the generated-figure presets, which synthesise their expressions instead. */
+  shape?: 'star' | 'random-polygon';
+  xExpression: string;
+  yExpression: string;
+  radiusExpression: string;
+  rotationExpression: string;
+  tangentRotation: boolean;
+  parameterStart: string;
+  parameterEnd: string;
+  angleStart: string;
+  angleEnd: string;
+  trimStart: number;
+  trimEnd: number;
+  rotation: number;
+  scaleX: number;
+  scaleY: number;
+  alignStart: boolean;
+  startX: number;
+  startY: number;
+  easingX: number;
+  easingY: number;
+  seed: number;
+  randomness: number;
+  parameters: Record<string, number>;
+}
+
+/** How an expanded trajectory is fitted back onto easing segments. */
+export interface TrajectorySplit {
+  simplify: boolean;
+  tolerance: number;
+}
+
+/**
+ * A whole-curve trajectory riding on a `moveXEvents` event.
+ *
+ * Only the X track stores one. The curve stands in for the entire motion, so the host event's own
+ * `start`/`end` are only the endpoints it is anchored to; `expandTrajectory` turns it back into
+ * ordinary per-event fragments for readers that do not understand it.
+ */
+export interface Trajectory {
+  version: number;
+  options: CurveTrajectoryOptions;
+  segments: number;
+  split: TrajectorySplit;
+}
+
+/**
  * A single easing event.
  *
  * `start`/`end` hold the track's values; `startTime`/`endTime` hold the beat range. The shader
@@ -59,6 +131,15 @@ export interface ChartEvent {
   shaderName?: string;
   order?: number;
   params?: unknown;
+  /** The whole-curve trajectory this event carries; present only on the X track. */
+  trajectory?: Trajectory;
+  /**
+   * Which reading of a trajectory a synthesised event carries.
+   *
+   * `LineRuntime` clones a trajectory event onto the Y and rotation tracks so those tracks evaluate
+   * the same curve, marking the axis to read. Absent on real events, which are the X reading.
+   */
+  trajectoryAxis?: 'x' | 'y' | 'rotation';
   [key: string]: unknown;
 }
 
