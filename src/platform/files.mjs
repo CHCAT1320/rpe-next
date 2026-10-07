@@ -3,6 +3,9 @@ import { parseDocument } from '../core/formats.mjs';
 import { readZip, writeZip } from './archive.mjs';
 import { decodeLegacy, parseInfo } from './legacy-text.mjs';
 import { serializeShaderEvent } from '../core/shader-events.mjs';
+import { expandTrajectory } from '../application/trajectory-commands.mjs';
+import { TempoMap } from '../core/tempo.mjs';
+import { beatValue } from '../core/beat.mjs';
 
 export async function openFiles(fileList) {
   const files = [...fileList];
@@ -66,6 +69,26 @@ export function download(blob, name) {
 
 export function exportChart(chart, name) {
   download(new Blob([serializeChart(chart)], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
+}
+
+export function legacyChart(chart, splitSettings = {}) {
+  const next = structuredClone(chart);
+  if (next.META.RPEVersion >= 200) next.META = { ...next.META, RPEVersion: 170 };
+  const tempo = new TempoMap(next.BPMList);
+  for (const line of next.judgeLineList ?? []) {
+    for (const layer of line.eventLayers ?? []) {
+      if (!layer) continue;
+      const trajectories = (layer.moveXEvents ?? []).filter(event => event.trajectory);
+      if (!trajectories.length) continue;
+      layer.moveXEvents = layer.moveXEvents.filter(event => !event.trajectory);
+      for (const event of trajectories) for (const [type, fragments] of expandTrajectory(event, tempo, line.bpmfactor ?? 1, splitSettings)) layer[type] = [...(layer[type] ?? []), ...fragments].sort((left, right) => beatValue(left.startTime) - beatValue(right.startTime));
+    }
+  }
+  return next;
+}
+
+export function exportLegacyChart(chart, name) {
+  download(new Blob([serializeChart(legacyChart(chart))], { type: 'application/json' }), name.replace(/\.(json|pec|pez|zip)$/i, '') + '.rpe.json');
 }
 
 function normalizePath(path) {
@@ -146,4 +169,15 @@ export function packageEntries(chart, assets, chartName) {
 
 export function exportPackage(chart, assets, chartName) {
   download(writeZip(packageEntries(chart, assets, chartName)), 'RPE-export.pez');
+}
+
+export function createChartExport(chart, assets, chartName, options = {}) {
+  const { format = 'pez', compatibility = 'next', name = chartName, split = {} } = options;
+  if (!['json', 'pez'].includes(format) || !['next', 'rpe'].includes(compatibility)) throw new Error('导出格式无效');
+  const snapshot = compatibility === 'rpe' ? legacyChart(chart, split) : { ...chart };
+  delete snapshot.chartTime;
+  const stem = String(name).trim().replace(/\.(json|pez|pec|zip)$/i, '');
+  if (!stem) throw new Error('请输入导出文件名');
+  const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName)) : new Blob([serializeChart(snapshot)], { type: 'application/json' });
+  return { blob, name: stem + '.' + format };
 }

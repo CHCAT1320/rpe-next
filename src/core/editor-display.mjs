@@ -1,5 +1,6 @@
 import { beatValue } from './beat.mjs';
 import { easing } from './easing.mjs';
+import { trajectoryEventValue } from './curve-trajectory.mjs';
 
 export const SPECIAL_TRACKS = [
   { key: 'scaleXEvents', label: '缩放 X' }, { key: 'scaleYEvents', label: '缩放 Y' },
@@ -19,10 +20,11 @@ export function eventChains(events) {
   const groups = [];
   for (const entry of events.map((event, index) => ({ event, index })).sort((left, right) => beatValue(left.event.startTime) - beatValue(right.event.startTime))) {
     let group = groups.at(-1);
-    if (!group || Math.abs(beatValue(group.entries.at(-1).event.endTime) - beatValue(entry.event.startTime)) > 1e-8) {
+    if (!group || entry.event.trajectory || group.entries.at(-1).event.trajectory || Math.abs(beatValue(group.entries.at(-1).event.endTime) - beatValue(entry.event.startTime)) > 1e-8) {
       group = { entries: [], min: Infinity, max: -Infinity }; groups.push(group);
     }
     group.entries.push(entry);
+    if (entry.event.trajectory) for (let index = 0; index <= 64; index++) { const value = trajectoryEventValue(entry.event, index / 64); group.min = Math.min(group.min, value); group.max = Math.max(group.max, value); }
     for (const value of [entry.event.start, entry.event.end]) if (typeof value === 'number') { group.min = Math.min(group.min, value); group.max = Math.max(group.max, value); }
   }
   return groups;

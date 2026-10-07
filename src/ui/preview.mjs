@@ -17,6 +17,7 @@ export class Preview {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
     this.backgroundFrame = new PreviewBackground();
     this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
+    this.noteHitAreas = [];
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]]) {
@@ -52,6 +53,7 @@ export class Preview {
     this.viewport = viewport; this.selectedLine = selectedLine;
     this.guides = lineGuides(states, chart.judgeLineList, order, width, height, scale);
     const visibleNotes = new Map(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index], 1600 * divisor + Math.hypot(states[index]?.x ?? 0, states[index]?.y ?? 0)) ?? []]));
+    this.noteHitAreas = [];
     for (const pass of this.passes) for (const index of pass.kind === 'line' ? [pass.index] : order) {
       if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || chart.judgeLineList[index].attachUI || states[index].alpha <= 0 || states[index].scaleX === 0 || states[index].scaleY === 0)) continue;
       const runtime = this.scene.lines[index];
@@ -74,6 +76,15 @@ export class Preview {
         if (position.alpha <= 0 || position.size === 0) continue;
         const noteWidth = this.noteSize * scale * position.size;
         const horizontal = position.x * scale;
+        const rotation = state.rotation * Math.PI / 180;
+        const worldX = state.x + position.x * Math.cos(rotation) + position.y * Math.sin(rotation);
+        const worldY = -state.y + position.x * Math.sin(rotation) - position.y * Math.cos(rotation);
+        const screenX = width / 2 + worldX * scale;
+        const screenY = height / 2 + worldY * scale;
+        const tail = Number.isFinite(position.tail) ? position.tail : position.y;
+        const tailWorldX = state.x + position.x * Math.cos(rotation) + tail * Math.sin(rotation);
+        const tailWorldY = -state.y + position.x * Math.sin(rotation) - tail * Math.cos(rotation);
+        this.noteHitAreas.push({ lineIndex: index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
         context.save();
         context.globalAlpha = clamp(position.alpha);
         const tint = note.tint ?? note.color;
@@ -158,6 +169,19 @@ export class Preview {
     const view = this.viewport;
     if (point.x < view.left || point.x > view.left + view.width || point.y < view.top || point.y > view.top + view.height) return null;
     return pickGuide(this.guides ?? [], point, this.selectedLine);
+  }
+
+  pickNote(clientX, clientY) {
+    if (!this.visible || !this.noteHitAreas?.length) return null;
+    const rectangle = this.canvas.getBoundingClientRect();
+    const point = { x: clientX - rectangle.left, y: clientY - rectangle.top };
+    const distanceToSegment = area => {
+      const dx = area.x2 - area.x1; const dy = area.y2 - area.y1;
+      const length = dx * dx + dy * dy;
+      const amount = length ? Math.max(0, Math.min(1, ((point.x - area.x1) * dx + (point.y - area.y1) * dy) / length)) : 0;
+      return Math.hypot(point.x - (area.x1 + amount * dx), point.y - (area.y1 + amount * dy));
+    };
+    return this.noteHitAreas.slice().reverse().find(area => distanceToSegment(area) <= area.radius)?.lineIndex ?? null;
   }
 
   drawGuides(context, scale, selectedLine) {

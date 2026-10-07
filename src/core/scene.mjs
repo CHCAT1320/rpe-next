@@ -3,6 +3,7 @@ import { IntervalIndex } from './interval-index.mjs';
 import { easing } from './easing.mjs';
 import { upperBound } from './beat.mjs';
 import { noteIsAbove } from './chart.mjs';
+import { trajectoryHasRotation } from './curve-trajectory.mjs';
 
 export class ControlCurve {
   constructor(points, property) {
@@ -27,7 +28,10 @@ export class LineRuntime {
     this.line = line;
     const factor = line.bpmfactor ?? 1;
     this.tracks = Object.fromEntries(['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents'].map(type =>
-      [type, (line.eventLayers ?? []).map(layer => new EventTrack(layer?.[type], tempo, factor))]));
+      [type, (line.eventLayers ?? []).map(layer => {
+        const virtual = ['moveYEvents', 'rotateEvents'].includes(type) ? (layer?.moveXEvents ?? []).filter(event => event.trajectory && (type !== 'rotateEvents' || trajectoryHasRotation(event.trajectory.options))).map(event => ({ ...event, trajectoryAxis: type === 'moveYEvents' ? 'y' : 'rotation' })) : [];
+        return new EventTrack([...(layer?.[type] ?? []), ...virtual], tempo, factor);
+      })]));
     this.speeds = (line.eventLayers ?? []).map(layer => new SpeedIntegral(layer?.speedEvents, tempo, factor));
     const defaultColor = line.attachUI || line.extended?.textEvents?.length || line.Texture && line.Texture !== 'line.png' ? [255, 255, 255] : [241, 216, 148];
     const defaults = { scaleXEvents: 1, scaleYEvents: 1, colorEvents: defaultColor, textEvents: '', inclineEvents: 0 };

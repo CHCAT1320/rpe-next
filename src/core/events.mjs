@@ -1,5 +1,6 @@
 import { upperBound } from './beat.mjs';
 import { easing, bezier } from './easing.mjs';
+import { trajectoryEventValue } from './curve-trajectory.mjs';
 
 export class EventTrack {
   constructor(events, tempo, factor = 1, fallback = 0) {
@@ -16,6 +17,7 @@ export class EventTrack {
 
   sample(entry, seconds) {
     const event = entry.event;
+    if (event.trajectory) return trajectoryEventValue(event, entry.end <= entry.start ? 1 : Math.max(0, Math.min(1, (seconds - entry.start) / (entry.end - entry.start))));
     if (typeof event.start === 'number' && event.start === event.end) return event.start;
     if (Array.isArray(event.start) && Array.isArray(event.end) && event.start.every((value, index) => value === event.end[index])) return event.start;
     const progress = entry.end <= entry.start ? 1 : Math.max(0, Math.min(1, (seconds - entry.start) / (entry.end - entry.start)));
