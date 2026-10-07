@@ -1,0 +1,327 @@
+﻿src/ui/app.ts(223,33): error TS2345: Argument of type 'EditorAudio' is not assignable to parameter of type 'HitSoundTransport'.
+src/ui/app.ts(417,1): error TS2322: Type '(message: string, level?: string) => void' is not assignable to type '(message?: string | undefined, level?: string | undefined) => void'.
+src/ui/app.ts(447,24): error TS7006: Parameter 'chart' implicitly has an 'any' type.
+src/ui/app.ts(451,26): error TS7006: Parameter 'timestamp' implicitly has an 'any' type.
+src/ui/app.ts(456,24): error TS7006: Parameter 'seconds' implicitly has an 'any' type.
+src/ui/app.ts(466,77): error TS2345: Argument of type '[string, Uint8Array<ArrayBufferLike>][]' is not assignable to parameter of type 'Map<string, Uint8Array<ArrayBufferLike>>'.
+src/ui/app.ts(468,30): error TS18046: 'error' is of type 'unknown'.
+src/ui/app.ts(475,59): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'number'.
+src/ui/app.ts(477,21): error TS7006: Parameter 'direction' implicitly has an 'any' type.
+src/ui/app.ts(481,29): error TS7006: Parameter 'index' implicitly has an 'any' type.
+src/ui/app.ts(485,22): error TS7006: Parameter 'event' implicitly has an 'any' type.
+src/ui/app.ts(487,52): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'number'.
+src/ui/app.ts(490,26): error TS7006: Parameter 'renderer' implicitly has an 'any' type.
+src/ui/app.ts(490,36): error TS7006: Parameter 'event' implicitly has an 'any' type.
+src/ui/app.ts(501,4): error TS2345: Argument of type '(error: Error) => void' is not assignable to parameter of type '(error: unknown) => void'.
+src/ui/app.ts(511,18): error TS7006: Parameter 'visible' implicitly has an 'any' type.
+src/ui/app.ts(520,83): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(525,5): error TS7034: Variable 'pendingTimelineMenu' implicitly has type 'any' in some locations where its type cannot be determined.
+src/ui/app.ts(541,125): error TS2345: Argument of type 'number' is not assignable to parameter of type 'null | undefined'.
+src/ui/app.ts(545,34): error TS7006: Parameter 'event' implicitly has an 'any' type.
+src/ui/app.ts(557,19): error TS7005: Variable 'pendingTimelineMenu' implicitly has an 'any' type.
+src/ui/app.ts(563,80): error TS2551: Property 'close' does not exist on type 'HTMLElement'. Did you mean 'closest'?
+src/ui/app.ts(567,19): error TS7005: Variable 'pendingTimelineMenu' implicitly has an 'any' type.
+src/ui/app.ts(571,126): error TS2345: Argument of type 'EventTarget | null' is not assignable to parameter of type 'Node | null'.
+src/ui/app.ts(577,89): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(579,87): error TS18046: 'error' is of type 'unknown'.
+src/ui/app.ts(582,23): error TS7006: Parameter 'name' implicitly has an 'any' type.
+src/ui/app.ts(585,72): error TS2339: Property 'hidden' does not exist on type 'Element'.
+src/ui/app.ts(585,87): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(586,107): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(588,71): error TS2339: Property 'onclick' does not exist on type 'Element'.
+src/ui/app.ts(589,23): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(607,79): error TS2339: Property 'onclick' does not exist on type 'Element'.
+src/ui/app.ts(608,172): error TS2339: Property 'blur' does not exist on type 'Element'.
+src/ui/app.ts(609,71): error TS2339: Property 'style' does not exist on type 'Element'.
+src/ui/app.ts(609,143): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(610,24): error TS7006: Parameter 'force' implicitly has an 'any' type.
+src/ui/app.ts(628,17): error TS7006: Parameter 'selector' implicitly has an 'any' type.
+src/ui/app.ts(628,27): error TS7006: Parameter 'callback' implicitly has an 'any' type.
+src/ui/app.ts(630,59): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(635,25): error TS7006: Parameter 'value' implicitly has an 'any' type.
+src/ui/app.ts(636,29): error TS7006: Parameter 'type' implicitly has an 'any' type.
+src/ui/app.ts(636,35): error TS7006: Parameter 'event' implicitly has an 'any' type.
+src/ui/app.ts(655,63): error TS2365: Operator '+' cannot be applied to types 'number' and 'EventValue'.
+src/ui/app.ts(666,25): error TS7053: Element implicitly has an 'any' type because expression of type 'string' can't be used to index type 'LineTracks'.
+src/ui/app.ts(680,38): error TS2345: Argument of type 'string' is not assignable to parameter of type 'AnyEventType'.
+src/ui/app.ts(699,61): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(701,197): error TS7053: Element implicitly has an 'any' type because expression of type 'number' can't be used to index type '{}'.
+src/ui/app.ts(701,266): error TS18046: 'preferences.originalSettings.scrollValueIncrement' is of type 'unknown'.
+src/ui/app.ts(706,23): error TS7006: Parameter 'line' implicitly has an 'any' type.
+src/ui/app.ts(706,257): error TS18046: 'events' is of type 'unknown'.
+src/ui/app.ts(718,49): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(720,20): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(721,20): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(722,25): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(725,54): error TS2322: Type 'number' is not assignable to type 'string'.
+src/ui/app.ts(727,27): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(730,26): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(731,3): error TS2322: Type 'number' is not assignable to type 'string'.
+src/ui/app.ts(733,32): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(735,35): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(736,35): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(737,38): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(738,38): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(739,25): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(739,62): error TS2339: Property 'disabled' does not exist on type 'HTMLElement'.
+src/ui/app.ts(759,29): error TS2345: Argument of type '(error: Error) => void' is not assignable to parameter of type '(error: unknown) => void'.
+src/ui/app.ts(760,81): error TS2345: Argument of type '(error: Error) => void' is not assignable to parameter of type '(error: unknown) => void'.
+src/ui/app.ts(763,35): error TS2532: Object is possibly 'undefined'.
+src/ui/app.ts(791,23): error TS7006: Parameter 'chart' implicitly has an 'any' type.
+src/ui/app.ts(791,30): error TS7006: Parameter 'name' implicitly has an 'any' type.
+src/ui/app.ts(806,146): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(820,24): error TS2339: Property 'max' does not exist on type 'HTMLElement'.
+src/ui/app.ts(826,23): error TS7006: Parameter 'action' implicitly has an 'any' type.
+src/ui/app.ts(831,30): error TS7006: Parameter 'candidate' implicitly has an 'any' type.
+src/ui/app.ts(831,41): error TS7006: Parameter 'nextAssets' implicitly has an 'any' type.
+src/ui/app.ts(846,26): error TS7006: Parameter 'bytes' implicitly has an 'any' type.
+src/ui/app.ts(846,33): error TS7006: Parameter 'name' implicitly has an 'any' type.
+src/ui/app.ts(854,24): error TS2339: Property 'max' does not exist on type 'HTMLElement'.
+src/ui/app.ts(860,19): error TS7006: Parameter 'value' implicitly has an 'any' type.
+src/ui/app.ts(891,25): error TS7006: Parameter 'label' implicitly has an 'any' type.
+src/ui/app.ts(891,32): error TS7006: Parameter 'next' implicitly has an 'any' type.
+src/ui/app.ts(893,20): error TS7006: Parameter 'type' implicitly has an 'any' type.
+src/ui/app.ts(893,26): error TS7006: Parameter 'index' implicitly has an 'any' type.
+src/ui/app.ts(897,3): error TS2322: Type 'null' is not assignable to type 'Chart | undefined'.
+src/ui/app.ts(913,36): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(913,49): error TS2339: Property 'files' does not exist on type 'EventTarget'.
+src/ui/app.ts(920,33): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(921,13): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(921,26): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(926,30): error TS2554: Expected 1-3 arguments, but got 0.
+src/ui/app.ts(931,18): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(931,31): error TS2339: Property 'files' does not exist on type 'EventTarget'.
+src/ui/app.ts(938,33): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(939,13): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(939,26): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(945,18): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(945,31): error TS2339: Property 'files' does not exist on type 'EventTarget'.
+src/ui/app.ts(951,31): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(952,13): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(952,26): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(963,32): error TS2322: Type 'null' is not assignable to type 'Chart'.
+src/ui/app.ts(964,37): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(969,74): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(970,78): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(970,91): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(971,75): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(971,88): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(973,24): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(973,37): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(974,34): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(974,47): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(979,25): error TS7006: Parameter 'input' implicitly has an 'any' type.
+src/ui/app.ts(979,32): error TS7006: Parameter 'direction' implicitly has an 'any' type.
+src/ui/app.ts(985,33): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(989,15): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(990,11): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(995,80): error TS2322: Type 'string | number' is not assignable to type 'string | null'.
+src/ui/app.ts(995,124): error TS2365: Operator '<' cannot be applied to types 'string | number' and 'number'.
+src/ui/app.ts(999,100): error TS2339: Property 'deltaY' does not exist on type 'Event'.
+src/ui/app.ts(1004,3): error TS18047: 'event.currentTarget' is possibly 'null'.
+src/ui/app.ts(1004,23): error TS2339: Property 'setAttribute' does not exist on type 'EventTarget'.
+src/ui/app.ts(1006,80): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1006,93): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1007,110): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1007,123): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1009,11): error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1010,26): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1010,39): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1011,33): error TS7053: Element implicitly has an 'any' type because expression of type 'string | number | boolean' can't be used to index type 'Timeline'.
+src/ui/app.ts(1011,42): error TS2538: Type 'false' cannot be used as an index type.
+src/ui/app.ts(1011,42): error TS2538: Type 'true' cannot be used as an index type.
+src/ui/app.ts(1011,63): error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'number'.
+src/ui/app.ts(1011,81): error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'number'.
+src/ui/app.ts(1012,5): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1012,18): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1012,26): error TS7053: Element implicitly has an 'any' type because expression of type 'string | number | boolean' can't be used to index type 'Timeline'.
+src/ui/app.ts(1012,35): error TS2538: Type 'false' cannot be used as an index type.
+src/ui/app.ts(1012,35): error TS2538: Type 'true' cannot be used as an index type.
+src/ui/app.ts(1013,58): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1017,27): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1017,40): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1017,68): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1019,75): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1019,88): error TS2339: Property 'checked' does not exist on type 'EventTarget'.
+src/ui/app.ts(1027,7): error TS2322: Type 'null' is not assignable to type 'Chart | undefined'.
+src/ui/app.ts(1036,12): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(1039,12): error TS2339: Property 'title' does not exist on type 'Element'.
+src/ui/app.ts(1042,117): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1042,130): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1045,88): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1045,101): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1046,83): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1046,96): error TS2339: Property 'checked' does not exist on type 'EventTarget'.
+src/ui/app.ts(1054,94): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1054,107): error TS2339: Property 'checked' does not exist on type 'EventTarget'.
+src/ui/app.ts(1054,155): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1054,168): error TS2339: Property 'checked' does not exist on type 'EventTarget'.
+src/ui/app.ts(1055,98): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1055,111): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1058,62): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1059,58): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1061,37): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1062,59): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1062,88): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(1064,71): error TS2339: Property 'onclick' does not exist on type 'Element'.
+src/ui/app.ts(1066,33): error TS2339: Property 'dataset' does not exist on type 'Element'.
+src/ui/app.ts(1070,17): error TS7006: Parameter 'direction' implicitly has an 'any' type.
+src/ui/app.ts(1095,23): error TS7006: Parameter 'end' implicitly has an 'any' type.
+src/ui/app.ts(1108,67): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1108,80): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1112,8): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1112,21): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1112,38): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1112,51): error TS2339: Property 'validity' does not exist on type 'EventTarget'.
+src/ui/app.ts(1113,35): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1113,48): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1118,3): error TS2322: Type 'string' is not assignable to type '"compact" | "icons" | "wide" | undefined'.
+src/ui/app.ts(1138,75): error TS2532: Object is possibly 'undefined'.
+src/ui/app.ts(1138,140): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1139,1): error TS2721: Cannot invoke an object which is possibly 'null'.
+src/ui/app.ts(1139,26): error TS2554: Expected 1 arguments, but got 0.
+src/ui/app.ts(1140,79): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1144,51): error TS2322: Type '{ positionX: number; type?: NoteType | undefined; startTime?: Beat | undefined; endTime?: Beat | undefined; above?: number | boolean; isFake?: number | boolean; ... 5 more ...; color?: Color; }' is not assignable to type 'Note'.
+src/ui/app.ts(1144,75): error TS18048: 'note' is possibly 'undefined'.
+src/ui/app.ts(1153,166): error TS2550: Property 'toReversed' does not exist on type 'HistoryCommand[]'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2023' or later.
+src/ui/app.ts(1153,184): error TS7006: Parameter 'command' implicitly has an 'any' type.
+src/ui/app.ts(1153,193): error TS7006: Parameter 'index' implicitly has an 'any' type.
+src/ui/app.ts(1177,47): error TS2339: Property 'reason' does not exist on type 'Event'.
+src/ui/app.ts(1179,14): error TS2339: Property 'persist' does not exist on type 'Event'.
+src/ui/app.ts(1181,3): error TS2322: Type 'Promise<unknown>' is not assignable to type 'Promise<void>'.
+src/ui/app.ts(1184,32): error TS7006: Parameter 'issue' implicitly has an 'any' type.
+src/ui/app.ts(1196,10): error TS7053: Element implicitly has an 'any' type because expression of type 'any' can't be used to index type 'Partial<Record<AnyEventType, ChartEvent[]>>'.
+src/ui/app.ts(1197,5): error TS7053: Element implicitly has an 'any' type because expression of type 'any' can't be used to index type 'Partial<Record<AnyEventType, ChartEvent[]>>'.
+src/ui/app.ts(1205,90): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1214,20): error TS7006: Parameter 'issue' implicitly has an 'any' type.
+src/ui/app.ts(1251,21): error TS7006: Parameter 'id' implicitly has an 'any' type.
+src/ui/app.ts(1251,25): error TS7006: Parameter 'label' implicitly has an 'any' type.
+src/ui/app.ts(1251,32): error TS7006: Parameter 'value' implicitly has an 'any' type.
+src/ui/app.ts(1255,64): error TS2488: Type 'never' must have a '[Symbol.iterator]()' method that returns an iterator.
+src/ui/app.ts(1256,16): error TS2540: Cannot assign to 'type' because it is a read-only property.
+src/ui/app.ts(1256,35): error TS2339: Property 'step' does not exist on type 'HTMLInputElement | HTMLSelectElement'.
+src/ui/app.ts(1258,39): error TS2345: Argument of type 'HTMLInputElement | HTMLSelectElement' is not assignable to parameter of type 'HTMLInputElement'.
+src/ui/app.ts(1258,96): error TS2322: Type 'number' is not assignable to type 'string'.
+src/ui/app.ts(1271,133): error TS2322: Type '[string, string]' is not assignable to type 'never'.
+src/ui/app.ts(1271,147): error TS2322: Type '[string, string]' is not assignable to type 'never'.
+src/ui/app.ts(1271,163): error TS2322: Type '[string, string]' is not assignable to type 'never'.
+src/ui/app.ts(1274,75): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1274,129): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1274,178): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1274,223): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1274,273): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1274,281): error TS2322: Type 'number' is not assignable to type 'NoteType | undefined'.
+src/ui/app.ts(1274,317): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1274,369): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1276,9): error TS18048: 'curveEasingPicker' is possibly 'undefined'.
+src/ui/app.ts(1276,34): error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.
+src/ui/app.ts(1278,65): error TS18046: 'error' is of type 'unknown'.
+src/ui/app.ts(1281,44): error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.
+src/ui/app.ts(1285,82): error TS2345: Argument of type 'string | number | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1285,101): error TS2345: Argument of type 'string | number | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1285,111): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1287,3): error TS18048: 'curveEasingPicker' is possibly 'undefined'.
+src/ui/app.ts(1287,28): error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.
+src/ui/app.ts(1305,33): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(1312,85): error TS2345: Argument of type 'EventTarget | null' is not assignable to parameter of type 'ShortcutTarget | null | undefined'.
+src/ui/app.ts(1336,62): error TS2345: Argument of type 'EventTarget | null' is not assignable to parameter of type 'ShortcutTarget | null | undefined'.
+src/ui/app.ts(1337,19): error TS2345: Argument of type 'EventTarget | null' is not assignable to parameter of type 'ShortcutTarget | null | undefined'.
+src/ui/app.ts(1341,111): error TS2345: Argument of type 'EventTarget | null' is not assignable to parameter of type 'ShortcutTarget | null | undefined'.
+src/ui/app.ts(1348,234): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1366,74): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1366,103): error TS2345: Argument of type 'EditorSession' is not assignable to parameter of type 'NumberShortcutSession'.
+src/ui/app.ts(1367,88): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1367,112): error TS18048: 'action' is possibly 'undefined'.
+src/ui/app.ts(1367,139): error TS18048: 'action' is possibly 'undefined'.
+src/ui/app.ts(1369,86): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1370,11): error TS18048: 'action' is possibly 'undefined'.
+src/ui/app.ts(1370,53): error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+src/ui/app.ts(1384,99): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1385,67): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1386,68): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1386,159): error TS2538: Type 'undefined' cannot be used as an index type.
+src/ui/app.ts(1395,50): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1396,42): error TS2339: Property 'clipboardVisible' does not exist on type 'EditorSession'.
+src/ui/app.ts(1399,57): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(1404,82): error TS7053: Element implicitly has an 'any' type because expression of type 'string' can't be used to index type 'DefaultHotkeys'.
+src/ui/app.ts(1423,16): error TS7006: Parameter 'timestamp' implicitly has an 'any' type.
+src/ui/app.ts(1437,76): error TS2345: Argument of type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to parameter of type 'boolean'.
+src/ui/app.ts(1465,26): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1468,75): error TS18047: 'timeline.drag' is possibly 'null'.
+src/ui/app.ts(1469,57): error TS2538: Type 'unknown' cannot be used as an index type.
+src/ui/app.ts(1470,67): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+src/ui/app.ts(1472,97): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1486,27): error TS7006: Parameter 'next' implicitly has an 'any' type.
+src/ui/app.ts(1490,22): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1492,26): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1498,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'number'.
+src/ui/app.ts(1499,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'number'.
+src/ui/app.ts(1500,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'boolean'.
+src/ui/app.ts(1501,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'number'.
+src/ui/app.ts(1502,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'number'.
+src/ui/app.ts(1505,26): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1505,75): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1505,122): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1505,165): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1506,30): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1507,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'boolean'.
+src/ui/app.ts(1508,32): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1509,30): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1510,63): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1511,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'boolean'.
+src/ui/app.ts(1511,85): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1512,3): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'boolean'.
+src/ui/app.ts(1512,22): error TS2322: Type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to type 'boolean'.
+src/ui/app.ts(1512,110): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1521,35): error TS7006: Parameter 'next' implicitly has an 'any' type.
+src/ui/app.ts(1530,14): error TS2339: Property 'showDirectoryPicker' does not exist on type 'Window & typeof globalThis'.
+src/ui/app.ts(1534,40): error TS2339: Property 'showDirectoryPicker' does not exist on type 'Window & typeof globalThis'.
+src/ui/app.ts(1538,29): error TS18046: 'error' is of type 'unknown'.
+src/ui/app.ts(1538,70): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(1547,10): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1547,23): error TS2339: Property 'files' does not exist on type 'EventTarget'.
+src/ui/app.ts(1549,37): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1549,50): error TS2339: Property 'files' does not exist on type 'EventTarget'.
+src/ui/app.ts(1550,18): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1550,31): error TS2339: Property 'files' does not exist on type 'EventTarget'.
+src/ui/app.ts(1552,33): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'Error'.
+src/ui/app.ts(1553,13): error TS18047: 'event.target' is possibly 'null'.
+src/ui/app.ts(1553,26): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1585,71): error TS2339: Property 'originalSettings' does not exist on type '{}'.
+src/ui/app.ts(1585,111): error TS2339: Property 'originalHotkeys' does not exist on type '{}'.
+src/ui/app.ts(1585,187): error TS2339: Property 'originalUI' does not exist on type '{}'.
+src/ui/app.ts(1590,80): error TS7053: Element implicitly has an 'any' type because expression of type 'string' can't be used to index type 'MigratedSettings'.
+src/ui/app.ts(1591,17): error TS2339: Property 'type' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1591,46): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1591,76): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1595,46): error TS2345: Argument of type 'number | boolean | "compact" | "icons" | "wide"' is not assignable to parameter of type 'number'.
+src/ui/app.ts(1596,55): error TS2362: The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+src/ui/app.ts(1596,68): error TS2363: The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+src/ui/app.ts(1598,155): error TS7053: Element implicitly has an 'any' type because expression of type 'string' can't be used to index type 'Preview'.
+src/ui/app.ts(1603,52): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1603,109): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1604,69): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1604,149): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1604,229): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1604,294): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1604,362): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1605,57): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1606,61): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1607,68): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1608,60): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1613,96): error TS2339: Property 'value' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1614,100): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1615,53): error TS2339: Property 'checked' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1619,93): error TS2339: Property 'type' does not exist on type 'HTMLElement'.
+src/ui/app.ts(1621,7): error TS18047: 'control' is possibly 'null'.
+src/ui/app.ts(1621,15): error TS2339: Property 'type' does not exist on type 'EventTarget'.
+src/ui/app.ts(1621,61): error TS18047: 'control' is possibly 'null'.
+src/ui/app.ts(1621,69): error TS2339: Property 'checked' does not exist on type 'EventTarget'.
+src/ui/app.ts(1622,12): error TS18047: 'control' is possibly 'null'.
+src/ui/app.ts(1622,20): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1622,36): error TS18047: 'control' is possibly 'null'.
+src/ui/app.ts(1622,44): error TS2339: Property 'validity' does not exist on type 'EventTarget'.
+src/ui/app.ts(1622,85): error TS18047: 'control' is possibly 'null'.
+src/ui/app.ts(1622,93): error TS2339: Property 'value' does not exist on type 'EventTarget'.
+src/ui/app.ts(1622,134): error TS18047: 'control' is possibly 'null'.
+src/ui/app.ts(1622,142): error TS2339: Property 'value' does not exist on type 'EventTarget'.

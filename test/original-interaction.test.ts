@@ -45,6 +45,20 @@ function canvas(): CanvasDouble {
 function timelineSurface(): HTMLCanvasElement { return canvas() as unknown as HTMLCanvasElement; }
 
 /**
+ * The pointer the drag-release below is driven with.
+ *
+ * `Timeline.up` takes a `GesturePointerLike`, which declares the buttons and modifiers a real
+ * `MouseEvent`/`PointerEvent` carries. The release under test only ever reads `clientX`/`clientY` —
+ * the drag it closes is already open and the modifier flags are consulted on the way *down* — so the
+ * fixture passes the two coordinates it computes and this helper is the one documented place that
+ * bridges them to the full shape.
+ */
+function gesturePointer(clientX: number, clientY: number): Parameters<Timeline['up']>[0] {
+  const open: unknown = { clientX, clientY };
+  return open as Parameters<Timeline['up']>[0];
+}
+
+/**
  * The session as `Timeline` sees it: the real `EditorSession`, viewed through the interface
  * `Timeline` declares.
  *
@@ -158,7 +172,7 @@ test('拖动实时值和落点一致，对未在网格上的音符吸附绝对�
   timeline.drag = { kind: 'move', anchor: 0, start, current: { x: start.x + 40, y: start.y - 15 } };
   const ghost = timeline.movedNote(session.notes[0]);
   assert.equal(ghost.positionX, 135); assert.equal(beatValue(ghost.startTime), 2.25);
-  timeline.up({ clientX: start.x + 40, clientY: start.y - 15 });
+  timeline.up(gesturePointer(start.x + 40, start.y - 15));
   assert.deepEqual(session.notes[0], ghost); session.travel('undo'); assert.equal(session.notes[0].positionX, 23);
 });
 
