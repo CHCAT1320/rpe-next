@@ -60,10 +60,13 @@ npm run build:desktop
 
 ## 开发
 
-开发服务器与构建使用 [Vite](https://vite.dev/)。源码本身仍是不经编译的原生 ES 模块，`npm test` 直接用 Node 内置测试运行 `src/`。
+开发服务器与构建使用 [Vite](https://vite.dev/)，源码以 TypeScript 编写、界面使用 [Vue 3](https://vuejs.org/) 单文件组件。开发服务器和构建步骤都会处理类型，日常运行不需要额外的编译命令。
+
+`npm test` 不用任何构建步骤：Node 直接以类型擦除方式运行 `test/` 与 `src/` 中的 `.ts` 文件。因此源码不能使用 `enum`、构造函数参数属性（`constructor(private x: T)`）和 `namespace` 这类需要真正生成代码的语法，`tsconfig.json` 里的 `erasableSyntaxOnly` 会让 `npm run typecheck` 一并拒绝它们，保证类型检查通过的写法在测试里也能直接跑。相对导入需要保留 `.ts` / `.vue` 后缀，这与 Node 的解析规则一致。
 
 ```sh
 npm test
+npm run typecheck
 npm run build
 npm run smoke-build
 npm run build:pages
@@ -71,6 +74,14 @@ npm run smoke-pages
 ```
 
 `public/` 下的素材会原样复制进 `dist/`：编辑器在运行时才按需解析贴图、缓动曲线、shader 与音效，所以这些文件不做哈希改名。`build` 生成从域名根路径提供服务的 `dist/`；`build:pages` 生成部署在 `/rpe-next/` 子目录的静态网站。推送到 `main` 后，GitHub Actions 自动测试并部署 GitHub Pages。
+
+### 写代码时的约定
+
+- **类型放哪。** 领域共享类型集中在 `src/core/types.ts`（`Chart`、`JudgeLine`、`Note`、`ChartEvent`、`Beat`、`EventLayer` 等）；只被单个模块使用的类型就地定义并导出。
+- **外部数据一律先校验再收窄。** IndexedDB 记录、RPE 工程文件、ZIP 条目都来自磁盘或用户，入口参数用 `unknown` 接住，校验后收窄，不要直接断言成结构体。校验函数用断言签名（`assertChart(chart: unknown): asserts chart is Chart`），让调用方无法跳过检查。
+- **类要显式声明字段**，包括那些只在构造函数里赋值的。未声明的字段会被推断成过窄的类型（例如 `notes: never[]`），进而在调用方产生成百上千的连锁报错。
+- **不要用 `any`、`@ts-ignore`、`@ts-expect-error`**，也不要为了消除报错而放宽 `strict`。如果某个类型确实无法精确表达，用 `unknown` 加收窄，并在注释里写明原因。同样不要删掉校验分支或把 `throw` 改成静默返回。
+- **保留原有的中文错误信息与注释意图**：注释可以用英文重写，但含义不能丢。
 
 ## 许可与来源
 
