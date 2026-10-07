@@ -1,12 +1,46 @@
 import { formatLineExpression, parseLineExpression } from '../application/multi-line-edit.ts';
 import { groupLineIndices, groupNames, isDefaultLineName, lineFeatureLabels, lineNameLabel } from '../core/line-groups.ts';
+import type { EditorSession } from '../application/session.ts';
+import type { JudgeLine } from '../core/types.ts';
+import type { Timeline } from './timeline.ts';
+
+/** The two editing areas the multi-line workspace splits into; also the keys of `multiLineScroll`. */
+export type MultiLineArea = 'notes' | 'events';
+
+/** The line-list drag in progress: which way it is extending the selection, and the captured pointer. */
+export interface MultiLineDrag {
+  selected: boolean;
+  pointerId: number;
+}
+
+/** What {@link MultiLinePanel}'s host supplies. Every hook defaults to a no-op and `timeline` to `null`. */
+export interface MultiLinePanelOptions {
+  activate?: () => void;
+  render?: () => void;
+  notify?: (message: string, level?: string) => void;
+  timeline?: Timeline | null;
+  persist?: () => void;
+}
 
 export class MultiLinePanel {
-  constructor(host, getSession, { activate = () => {}, render = () => {}, notify = () => {}, timeline = null, persist = () => {} } = {}) {
+  // Declared explicitly: an unannotated `null` field would be inferred as `null` and an unannotated
+  // `[]` as `never[]`, which cascades into the callers (see `EditorSession`'s own field comment).
+  host: HTMLElement;
+  getSession: () => EditorSession | null;
+  activate: () => void;
+  renderSession: () => void;
+  notify: (message: string, level?: string) => void;
+  timeline: Timeline | null;
+  persist: () => void;
+  drag: MultiLineDrag | null;
+  /** The list's scroll position, carried across the re-render; `null` before the first one. */
+  listScrollTop: number | null;
+
+  constructor(host: HTMLElement, getSession: () => EditorSession | null, { activate = () => {}, render = () => {}, notify = () => {}, timeline = null, persist = () => {} }: MultiLinePanelOptions = {}) {
     this.host = host; this.getSession = getSession; this.activate = activate; this.renderSession = render; this.notify = notify; this.timeline = timeline; this.persist = persist; this.drag = null; this.listScrollTop = null;
   }
 
-  render() {
+  render(): void {
     const session = this.getSession();
     if (!session) return;
     const previousList = this.host.querySelector('.multi-line-list');
@@ -19,14 +53,14 @@ export class MultiLinePanel {
     const intro = document.createElement('p'); intro.className = 'hint'; intro.textContent = '多线模式会将所选判定线并列显示；点击对应区域即可编辑该线。音符合并模式会共用一个编辑区域。'; this.host.append(intro);
     const widthField = document.createElement('label'); widthField.className = 'field multi-line-width-field'; widthField.append('单线宽度');
     const widthControls = document.createElement('span'); widthControls.className = 'multi-line-width-controls';
-    const currentArea = session.multiLineMode === 'events' ? 'events' : 'notes';
+    const currentArea: MultiLineArea = session.multiLineMode === 'events' ? 'events' : 'notes';
     const currentCanvas = currentArea === 'events' ? this.timeline?.eventsCanvas : this.timeline?.notesCanvas;
-    const widthInput = document.createElement('input'); widthInput.type = 'range'; widthInput.min = 30; widthInput.max = 2400; widthInput.step = 10; widthInput.value = (currentArea === 'events' ? this.timeline?.multiLineEventWidth : this.timeline?.multiLineWidth) || currentCanvas?.clientWidth || 640; widthInput.title = '多线模式下每条线编辑区域的宽度';
+    const widthInput = document.createElement('input'); widthInput.type = 'range'; widthInput.min = '30'; widthInput.max = '2400'; widthInput.step = '10'; widthInput.value = String((currentArea === 'events' ? this.timeline?.multiLineEventWidth : this.timeline?.multiLineWidth) || currentCanvas?.clientWidth || 640); widthInput.title = '多线模式下每条线编辑区域的宽度';
     const widthValue = document.createElement('output'); widthValue.textContent = `${widthInput.value}px`;
-    const setWidth = raw => {
+    const setWidth = (raw: string): void => {
       const value = Math.max(30, Math.min(2400, Number(raw) || 640));
       if (this.timeline) {
-        const area = session.multiLineMode === 'events' ? 'events' : 'notes';
+        const area: MultiLineArea = session.multiLineMode === 'events' ? 'events' : 'notes';
         const canvas = area === 'events' ? this.timeline.eventsCanvas : this.timeline.notesCanvas;
         const viewport = canvas?.clientWidth || 640;
         const oldOffset = this.timeline.multiLineViewportOffset(viewport, area);
@@ -36,13 +70,18 @@ export class MultiLinePanel {
         const total = this.timeline.panelCount(area) * this.timeline.panelWidth(viewport, area) + Math.max(0, this.timeline.panelCount(area) - 1) * this.timeline.panelGap(viewport, area);
         const maximum = Math.max(0, total - viewport);
         const nextOffset = Math.max(0, Math.min(maximum, center - viewport / 2));
-        this.timeline.multiLineScroll[area] = nextOffset;
+        // `multiLineScroll` is the union `number | { notes, events }`; a number is the legacy form
+        // that `multiLineViewportOffset` still migrates in place, so it is replaced wholesale here
+        // before the per-area key is written.
+        const scroll = this.timeline.multiLineScroll;
+        const scrollByArea: { notes: number; events: number } = typeof scroll === 'number' ? { notes: scroll, events: scroll } : scroll;
+        scrollByArea[area] = nextOffset; this.timeline.multiLineScroll = scrollByArea;
         this.timeline.changed();
       }
-      widthInput.value = value; widthValue.textContent = `${value}px`; this.persist();
+      widthInput.value = String(value); widthValue.textContent = `${value}px`; this.persist();
     };
     widthInput.oninput = () => setWidth(widthInput.value);
-    const resetWidth = document.createElement('button'); resetWidth.type = 'button'; resetWidth.textContent = '重置'; resetWidth.title = '恢复为当前编辑区域的默认宽度'; resetWidth.onclick = () => { if (this.timeline) { if (currentArea === 'events') { this.timeline.multiLineEventWidth = 0; this.timeline.multiLineEventWidthExplicit = false; } else { this.timeline.multiLineWidth = 0; this.timeline.multiLineWidthExplicit = false; } this.timeline.multiLineScroll = { notes: 0, events: 0 }; this.timeline.changed(); } widthInput.value = currentCanvas?.clientWidth || 640; widthValue.textContent = `${widthInput.value}px`; this.persist(); };
+    const resetWidth = document.createElement('button'); resetWidth.type = 'button'; resetWidth.textContent = '重置'; resetWidth.title = '恢复为当前编辑区域的默认宽度'; resetWidth.onclick = () => { if (this.timeline) { if (currentArea === 'events') { this.timeline.multiLineEventWidth = 0; this.timeline.multiLineEventWidthExplicit = false; } else { this.timeline.multiLineWidth = 0; this.timeline.multiLineWidthExplicit = false; } this.timeline.multiLineScroll = { notes: 0, events: 0 }; this.timeline.changed(); } widthInput.value = String(currentCanvas?.clientWidth || 640); widthValue.textContent = `${widthInput.value}px`; this.persist(); };
     widthControls.append(widthInput, widthValue, resetWidth); widthField.append(widthControls); this.host.append(widthField);
     const controls = document.createElement('div'); controls.className = 'multi-line-controls';
     const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = session.multiLineEnabled ? 'active' : ''; toggle.textContent = session.multiLineEnabled ? '● 多线' : '○ 多线';
@@ -52,38 +91,40 @@ export class MultiLinePanel {
     const merge = document.createElement('button'); merge.type = 'button'; merge.className = session.multiLineMerge && session.multiLineMode === 'notes' ? 'active' : ''; merge.textContent = '合并'; merge.disabled = session.multiLineMode !== 'notes'; merge.title = '合并多线音符编辑区域'; merge.onclick = () => { session.setMultiLineMerge(!session.multiLineMerge); this.renderSession(); };
     controls.append(toggle, notes, events, merge); this.host.append(controls);
     const actions = document.createElement('div'); actions.className = 'multi-line-actions';
-    for (const [label, titleText, handler] of [['加入当前线', '将当前判定线加入多线编辑', () => session.addMultiLine()], ['移出当前线', '将当前判定线移出多线编辑', () => session.removeMultiLine()], ['清空', '清空参与编辑的判定线', () => session.clearMultiLines()]]) {
+    for (const [label, titleText, handler] of [['加入当前线', '将当前判定线加入多线编辑', () => session.addMultiLine()], ['移出当前线', '将当前判定线移出多线编辑', () => session.removeMultiLine()], ['清空', '清空参与编辑的判定线', () => session.clearMultiLines()]] as [string, string, () => void][]) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.title = titleText; button.onclick = () => { handler(); this.renderSession(); }; actions.append(button);
     }
     this.host.append(actions);
     const expressionField = document.createElement('label'); expressionField.className = 'field multi-line-expression-field'; expressionField.append('线号');
     const expression = document.createElement('input'); expression.type = 'text'; expression.inputMode = 'text'; expression.placeholder = '例如 0 2:4 GroupA'; expression.value = formatLineExpression(session.multiLineIndices, session.chart); expression.title = '空格分隔线号；x:y 表示连续线号；输入分组名表示该组全部判定线'; expressionField.append(expression); this.host.append(expressionField);
-    const applyExpression = () => {
+    const applyExpression = (): void => {
       const previous = [...session.multiLineIndices];
       try {
         const indices = parseLineExpression(expression.value, session.chart.judgeLineList?.length ?? 0, session.chart);
         if (!indices.length) throw new Error('至少需要一条有效判定线');
         session.multiLineIndices = indices; session.multiLineEnabled = true; session.normalizeMultiLine(); session.notify(); this.renderSession();
-      } catch (error) { expression.value = formatLineExpression(previous, session.chart); this.notify(error.message, 'warning'); }
+      } catch (error) { expression.value = formatLineExpression(previous, session.chart); this.notify(error instanceof Error ? error.message : String(error), 'warning'); }
     };
     expression.addEventListener('change', applyExpression); expression.addEventListener('blur', applyExpression); expression.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); applyExpression(); } });
     const list = document.createElement('div'); list.className = 'multi-line-list';
     list.addEventListener('scroll', () => { this.listScrollTop = list.scrollTop; }, { passive: true });
-    const syncExpression = () => { expression.value = formatLineExpression(session.multiLineIndices, session.chart); };
-    const setRow = (index, selected) => {
+    const syncExpression = (): void => { expression.value = formatLineExpression(session.multiLineIndices, session.chart); };
+    const setRow = (index: number, selected: boolean): void => {
       const values = new Set(session.multiLineIndices);
       if (selected) values.add(index); else values.delete(index);
       session.multiLineIndices = [...values].sort((left, right) => left - right);
       session.multiLineEnabled = session.multiLineIndices.length > 0;
       syncExpression();
-      list.querySelectorAll('.multi-line-row').forEach(row => {
+      // `querySelectorAll` yields `Element`, which has no `dataset`/`checked`; the list only ever
+      // holds the `<label class="multi-line-row">` elements built by `createRow` below.
+      list.querySelectorAll<HTMLLabelElement>('.multi-line-row').forEach(row => {
         const rowIndex = Number(row.dataset.lineIndex); const active = session.multiLineIndices.includes(rowIndex);
         row.classList.toggle('selected', active); const checkbox = row.querySelector('input'); if (checkbox) checkbox.checked = active;
       });
     };
     const lines = session.chart.judgeLineList ?? []; const names = groupNames(session.chart);
-    const createRow = (index, line) => {
-      const row = document.createElement('label'); row.className = 'multi-line-row'; row.dataset.lineIndex = index;
+    const createRow = (index: number, line: JudgeLine): HTMLLabelElement => {
+      const row = document.createElement('label'); row.className = 'multi-line-row'; row.dataset.lineIndex = String(index);
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = session.isTargetLine(index); checkbox.disabled = !session.multiLineEnabled && index !== session.lineIndex;
       checkbox.onchange = () => { setRow(index, checkbox.checked); session.notify(); this.renderSession(); };
       const label = document.createElement('span'); label.className = 'multi-line-name'; const name = document.createElement('span'); name.className = 'multi-line-line-name';
@@ -104,9 +145,11 @@ export class MultiLinePanel {
     } else {
       for (const [index, line] of lines.entries()) list.append(createRow(index, line));
     }
-    const finishDrag = () => { if (!this.drag) return; this.listScrollTop = list.scrollTop; this.drag = null; session.normalizeMultiLine(); session.notify(); this.renderSession(); };
+    const finishDrag = (): void => { if (!this.drag) return; this.listScrollTop = list.scrollTop; this.drag = null; session.normalizeMultiLine(); session.notify(); this.renderSession(); };
     list.addEventListener('pointerdown', event => {
-      const row = event.target.closest('.multi-line-row'); if (!row || event.button !== 0) return;
+      // `event.target` is an `EventTarget`; the row lookup needs the `Element` face of it.
+      const target = event.target instanceof Element ? event.target : null;
+      const row = target?.closest<HTMLLabelElement>('.multi-line-row'); if (!row || event.button !== 0) return;
       event.preventDefault(); this.listScrollTop = list.scrollTop; list.setPointerCapture?.(event.pointerId); const index = Number(row.dataset.lineIndex); this.drag = { selected: !session.multiLineIndices.includes(index), pointerId: event.pointerId }; setRow(index, this.drag.selected);
     });
     list.addEventListener('pointermove', event => {
@@ -114,13 +157,16 @@ export class MultiLinePanel {
       const rectangle = list.getBoundingClientRect(); const edge = 22;
       if (event.clientY < rectangle.top + edge) list.scrollTop -= 12;
       else if (event.clientY > rectangle.bottom - edge) list.scrollTop += 12;
-      const row = document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.multi-line-row');
+      const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLLabelElement>('.multi-line-row');
       if (row && list.contains(row)) setRow(Number(row.dataset.lineIndex), this.drag.selected);
     });
     list.addEventListener('pointerup', finishDrag); list.addEventListener('pointercancel', finishDrag); list.addEventListener('lostpointercapture', finishDrag);
-    this.listScrollTop = Math.max(0, previousScrollTop);
+    // `Math.max(0, ...)` already rules out a negative value, so the argument is a number here; the
+    // binding records that for the nullable field without changing either assignment below.
+    const restoredScrollTop: number = Math.max(0, previousScrollTop);
+    this.listScrollTop = restoredScrollTop;
     list.scrollTop = this.listScrollTop;
-    requestAnimationFrame(() => { if (list.isConnected) list.scrollTop = this.listScrollTop; });
+    requestAnimationFrame(() => { if (list.isConnected) list.scrollTop = this.listScrollTop ?? 0; });
     this.host.append(list);
   }
 }

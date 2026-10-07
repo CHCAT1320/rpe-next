@@ -2,9 +2,126 @@ import { lineOverviewWindow, lineOverviewLayout, stepOverviewLine, LineOverviewI
 import { shaderEvents } from '../core/shader-events.ts';
 import { NOTE_COLORS } from './timeline.ts';
 import { isDefaultLineGroup, isDefaultLineName, lineFeatureLabels, lineGroupName } from '../core/line-groups.ts';
+import type { TempoMap } from '../core/tempo.ts';
+import type { Chart, ChartEvent, Note } from '../core/types.ts';
+
+/**
+ * The panel geometry `lineOverviewLayout` returns.
+ *
+ * Restated from the return type of the exported function because `core/line-overview.ts` keeps its
+ * own copy private; taking it from the function keeps the two in step.
+ */
+type LineOverviewLayout = ReturnType<typeof lineOverviewLayout>;
+
+/** One note or event on the real-seconds axis, as {@link LineOverviewIndex.sample} reports it. */
+interface TimedEntry<T> {
+  item: T;
+  start: number;
+  end: number;
+}
+
+/** An event entry also knows which channel column it is drawn in. */
+interface ThumbnailEvent extends TimedEntry<ChartEvent> {
+  channel: number;
+  layer: number | undefined;
+}
+
+/**
+ * What `drawLineThumbnail` reads off a sample.
+ *
+ * Structurally what `LineOverviewIndex.sample` returns; declared here rather than imported because
+ * `core/line-overview.ts` keeps its sample interfaces private.
+ */
+interface ThumbnailSample {
+  notes: TimedEntry<Note>[];
+  events: ThumbnailEvent[];
+  notesLeft: number;
+  eventsLeft: number;
+}
+
+/** What the line switcher reads off the editor when it redraws. */
+export interface LineSwitcherContext {
+  chart: Chart;
+  tempo: TempoMap;
+  seconds: number;
+  selected: number;
+  start: number;
+  end: number;
+  layer?: number;
+  extended?: boolean;
+  visible?: boolean;
+}
+
+/** The members the switcher is handed at construction. */
+export interface LineSwitcherHostContext extends LineSwitcherContext {
+  visible: boolean;
+}
+
+/**
+ * What `filteredLines` reads: the chart plus the visible time window.
+ *
+ * A narrower shape than {@link LineSwitcherContext} because `seconds` and `selected` are only used
+ * by `draw`; the full context is still assignable to it.
+ */
+export interface LineFilterRange {
+  chart: Chart;
+  tempo: TempoMap;
+  start: number;
+  end: number;
+  layer?: number;
+  extended?: boolean;
+}
+
+/** One thumbnail card, with the nodes `renderWindow` refreshes in place. */
+interface LineSwitcherCard {
+  card: HTMLButtonElement;
+  title: HTMLElement;
+  lineGroup: HTMLElement;
+  name: HTMLElement;
+  group: HTMLElement;
+  canvas: HTMLCanvasElement;
+  info: HTMLElement;
+}
+
+/** One frame callback, as handed to `requestAnimationFrame`. */
+type FrameRequest = (timestamp: number) => void;
 
 export class LineSwitcher {
-  constructor(stage, getContext, { select = () => {} } = {}) {
+  // Every field is declared explicitly: an unannotated field would be inferred too narrowly (a
+  // `null` literal, or an empty `Map` inferring `Map<any, any>`), which cascades into the callers.
+  stage: HTMLElement;
+  getContext: () => LineSwitcherHostContext;
+  select: (index: number) => unknown;
+  enabled: boolean;
+  active: boolean;
+  notesOnly: boolean;
+  eventsOnly: boolean;
+  browseRow: number | null;
+  animateFollow: boolean;
+  animation: number | null;
+  lastFrame: number;
+  targetTop: number;
+  stride: number;
+  visibleRows: number;
+  signature: string | null;
+  filterKey: string | null;
+  chart: Chart | null;
+  tempo: TempoMap | null;
+  context: LineSwitcherContext | null;
+  layout: LineOverviewLayout | null;
+  indices: number[];
+  cache: Map<string, LineOverviewIndex>;
+  cards: Map<number, LineSwitcherCard>;
+  filterInputs: Map<string, HTMLInputElement>;
+  host: HTMLElement;
+  filters: HTMLElement;
+  viewport: HTMLElement;
+  content: HTMLElement;
+  grid: HTMLElement;
+  empty: HTMLElement;
+  slider: HTMLInputElement;
+
+  constructor(stage: HTMLElement, getContext: () => LineSwitcherHostContext, { select = () => {} }: { select?: (index: number) => unknown } = {}) {
     this.stage = stage; this.getContext = getContext; this.enabled = true; this.active = false;
     this.select = select; this.browseRow = null; this.animation = null;
     this.notesOnly = false; this.eventsOnly = false;
@@ -19,7 +136,7 @@ export class LineSwitcher {
       control.title = `只显示编辑可视范围内有${label}的判定线；两项勾选时需同时满足`;
       control.append(input, `视野内有${label}`); this.filters.append(control); this.filterInputs.set(key, input);
       input.addEventListener('change', () => {
-        this[key] = input.checked; this.browseRow = null; this.animateFollow = false;
+        this.setFilter(key, input.checked); this.browseRow = null; this.animateFollow = false;
         this.lastFrame = -Infinity; this.draw(performance.now());
       });
     }
@@ -30,7 +147,7 @@ export class LineSwitcher {
     this.empty = document.createElement('div'); this.empty.className = 'line-switcher-empty'; this.empty.hidden = true;
     this.empty.textContent = '当前可视范围内没有符合条件的判定线'; this.empty.setAttribute('role', 'status');
     this.slider = document.createElement('input'); this.slider.type = 'range'; this.slider.className = 'line-switcher-scroll';
-    this.slider.min = 0; this.slider.step = 1; this.slider.setAttribute('aria-label', '浏览判定线缩略图'); this.slider.setAttribute('aria-orientation', 'vertical');
+    this.slider.min = '0'; this.slider.step = '1'; this.slider.setAttribute('aria-label', '浏览判定线缩略图'); this.slider.setAttribute('aria-orientation', 'vertical');
     this.content.append(this.grid); this.viewport.append(this.content, this.empty); body.append(this.viewport, this.slider);
     this.host.append(this.filters, body); stage.append(this.host);
     this.slider.addEventListener('input', () => {
@@ -44,31 +161,41 @@ export class LineSwitcher {
     }, { passive: false });
     window.addEventListener('keyup', event => { if (['Control', 'Meta'].includes(event.key)) this.release(); }, true);
     window.addEventListener('blur', () => this.hide());
-    window.addEventListener('pointerdown', event => { if (!this.host.contains(event.target)) this.hide(); }, true);
+    window.addEventListener('pointerdown', event => { if (!this.host.contains(event.target as Node | null)) this.hide(); }, true);
+    // Declared here so the constructor assigns every field; both are set by the first `draw`.
+    this.indices = []; this.chart = null; this.tempo = null; this.filterKey = null;
+    this.context = null; this.layout = null; this.stride = 0; this.visibleRows = 0;
+    this.targetTop = 0; this.animateFollow = false; this.signature = null;
   }
 
-  show() {
+  /** Reads a filter by its `filterInputs` key; kept typed so the index expression stays a union. */
+  private setFilter(key: string, value: boolean): void {
+    if (key === 'notesOnly') this.notesOnly = value;
+    else if (key === 'eventsOnly') this.eventsOnly = value;
+  }
+
+  show(): void {
     if (!this.enabled) return;
     this.animateFollow = this.active; this.browseRow = null;
     this.active = true; this.host.hidden = false;
     this.lastFrame = -Infinity; this.draw(performance.now());
   }
 
-  release() { this.hide(); }
+  release(): void { this.hide(); }
 
-  reset() {
+  reset(): void {
     this.hide(); this.notesOnly = false; this.eventsOnly = false; this.browseRow = null;
     for (const input of this.filterInputs.values()) input.checked = false;
     this.cache.clear(); this.chart = null; this.filterKey = null;
   }
 
-  lineIndex(index, chart, tempo, layer = 0, extended = false) {
+  lineIndex(index: number, chart: Chart, tempo: TempoMap, layer = 0, extended = false): LineOverviewIndex {
     const key = `${index}:${layer}:${extended ? 1 : 0}`;
     if (!this.cache.has(key)) this.cache.set(key, new LineOverviewIndex(chart.judgeLineList[index], tempo, extended ? shaderEvents(chart, index) : [], layer, extended));
-    return this.cache.get(key);
+    return this.cache.get(key)!;
   }
 
-  filteredLines({ chart, tempo, start, end, layer = 0, extended = false }) {
+  filteredLines({ chart, tempo, start, end, layer = 0, extended = false }: LineFilterRange): number[] {
     if (chart !== this.chart || tempo !== this.tempo) {
       this.cache.clear(); this.chart = chart; this.tempo = tempo; this.filterKey = null;
     }
@@ -80,25 +207,26 @@ export class LineSwitcher {
     return this.indices;
   }
 
-  step(direction) {
+  step(direction: number): unknown {
     const context = this.getContext();
     const index = stepOverviewLine(context.selected, direction, this.filteredLines(context));
     return index === null ? false : this.select(index);
   }
 
-  hide() { this.cancelScroll(); this.active = false; this.host.hidden = true; }
+  hide(): void { this.cancelScroll(); this.active = false; this.host.hidden = true; }
 
-  cancelScroll() { if (this.animation != null) cancelAnimationFrame(this.animation); this.animation = null; }
+  cancelScroll(): void { if (this.animation != null) cancelAnimationFrame(this.animation); this.animation = null; }
 
-  scrollTo(top, animate) {
+  scrollTo(top: number, animate?: boolean): void {
     if (animate && this.targetTop === top && this.animation !== null) return;
     this.cancelScroll(); this.targetTop = top;
     const start = this.viewport.scrollTop; const distance = top - start;
-    if (!animate || Math.abs(distance) < 1 || Math.abs(distance) > this.stride * this.layout.rows * 2) {
+    const layout = this.layout;
+    if (!animate || Math.abs(distance) < 1 || layout === null || Math.abs(distance) > this.stride * layout.rows * 2) {
       this.viewport.scrollTop = top; this.renderWindow(); return;
     }
     const started = performance.now();
-    const frame = timestamp => {
+    const frame: FrameRequest = timestamp => {
       const progress = Math.min(1, Math.max(0, (timestamp - started) / 140));
       this.viewport.scrollTop = start + distance * (1 - (1 - progress) ** 3);
       this.renderWindow();
@@ -107,7 +235,7 @@ export class LineSwitcher {
     this.animation = requestAnimationFrame(frame);
   }
 
-  draw(timestamp) {
+  draw(timestamp: number): void {
     if (!this.active || timestamp - this.lastFrame < 100) return;
     const { chart, tempo, seconds, selected, start, end, visible, layer = 0, extended = false } = this.getContext();
     if (!visible || !this.enabled || !chart.judgeLineList.length) { this.hide(); return; }
@@ -131,13 +259,13 @@ export class LineSwitcher {
     this.grid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
     this.host.style.setProperty('--thumbnail-height', `${thumbnailHeight}px`);
     this.host.style.width = `${panelWidth}px`;
-    this.slider.hidden = overview.maxRow === 0; this.slider.max = overview.maxRow; this.slider.value = overview.firstRow;
-    this.slider.setAttribute('aria-valuetext', indices.length ? `浏览线 ${indices[overview.indices[0]]} 至 ${indices[overview.indices.at(-1)]}，当前线 ${selected}` : '没有符合条件的判定线');
+    this.slider.hidden = overview.maxRow === 0; this.slider.max = String(overview.maxRow); this.slider.value = String(overview.firstRow);
+    this.slider.setAttribute('aria-valuetext', indices.length ? `浏览线 ${indices[overview.indices[0]]} 至 ${indices[overview.indices.at(-1)!]}，当前线 ${selected}` : '没有符合条件的判定线');
     this.scrollTo(overview.firstRow * this.stride, this.browseRow === null && this.animateFollow && !resized && !changedChart);
     this.renderWindow(true);
   }
 
-  renderWindow(refresh = false) {
+  renderWindow(refresh = false): void {
     if (!this.active || !this.context || !this.layout) return;
     const { chart, tempo, seconds, selected, start, end, layer, extended } = this.context;
     const { columns } = this.layout; const rows = this.visibleRows;
@@ -149,7 +277,7 @@ export class LineSwitcher {
     this.grid.style.top = `${Math.max(0, firstRow - 1) * this.stride}px`;
     if (signature !== this.signature) {
       this.signature = signature;
-      const cards = new Map();
+      const cards = new Map<number, LineSwitcherCard>();
       for (const index of indices) cards.set(index, this.cards.get(index) ?? this.createCard(index));
       this.cards = cards; this.grid.replaceChildren(...[...cards.values()].map(entry => entry.card));
       refresh = true;
@@ -157,12 +285,12 @@ export class LineSwitcher {
     if (!refresh) return;
     for (const index of indices) {
       const line = chart.judgeLineList[index];
-      const sample = this.lineIndex(index, chart, tempo, layer, extended).sample(seconds, start, end);
-      const { card, title, lineGroup, name, group, canvas, info } = this.cards.get(index);
+      const sample = this.lineIndex(index, chart, tempo, layer ?? 0, extended).sample(seconds, start, end);
+      const { card, title, lineGroup, name, group, canvas, info } = this.cards.get(index)!;
       card.classList.toggle('selected', index === selected);
       card.setAttribute('aria-current', String(index === selected));
       const defaultName = String(line?.Name ?? '').trim() === 'Untitled' || isDefaultLineName(line, index);
-      title.querySelector('.line-switcher-number').textContent = `${index === selected ? '▶ ' : ''}${index}`;
+      title.querySelector('.line-switcher-number')!.textContent = `${index === selected ? '▶ ' : ''}${index}`;
       name.textContent = defaultName ? '' : ` · ${String(line.Name).trim()}`;
       lineGroup.textContent = isDefaultLineGroup(chart, line) ? '' : ` · ${lineGroupName(chart, line)}`;
       group.textContent = lineFeatureLabels(line).map(label => label.replace('父线=', '父=').replace('贴图=', '图=')).join(' · ');
@@ -173,7 +301,7 @@ export class LineSwitcher {
     }
   }
 
-  createCard(index) {
+  createCard(index: number): LineSwitcherCard {
     const card = document.createElement('button'); card.type = 'button'; card.className = 'line-switcher-card';
     const title = document.createElement('strong'); const number = document.createElement('span'); number.className = 'line-switcher-number'; const lineGroup = document.createElement('span'); lineGroup.className = 'line-switcher-line-group'; const name = document.createElement('span'); name.className = 'line-switcher-line-name'; title.append(number, lineGroup, name);
     const group = document.createElement('em'); group.className = 'line-switcher-group';
@@ -189,18 +317,27 @@ export class LineSwitcher {
   }
 }
 
-export function drawLineThumbnail(canvas, sample, seconds, start, end) {
-  const context = canvas.getContext('2d'); const width = canvas.width; const height = canvas.height;
-  const vertical = time => height - 5 - (time - start) / Math.max(0.01, end - start) * (height - 10);
+/** One note or event on the real-seconds axis, as `LineOverviewIndex.sample` reports it. */
+interface ThumbnailEntry<T> {
+  item: T;
+  start: number;
+  end: number;
+}
+
+export function drawLineThumbnail(canvas: HTMLCanvasElement, sample: ThumbnailSample, seconds: number, start: number, end: number): void {
+  const context = canvas.getContext('2d')!; const width = canvas.width; const height = canvas.height;
+  const vertical = (time: number) => height - 5 - (time - start) / Math.max(0.01, end - start) * (height - 10);
   context.clearRect(0, 0, width, height); context.fillStyle = '#303030'; context.fillRect(0, 0, width, height);
   context.strokeStyle = '#555555'; context.lineWidth = 1;
   for (const position of [10, 82, 154, 162]) { context.beginPath(); context.moveTo(position, 0); context.lineTo(position, height); context.stroke(); }
-  for (const entry of sample.events.slice(0, 1500)) {
+  // `sample.events` is typed as the lane entries `LineOverviewIndex` produces, which additionally
+  // carry `channel`/`layer`; the cast names that shape instead of widening the sample type.
+  for (const entry of (sample.events as unknown as ThumbnailEvent[]).slice(0, 1500)) {
     context.fillStyle = entry.channel === 5 ? '#ab7cca99' : '#cfaa5877';
     context.fillRect(166 + entry.channel * 12, vertical(entry.end), 10, Math.max(2, vertical(entry.start) - vertical(entry.end)));
   }
-  const notes = sample.notes.slice(0, 1500);
-  for (const hold of [true, false]) for (const entry of notes) {
+  const notes = sample.notes as unknown as ThumbnailEntry<Note>[];
+  for (const hold of [true, false]) for (const entry of notes.slice(0, 1500)) {
     const note = entry.item; if ((note.type === 2) !== hold) continue;
     const horizontal = 10 + (note.positionX + 675) / 1350 * 144;
     if (horizontal < 0 || horizontal > 160) continue;

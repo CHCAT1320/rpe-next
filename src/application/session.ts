@@ -3,6 +3,7 @@ import type { SelectionState } from './selection-history.ts';
 import { createChart, createLine } from '../core/chart.ts';
 import type { AnyEventType, Chart, ChartEvent, JudgeLine, Note } from '../core/types.ts';
 import { beatValue, fromNumber } from '../core/beat.ts';
+import type { TempoMap } from '../core/tempo.ts';
 import { selectionState, sameSelection, remapSelection, restoreSelection } from './selection-history.ts';
 
 /** A note together with the line it belongs to; the unit `selectedNoteEntries` hands to callers. */
@@ -50,6 +51,21 @@ export class EditorSession extends EventTarget {
   multiSelectionIntent: 'notes' | 'events' | null;
   editSeconds: number;
   recentEdits: RecentEdit[];
+  /**
+   * Fields `app.ts` attaches to the session on every render rather than storing on the class.
+   *
+   * They must be optional because they genuinely do not exist until `renderSession` runs — the
+   * editor-wide `liveEventEdit` suppression flag, the per-track wheel increments, and the tempo map
+   * and grid settings the timeline measures with, which are shared with the event commands.
+   */
+  liveNoteEdit?: boolean;
+  liveEventEdit?: boolean;
+  liveBeatEdit?: boolean;
+  eventWheelSteps?: Partial<Record<AnyEventType, number>>;
+  visibleTimeUnit?: string;
+  tempo?: TempoMap;
+  division?: number;
+  cutDensity?: number;
 
   constructor(chart: Chart = createChart()) {
     super();

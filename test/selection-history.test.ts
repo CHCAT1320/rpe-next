@@ -5,6 +5,7 @@ import { createChart, createNote, createEvent, createLine } from '../src/core/ch
 import { transformEvents, deleteEvents } from '../src/application/event-commands.ts';
 import { cutSelectedEvents } from '../src/application/event-tools.ts';
 import { captureSelection, commitSelectionEdit, editCapturedSelection } from '../src/application/batch-edit.ts';
+import type { Note } from '../src/core/types.ts';
 
 function fixture() {
   const chart = createChart();
@@ -15,7 +16,12 @@ function fixture() {
 
 test('撤销与重做音符批改保留多选；改选后撤销也保持当前选择', () => {
   const session = fixture();
-  session.transformSelection('移动', note => ({ ...note, positionX: note.positionX + 10 }));
+  session.transformSelection('移动', (note: Note | undefined): Note => {
+    // `transformSelection` reports `undefined` for a selected index the current line has no note
+    // for; the fixture's selection (`0` and `2`) always resolves.
+    if (!note) throw new Error('选中索引没有对应音符');
+    return { ...note, positionX: note.positionX + 10 };
+  });
   session.travel('undo'); assert.deepEqual([...session.selection], [0, 2]); assert.equal(session.notes[0].positionX, -100);
   session.travel('redo'); assert.deepEqual([...session.selection], [0, 2]); assert.equal(session.notes[0].positionX, -90);
   session.selection = new Set([1, 2]); session.travel('undo'); assert.deepEqual([...session.selection], [1, 2]);
@@ -25,7 +31,11 @@ test('撤销与重做音符批改保留多选；改选后撤销也保持当前�
 test('切割、删除事件撤销后恢复原物件多选，重做恢复新段索引', () => {
   const session = fixture(); session.selection.clear(); session.focus = 'events';
   session.eventSelection = new Set(['moveXEvents:0', 'moveXEvents:1']);
-  transformEvents(session, '改值', event => ({ ...event, end: event.end + 1 }));
+  transformEvents(session, '改值', event => {
+    // The fixture builds this track from numeric endpoints, so `EventValue` is a number here.
+    const end = typeof event.end === 'number' ? event.end : 0;
+    return { ...event, end: end + 1 };
+  });
   session.travel('undo'); assert.equal(session.eventSelection.size, 2);
   cutSelectedEvents(session, { division: 2, density: 1 }); assert.equal(session.eventSelection.size, 4);
   session.travel('undo'); assert.deepEqual([...session.eventSelection], ['moveXEvents:0', 'moveXEvents:1']);

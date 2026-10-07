@@ -1,21 +1,35 @@
 import { beatValue } from '../core/beat.ts';
+import type { ClipboardEntry, ClipboardHistory } from '../application/clipboard-history.ts';
 
-const colors = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
+const colors: Record<number, string> = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
 
-export function drawClipboardThumbnail(canvas, entry) {
+/** The callbacks the history list wires its cards to. */
+export interface ClipboardHistoryActions {
+  use(id: string): void;
+}
+
+/**
+ * Draws a compact preview of a remembered clipboard group.
+ *
+ * The horizontal axis is note X position and the vertical axis is beat time, so notes and events
+ * share one time frame: notes occupy the left of the canvas and event tracks the right, unless the
+ * group holds only one kind, in which case it takes the full width.
+ */
+export function drawClipboardThumbnail(canvas: HTMLCanvasElement, entry: ClipboardEntry): void {
   canvas.width = 480; canvas.height = 160;
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d')!;
   const items = [...entry.notes, ...entry.events.map(item => item.event)];
   let first = Infinity; let last = -Infinity;
   for (const item of items) { first = Math.min(first, beatValue(item.startTime)); last = Math.max(last, beatValue(item.endTime)); }
   const span = Math.max(1, last - first);
-  const vertical = time => 145 - (beatValue(time) - first) / span * 130;
+  const vertical = (time: unknown): number => 145 - (beatValue(time) - first) / span * 130;
   const noteArea = entry.notes.length ? entry.events.length ? 300 : 480 : 0;
   let extent = 675;
   for (const note of entry.notes) extent = Math.max(extent, Math.abs(note.positionX));
   context.fillStyle = '#20252d'; context.fillRect(0, 0, 480, 160);
   context.strokeStyle = '#414956'; context.lineWidth = 1;
   if (noteArea) for (let index = 0; index < 5; index++) { const x = 16 + index / 4 * (noteArea - 32); context.beginPath(); context.moveTo(x, 10); context.lineTo(x, 150); context.stroke(); }
+  // Hold notes are drawn first so their bodies sit behind the tap markers drawn on top.
   for (const note of [...entry.notes].sort((left, right) => Number(right.type === 2) - Number(left.type === 2))) {
     const horizontal = 16 + (note.positionX + extent) / (extent * 2) * (noteArea - 32);
     const bottom = vertical(note.startTime); const top = vertical(note.endTime);
@@ -34,9 +48,13 @@ export function drawClipboardThumbnail(canvas, entry) {
   context.globalAlpha = 1;
 }
 
-export function renderClipboardHistory(host, history, actions) {
+/** Renders the remembered clipboard groups as a list of cards. */
+export function renderClipboardHistory(host: HTMLElement, history: ClipboardHistory, actions: ClipboardHistoryActions): void {
+  // Focus and the caret position are captured before the DOM is rebuilt, then restored afterwards,
+  // so renaming a group does not steal focus while the user is still typing in its field.
   const focused = document.activeElement?.closest('[data-clipboard-id]');
-  const focusId = focused?.dataset.clipboardId; const focusAction = document.activeElement?.dataset.action;
+  const focusId = (focused as HTMLElement | null)?.dataset.clipboardId;
+  const focusAction = (document.activeElement as HTMLElement | null)?.dataset.action;
   host.replaceChildren();
   if (!history.entries.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = '复制或剪切选中物件后，这里会显示缩览图。'; host.append(empty); return; }
   for (const entry of [...history.entries].sort((left, right) => Number(right.pinned) - Number(left.pinned))) {
@@ -60,10 +78,14 @@ export function renderClipboardHistory(host, history, actions) {
     name.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); name.blur(); } };
     card.append(name);
     const buttons = document.createElement('div'); buttons.className = 'clipboard-actions';
-    for (const [key, label, action] of [['pin', entry.pinned ? '取消固定' : '固定', () => history.pin(entry.id)], ['delete', '删除记录', () => history.remove(entry.id)]]) {
+    const controls: [string, string, () => void][] = [['pin', entry.pinned ? '取消固定' : '固定', () => history.pin(entry.id)], ['delete', '删除记录', () => history.remove(entry.id)]];
+    for (const [key, label, action] of controls) {
       const button = document.createElement('button'); button.type = 'button'; button.dataset.action = key; button.textContent = label; button.onclick = action; buttons.append(button);
     }
     card.append(buttons); host.append(card);
   }
-  if (focusId) for (const card of host.children) if (card.dataset.clipboardId === focusId) card.querySelector(`[data-action="${focusAction}"]`)?.focus();
+  if (focusId) for (const card of host.children) {
+    const element = card as HTMLElement;
+    if (element.dataset.clipboardId === focusId) element.querySelector<HTMLElement>(`[data-action="${focusAction}"]`)?.focus();
+  }
 }

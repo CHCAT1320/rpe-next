@@ -3,24 +3,70 @@ import { groupLineIndices, groupNames, lineDisplayLabel, lineFeatureLabels, line
 import { deleteLine, duplicateLine, reorderLine, setLineParent } from '../application/line-commands.ts';
 import { UI_BINDINGS } from '../core/game-ui.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import type { EditorSession } from '../application/session.ts';
+import type { Chart, JudgeLine } from '../core/types.ts';
 
-const value = input => String(input?.value ?? '').trim();
+/** Reads the trimmed text of a form control; `unknown` because callers pass inputs and selects alike. */
+const value = (input: HTMLInputElement | HTMLSelectElement | null | undefined): string => String(input?.value ?? '').trim();
+
+/**
+ * The asset library as the texture picker reads it: a name per image, with its bytes when the
+ * project carries them (`null` stands for the built-in `line.png`, which is served from `assets/`).
+ * This is the same `Map<string, Uint8Array>` the rest of the editor passes around (`app.ts`,
+ * `files.ts`, `library.ts`).
+ */
+export type LineAssets = Map<string, Uint8Array | null>;
+
+/** The fields `applyLine` writes back; every value arrives from a form control. */
+export interface LineFormValues {
+  parent: HTMLSelectElement;
+  group: HTMLSelectElement;
+  zOrder: HTMLInputElement;
+  bpmfactor: HTMLInputElement;
+  name: HTMLInputElement;
+  isCover: boolean;
+  attachUI: HTMLSelectElement;
+  texture: HTMLInputElement;
+  rotateWithFather: boolean;
+}
+
+/** What {@link LinePanel}'s host supplies. Every hook defaults to a no-op. */
+export interface LinePanelOptions {
+  render?: () => void;
+  notify?: (message: string, level?: string) => void;
+  getAssets?: () => LineAssets;
+  afterTexture?: () => void;
+}
 
 export class LinePanel {
-  constructor(host, getSession, { render = () => {}, notify = () => {}, getAssets = () => new Map(), afterTexture = () => {} } = {}) {
+  // Declared explicitly: an unannotated `[]`/`false` field would be inferred too narrowly and
+  // cascade into the callers, exactly as `EditorSession` documents for its own fields.
+  host: HTMLElement;
+  getSession: () => EditorSession;
+  renderSession: () => void;
+  notify: (message: string, level?: string) => void;
+  getAssets: () => LineAssets;
+  afterTexture: () => void;
+  selectedGroup: number;
+  textureUrls: string[];
+  textureLibraryOpen: boolean;
+  /** The line list's scroll position, preserved across re-renders; `undefined` before the first one. */
+  scrollTop: number | undefined;
+
+  constructor(host: HTMLElement, getSession: () => EditorSession, { render = () => {}, notify = () => {}, getAssets = () => new Map(), afterTexture = () => {} }: LinePanelOptions = {}) {
     this.host = host; this.getSession = getSession; this.renderSession = render; this.notify = notify; this.getAssets = getAssets; this.afterTexture = afterTexture; this.selectedGroup = 0; this.textureUrls = []; this.textureLibraryOpen = false;
   }
 
-  clearTextureUrls() { for (const url of this.textureUrls) URL.revokeObjectURL(url); this.textureUrls = []; }
+  clearTextureUrls(): void { for (const url of this.textureUrls) URL.revokeObjectURL(url); this.textureUrls = []; }
 
-  setTexture(name) {
+  setTexture(name: string): void {
     const session = this.getSession(); const line = session.line; if (!line) return;
     const lines = [...session.chart.judgeLineList]; lines[session.lineIndex] = { ...line, Texture: name || 'line.png' };
     session.commit('更改判定线贴图', { ...session.chart, judgeLineList: lines });
     this.afterTexture();
   }
 
-  commit(label, chart, index = this.getSession().lineIndex) {
+  commit(label: string, chart: Chart, index: number = this.getSession().lineIndex): void {
     const session = this.getSession();
     const beforeSelection = session.selectionState();
     session.lineIndex = Math.max(0, Math.min(index, (chart.judgeLineList?.length ?? 1) - 1));
@@ -28,11 +74,11 @@ export class LinePanel {
     session.commit(label, chart, beforeSelection);
   }
 
-  field(container, labelText, input) {
+  field<T extends HTMLElement>(container: HTMLElement, labelText: string, input: T): T {
     const label = document.createElement('label'); label.className = 'field'; label.append(labelText, input); container.append(label); return input;
   }
 
-  applyLine(values) {
+  applyLine(values: LineFormValues): void {
     const session = this.getSession(); const index = session.lineIndex; const line = session.line;
     if (!line) return;
     const parent = Number(value(values.parent)); const group = Number(value(values.group)); const zOrder = Number(value(values.zOrder)); const bpmfactor = Number(value(values.bpmfactor));
@@ -48,7 +94,7 @@ export class LinePanel {
     this.afterTexture();
   }
 
-  render() {
+  render(): void {
     const session = this.getSession(); if (!session?.chart) return;
     this.clearTextureUrls();
     const chart = session.chart; const lines = chart.judgeLineList ?? []; const names = groupNames(chart);
@@ -63,7 +109,7 @@ export class LinePanel {
     const list = document.createElement('div'); list.id = 'line-list'; list.setAttribute('role', 'list'); list.setAttribute('aria-label', '判定线列表');
     const scrollTop = this.scrollTop ?? 0;
     const hasNamedGroups = names.slice(1).some((unused, groupIndex) => groupLineIndices(chart, groupIndex + 1).length > 0);
-    const createRow = (index, line) => {
+    const createRow = (index: number, line: JudgeLine): HTMLButtonElement => {
       const button = document.createElement('button'); button.type = 'button'; button.className = index === session.lineIndex ? 'active' : '';
       const number = document.createElement('span'); number.className = 'line-list-index'; number.textContent = String(index).padStart(2, '0');
       const name = document.createElement('span'); name.className = 'line-list-name'; name.textContent = lineNameLabel(line, index);
@@ -89,34 +135,43 @@ export class LinePanel {
     if (line) {
       const form = document.createElement('div'); form.className = 'line-properties-form';
       const name = document.createElement('input'); name.value = line.Name ?? ''; name.setAttribute('aria-label', '判定线名称'); this.field(form, '名称', name);
-      const group = document.createElement('select'); names.forEach((nameText, index) => group.append(new Option(`${index} · ${nameText}`, index))); group.value = String(Math.min(lineGroupIndex(line), names.length - 1)); group.setAttribute('aria-label', '判定线分组'); this.field(form, '分组', group);
+      const group = document.createElement('select'); names.forEach((nameText, index) => group.append(new Option(`${index} · ${nameText}`, String(index)))); group.value = String(Math.min(lineGroupIndex(line), names.length - 1)); group.setAttribute('aria-label', '判定线分组'); this.field(form, '分组', group);
       const mask = document.createElement('input'); mask.type = 'checkbox'; mask.checked = Number(line.isCover ?? 1) === 1; mask.setAttribute('aria-label', '遮罩'); const maskLabel = document.createElement('label'); maskLabel.className = 'field checkbox-field'; maskLabel.append(mask, '遮罩：隐藏线下方音符'); form.append(maskLabel);
-      const parent = document.createElement('select'); parent.setAttribute('aria-label', '父判定线'); parent.append(new Option('-1 · 无父线', '-1')); lines.forEach((candidate, index) => { if (index !== session.lineIndex) parent.append(new Option(`${index} · ${lineDisplayLabel(chart, index, { includeIndex: false })}`, index)); }); parent.value = String(line.father ?? -1); this.field(form, '父线', parent);
+      const parent = document.createElement('select'); parent.setAttribute('aria-label', '父判定线'); parent.append(new Option('-1 · 无父线', '-1')); lines.forEach((candidate, index) => { if (index !== session.lineIndex) parent.append(new Option(`${index} · ${lineDisplayLabel(chart, index, { includeIndex: false })}`, String(index))); }); parent.value = String(line.father ?? -1); this.field(form, '父线', parent);
       const attachUI = document.createElement('select'); attachUI.setAttribute('aria-label', '绑定游戏 UI'); attachUI.append(new Option('不绑定', ''), ...UI_BINDINGS.map(([key, label]) => new Option(label, key))); if (line.attachUI && !UI_BINDINGS.some(([key]) => key === line.attachUI)) attachUI.append(new Option(`保留：${line.attachUI}`, line.attachUI)); attachUI.value = line.attachUI ?? ''; this.field(form, '绑定 UI', attachUI);
-      const zOrder = document.createElement('input'); zOrder.type = 'number'; zOrder.step = '1'; zOrder.value = Number(line.zOrder ?? 0); zOrder.setAttribute('aria-label', 'zOrder'); this.field(form, 'zOrder', zOrder);
-      const bpmfactor = document.createElement('input'); bpmfactor.type = 'number'; bpmfactor.min = '0.01'; bpmfactor.step = '0.01'; bpmfactor.value = Number(line.bpmfactor ?? 1); bpmfactor.setAttribute('aria-label', 'BPM 倍率'); this.field(form, 'BPM 倍率', bpmfactor);
+      const zOrder = document.createElement('input'); zOrder.type = 'number'; zOrder.step = '1'; zOrder.value = String(Number(line.zOrder ?? 0)); zOrder.setAttribute('aria-label', 'zOrder'); this.field(form, 'zOrder', zOrder);
+      const bpmfactor = document.createElement('input'); bpmfactor.type = 'number'; bpmfactor.min = '0.01'; bpmfactor.step = '0.01'; bpmfactor.value = String(Number(line.bpmfactor ?? 1)); bpmfactor.setAttribute('aria-label', 'BPM 倍率'); this.field(form, 'BPM 倍率', bpmfactor);
       const texture = document.createElement('input'); texture.value = line.Texture ?? 'line.png'; texture.setAttribute('aria-label', '判定线贴图'); texture.setAttribute('list', 'line-texture-suggestions'); this.field(form, '贴图', texture);
       const suggestions = document.createElement('datalist'); suggestions.id = 'line-texture-suggestions'; suggestions.append(new Option('line.png', 'line.png')); for (const name of this.getAssets().keys()) if (/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(name) && name !== 'line.png') suggestions.append(new Option(name, name)); form.append(suggestions);
       const textureLibrary = document.createElement('details'); textureLibrary.className = 'line-texture-library'; textureLibrary.open = this.textureLibraryOpen; textureLibrary.addEventListener('toggle', () => { this.textureLibraryOpen = textureLibrary.open; }); const textureSummary = document.createElement('summary'); textureSummary.textContent = '素材库图片'; textureLibrary.append(textureSummary);
       const textureGrid = document.createElement('div'); textureGrid.className = 'line-texture-grid';
-      const textureEntries = [...this.getAssets()];
+      const textureEntries: [string, Uint8Array | null][] = [...this.getAssets()];
       if (!textureEntries.some(([name]) => name === 'line.png')) textureEntries.unshift(['line.png', null]);
       for (const [name, bytes] of textureEntries) {
         if (!/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(name)) continue;
         const button = document.createElement('button'); button.type = 'button'; button.className = name === texture.value ? 'selected' : ''; button.title = name;
-        const image = document.createElement('img'); const url = bytes ? URL.createObjectURL(new Blob([bytes], { type: `image/${name.split('.').at(-1).replace('jpg', 'jpeg')}` })) : assetUrl('rpe/Texture/line.png'); if (bytes) this.textureUrls.push(url); image.src = url; image.alt = name; button.dataset.texture = name; button.append(image, document.createTextNode(name.split('/').at(-1))); button.onclick = () => { texture.value = name; this.setTexture(name); }; textureGrid.append(button);
+        // `name.split(...).at(-1)` is the file extension, and the asset list is filtered to image
+        // extensions above, so it is always present; `?? ''` records that without changing the text.
+        const extension = name.split('.').at(-1) ?? '';
+        // A `Uint8Array` is a valid `BlobPart` at runtime, but its default `ArrayBufferLike` backing
+        // buffer is not assignable to `BlobPart`'s `ArrayBuffer` — `SharedArrayBuffer` is excluded by
+        // the DOM type and cannot occur here, since these bytes come from `File.arrayBuffer()` or a
+        // ZIP entry. The DOM types cannot express that, so the gap is closed on this binding exactly
+        // as `images.ts` and `archive.ts` do; nothing else about the bytes changes.
+        const part = bytes as BlobPart;
+        const image = document.createElement('img'); const url = bytes ? URL.createObjectURL(new Blob([part], { type: `image/${extension.replace('jpg', 'jpeg')}` })) : assetUrl('rpe/Texture/line.png'); if (bytes) this.textureUrls.push(url); image.src = url; image.alt = name; button.dataset.texture = name; button.append(image, document.createTextNode(name.split('/').at(-1) ?? '')); button.onclick = () => { texture.value = name; this.setTexture(name); }; textureGrid.append(button);
       }
       textureLibrary.append(textureGrid); form.append(textureLibrary);
       if (this.textureLibraryOpen) queueMicrotask(() => textureGrid.querySelector(`[data-texture="${CSS.escape(texture.value)}"]`)?.scrollIntoView({ block: 'nearest' }));
       const rotate = document.createElement('input'); rotate.type = 'checkbox'; rotate.checked = line.rotateWithFather ?? ((chart.META?.RPEVersion ?? 0) >= 163); rotate.setAttribute('aria-label', '继承父线旋转'); const rotateLabel = document.createElement('label'); rotateLabel.className = 'field checkbox-field'; rotateLabel.append(rotate, '继承父线旋转'); form.append(rotateLabel);
-      const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'wide-button primary'; apply.textContent = '应用判定线属性'; apply.onclick = () => { try { this.applyLine({ name, group, isCover: mask.checked, parent, attachUI, zOrder, bpmfactor, texture, rotateWithFather: rotate.checked }); } catch (error) { this.notify(error.message, 'error'); } }; form.append(apply);
+      const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'wide-button primary'; apply.textContent = '应用判定线属性'; apply.onclick = () => { try { this.applyLine({ name, group, isCover: mask.checked, parent, attachUI, zOrder, bpmfactor, texture, rotateWithFather: rotate.checked }); } catch (error) { this.notify(error instanceof Error ? error.message : String(error), 'error'); } }; form.append(apply);
       const reorder = document.createElement('div'); reorder.className = 'line-reorder-actions';
       const up = document.createElement('button'); up.type = 'button'; up.textContent = '上移'; up.disabled = session.lineIndex === 0; up.onclick = () => this.commit('上移判定线', reorderLine(chart, session.lineIndex, session.lineIndex - 1), session.lineIndex - 1);
       const down = document.createElement('button'); down.type = 'button'; down.textContent = '下移'; down.disabled = session.lineIndex >= lines.length - 1; down.onclick = () => this.commit('下移判定线', reorderLine(chart, session.lineIndex, session.lineIndex + 1), session.lineIndex + 1);
       reorder.append(up, down); form.append(reorder); this.host.append(form);
     }
     const groups = document.createElement('details'); groups.className = 'line-groups'; groups.open = true; const summary = document.createElement('summary'); summary.textContent = '分组管理'; groups.append(summary);
-    const groupSelect = document.createElement('select'); names.forEach((nameText, index) => groupSelect.append(new Option(`${index} · ${nameText}（${groupLineIndices(chart, index).length}）`, index))); groupSelect.value = String(Math.min(this.selectedGroup, names.length - 1)); groupSelect.onchange = () => { this.selectedGroup = Number(groupSelect.value); groupName.value = names[this.selectedGroup]; };
+    const groupSelect = document.createElement('select'); names.forEach((nameText, index) => groupSelect.append(new Option(`${index} · ${nameText}（${groupLineIndices(chart, index).length}）`, String(index)))); groupSelect.value = String(Math.min(this.selectedGroup, names.length - 1)); groupSelect.onchange = () => { this.selectedGroup = Number(groupSelect.value); groupName.value = names[this.selectedGroup]; };
     const groupName = document.createElement('input'); groupName.value = names[this.selectedGroup] ?? names[0]; groupName.setAttribute('aria-label', '分组名称'); const groupRow = document.createElement('div'); groupRow.className = 'line-group-row'; groupRow.append(groupSelect, groupName); groups.append(groupRow);
     const groupActions = document.createElement('div'); groupActions.className = 'line-reorder-actions';
     const addGroup = document.createElement('button'); addGroup.type = 'button'; addGroup.textContent = '新增分组'; addGroup.onclick = () => { const nameText = value(groupName); if (!nameText) return this.notify('请输入分组名称', 'warning'); const next = [...names, nameText]; this.selectedGroup = next.length - 1; this.commit('新增判定线分组', { ...chart, judgeLineGroup: next }); };

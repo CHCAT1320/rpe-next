@@ -11,26 +11,159 @@ import { snapPosition, snapTime, verticalGrid, placementRange } from '../core/ed
 import { SPECIAL_TRACKS, eventChains, simultaneousNotes, strokeIntersects } from '../core/editor-display.ts';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.ts';
 import { lineDisplayLabel } from '../core/line-groups.ts';
+import type { Chart, ChartEvent, EventLayer, Note } from '../core/types.ts';
 
-export const NOTE_COLORS = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
-const isHookedEvent = event => event?.inst === true || Number(event?.inst) === 1;
+export const NOTE_COLORS: Record<number, string> = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
+const isHookedEvent = (event: ChartEvent | undefined): boolean => event?.inst === true || Number(event?.inst) === 1;
 const labels = ['X', 'Y', '旋转', '透明', '速度'];
-const extendedLabels = SPECIAL_TRACKS.map(track => track.label);
+const extendedLabels: string[] = SPECIAL_TRACKS.map(track => track.label);
 
-export function prepareCanvas(canvas) {
+/** The editing state the timeline reads and writes; `EditorSession` satisfies it. */
+export interface TimelineSession {
+  chart: Chart;
+  lineIndex: number;
+  line: import('../core/types.ts').JudgeLine | undefined;
+  notes: Note[];
+  selection: Set<number>;
+  eventSelection: Set<string>;
+  eventLayer: number;
+  focus: string;
+  multiLineEnabled: boolean;
+  multiLineMode: 'notes' | 'events';
+  multiLineIndices: number[];
+  multiLineActive: boolean;
+  clipboardVisible?: boolean;
+  shaderAutoAlign?: boolean;
+  [key: string]: unknown;
+}
+
+/** A point in canvas space. */
+export interface CanvasPoint { x: number; y: number; }
+
+/** A selection rectangle being dragged, in either editor area. */
+export interface RectangleDrag {
+  kind: 'rectangle';
+  start: CanvasPoint;
+  current: CanvasPoint;
+  finished?: boolean;
+  area?: 'notes' | 'events';
+  startWorldX?: number;
+  currentWorldX?: number;
+  startSeconds?: number;
+  currentSeconds?: number;
+  startFactor?: number;
+}
+
+/** A note or event placement drag. */
+export interface TimelineDrag {
+  kind?: string;
+  start: CanvasPoint;
+  current?: CanvasPoint;
+  [key: string]: unknown;
+}
+
+/** The note/event index built for the current viewport. */
+export interface TimelineIndex {
+  notes: IntervalIndex<Note>;
+  events: IntervalIndex<ChartEvent>;
+}
+
+/** A pointer position resolved to a line and beat. */
+export interface CursorPosition {
+  x: number;
+  y: number;
+  lineIndex?: number;
+  beat?: number;
+  seconds?: number;
+  [key: string]: unknown;
+}
+
+/** One hit-test result: which line and note index is under the pointer. */
+export interface NoteHit {
+  lineIndex: number;
+  index: number;
+  note?: Note;
+  [key: string]: unknown;
+}
+
+/**
+ * Sizes a canvas to its CSS box at the current device pixel ratio and clears it.
+ *
+ * The context is rescaled on every call because setting `width`/`height` resets the transform; the
+ * returned logical size is in CSS pixels, which is what all the drawing maths works in.
+ */
+export function prepareCanvas(canvas: HTMLCanvasElement): { context: CanvasRenderingContext2D; width: number; height: number } {
   const rectangle = canvas.getBoundingClientRect();
   const ratio = globalThis.devicePixelRatio || 1;
   const width = Math.round(rectangle.width * ratio);
   const height = Math.round(rectangle.height * ratio);
   if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d')!;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, rectangle.width, rectangle.height);
   return { context, width: rectangle.width, height: rectangle.height };
 }
 
+/**
+ * Renders and edits the note and event grids.
+ *
+ * `this.tempo` is rebuilt whenever the document changes; `chains`, `eventRects`, `shaderLanes` and
+ * the index objects are all caches derived from it, which is why they are optional — they only
+ * exist once something has been drawn at least once.
+ */
 export class Timeline {
-  constructor(notesCanvas, eventsCanvas, getSession, onEvent, changed, reportError = console.error, onContextMenu = () => {}) {
+  notesCanvas: HTMLCanvasElement;
+  eventsCanvas: HTMLCanvasElement;
+  getSession: () => TimelineSession;
+  onEvent: (event: unknown, canvas: HTMLCanvasElement) => void;
+  changed: () => void;
+  onContextMenu: (event: MouseEvent, canvas: HTMLCanvasElement) => void;
+  scaleAxis: number | null;
+  scaleAxisLine: number | null;
+  onDragScroll?: (seconds: number) => void;
+  onWheel: (event: WheelEvent) => void;
+  origin: number;
+  scale: number;
+  division: number;
+  snapX: boolean;
+  tool: number;
+  layer: number;
+  extended: boolean;
+  cursor: CursorPosition | null;
+  /** Pointer position over the events canvas; the batch balls anchor to it. */
+  eventCursor: CursorPosition | null;
+  drag: TimelineDrag | RectangleDrag | null;
+  pendingHold: unknown;
+  tempo: TempoMap;
+  curvePick: { start?: number; end?: number; [key: string]: unknown } | null;
+  eventRects: unknown[];
+  eventInteraction: EventInteraction;
+  noteScale: number;
+  originalPanelWidth: number;
+  multiLineWidth: number;
+  multiLineEventWidth: number;
+  multiLineWidthExplicit: boolean;
+  multiLineEventWidthExplicit: boolean;
+  multiLineScroll: number | { notes: number; events: number };
+  multiLineLabels: HTMLElement | null;
+  multiLineScrollElement: HTMLInputElement | null;
+  scrollSpeed: number;
+  gridCount: number;
+  chains?: unknown[];
+  chainRanges?: unknown[];
+  clipboardPointer?: unknown;
+  cursorLineIndex?: number;
+  eventIndexes?: TimelineIndex;
+  noteIndexes?: TimelineIndex;
+  highlightChart?: Chart;
+  hoverArea?: string;
+  indexedLayer?: number;
+  shaderLanes?: unknown[];
+  bulkPreview?: { session: TimelineSession } | null;
+
+  constructor(notesCanvas: HTMLCanvasElement, eventsCanvas: HTMLCanvasElement, getSession: () => TimelineSession,
+    onEvent: (event: unknown, canvas: HTMLCanvasElement) => void, changed: () => void,
+    reportError: (error: unknown) => void = console.error, onContextMenu: (event: MouseEvent, canvas: HTMLCanvasElement) => void = () => {}) {
     this.notesCanvas = notesCanvas;
     this.eventsCanvas = eventsCanvas;
     this.getSession = () => this.bulkPreview?.session ?? getSession();
@@ -45,9 +178,12 @@ export class Timeline {
     this.layer = 0;
     this.extended = false;
     this.cursor = null;
+    this.eventCursor = null;
     this.drag = null;
     this.pendingHold = null;
     this.tempo = new TempoMap(getSession().chart.BPMList);
+    this.scaleAxis = null;
+    this.scaleAxisLine = null;
     this.onWheel = () => {};
     this.curvePick = null;
     this.eventRects = [];
@@ -78,7 +214,7 @@ export class Timeline {
     notesCanvas.addEventListener('pointercancel', () => { this.drag = null; changed(); });
   }
 
-  point(event, canvas = this.notesCanvas) {
+  point(event: MouseEvent | PointerEvent, canvas: HTMLCanvasElement = this.notesCanvas): CanvasPoint {
     const rectangle = canvas.getBoundingClientRect();
     return { x: event.clientX - rectangle.left, y: event.clientY - rectangle.top };
   }
@@ -129,7 +265,7 @@ export class Timeline {
 
   get factor() { return this.getSession().line?.bpmfactor ?? 1; }
   viewHeight() { return this.getSession().multiLineActive && this.getSession().multiLineMode === 'events' ? this.eventsCanvas.clientHeight : this.notesCanvas.clientHeight; }
-  factorForLine(lineIndex) { return this.getSession().chart.judgeLineList?.[lineIndex]?.bpmfactor ?? 1; }
+  factorForLine(lineIndex: number): number { return this.getSession().chart.judgeLineList?.[lineIndex]?.bpmfactor ?? 1; }
   verticalForLine(beat, lineIndex, height = this.viewHeight()) { const factor = this.factorForLine(lineIndex); return height - 42 - (this.tempo.seconds(beat, factor) - this.tempo.seconds(this.origin, factor)) * this.scale; }
   beatRangeForLine(lineIndex, height = this.viewHeight()) {
     const factor = this.factorForLine(lineIndex);
@@ -143,11 +279,11 @@ export class Timeline {
     if (area === 'notes' && session.multiLineMode === 'notes' && session.multiLineMerge) return 1;
     return Math.max(1, session.multiLineIndices.length);
   }
-  panelIndex(lineIndex, area = 'notes') {
+  panelIndex(lineIndex: number, area = 'notes'): number {
     const session = this.getSession(); const index = session.targetLineIndices.indexOf(lineIndex);
     return this.panelCount(area) === 1 ? 0 : Math.max(0, index);
   }
-  panelWidth(width, area = 'notes') {
+  panelWidth(width: number, area = 'notes'): number {
     if (!this.getSession().multiLineActive || this.panelCount(area) === 1) return width;
     const configured = area === 'events'
       ? (this.multiLineEventWidthExplicit ? this.multiLineEventWidth : (this.multiLineWidthExplicit ? 0 : this.multiLineWidth))
@@ -158,8 +294,8 @@ export class Timeline {
     if (!this.getSession().multiLineActive || this.panelCount(area) <= 1) return 0;
     return Math.max(12, this.panelWidth(width, area) * 0.04);
   }
-  panelStride(width, area = 'notes') { return this.panelWidth(width, area) + this.panelGap(width, area); }
-  multiLineViewportOffset(width, area = 'notes') {
+  panelStride(width: number, area = 'notes'): number { return this.panelWidth(width, area) + this.panelGap(width, area); }
+  multiLineViewportOffset(width: number, area = 'notes'): number {
     const count = this.panelCount(area); const panelWidth = this.panelWidth(width, area); const gap = this.panelGap(width, area);
     const maximum = Math.max(0, count * panelWidth + Math.max(0, count - 1) * gap - width);
     const current = typeof this.multiLineScroll === 'number' ? this.multiLineScroll : this.multiLineScroll?.[area];
@@ -198,9 +334,9 @@ export class Timeline {
     return this.noteScale * (width / Math.max(1, baseWidth)) * (notesViewOnly ? width / Math.max(1, (width - gap) / 2) : 1);
   }
   horizontal(position) { return this.noteHorizontal(position); }
-  noteInset(width = this.panelWidth(this.notesCanvas.clientWidth, 'notes')) { return Math.min(48 * this.renderNoteScale, Math.max(0, width / 2 - 1)); }
-  noteWidth(note) { return 68 * this.renderNoteScale * Math.min(3, Math.max(0.2, note.size ?? 1)); }
-  snapXPosition(value) {
+  noteInset(width: number = this.panelWidth(this.notesCanvas.clientWidth, 'notes')): number { return Math.min(48 * this.renderNoteScale, Math.max(0, width / 2 - 1)); }
+  noteWidth(note: Note): number { return 68 * this.renderNoteScale * Math.min(3, Math.max(0.2, note.size ?? 1)); }
+  snapXPosition(value: number): number {
     if (!this.snapX) return value;
     const snapped = snapPosition(value, this.gridCount);
     return [-675, 675, snapped].reduce((closest, candidate) => Math.abs(candidate - value) < Math.abs(closest - value) ? candidate : closest, snapped);
@@ -212,7 +348,7 @@ export class Timeline {
   positionAt(horizontal) {
     return this.notePositionAt(horizontal);
   }
-  notePositionAt(horizontal, lineIndex = this.lineIndexAt(horizontal, this.notesCanvas.clientWidth, 'notes')) {
+  notePositionAt(horizontal: number, lineIndex: number = this.lineIndexAt(horizontal, this.notesCanvas.clientWidth, 'notes')): number {
     const panelWidth = this.panelWidth(this.notesCanvas.clientWidth, 'notes'); const panel = this.panelIndex(lineIndex, 'notes'); const inset = this.noteInset(panelWidth); const width = Math.max(1, panelWidth - inset * 2);
     const local = horizontal + this.multiLineViewportOffset(this.notesCanvas.clientWidth, 'notes') - panel * this.panelStride(this.notesCanvas.clientWidth, 'notes');
     const value = (local - inset) / width * 1350 - 675 + (this.cameraX ?? 0);

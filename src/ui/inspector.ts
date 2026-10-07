@@ -2,26 +2,35 @@ import { beatValue, formatBeat, parseBeat, fromNumber } from '../core/beat.ts';
 import { NOTE_NAMES, noteIsAbove } from '../core/chart.ts';
 import { numericWheel } from './numeric-wheel.ts';
 import { visibleBeats, visibleSeconds } from '../core/note-editing.ts';
+import { TempoMap } from '../core/tempo.ts';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.ts';
+import type { EditorSession, NoteEntry } from '../application/session.ts';
+import type { Beat, Note } from '../core/types.ts';
 
-function selectedNoteEntries(session) {
+/** One row of the properties panel: its note key, its label and how the input is built. */
+type PropertyField = [key: string, label: string, kind: string, options?: unknown];
+
+/** The note transform {@link applyNoteTransform} hands to the batch helpers. */
+type NoteFieldTransform = (note: Note | undefined, entry: NoteEntry) => Note;
+
+function selectedNoteEntries(session: EditorSession): NoteEntry[] {
   if (session.multiLineActive && session.multiLineMode === 'notes') return session.selectedNoteEntries();
   return [...session.selection].map(index => ({ lineIndex: session.lineIndex, index, note: session.notes[index] })).filter(entry => entry.note);
 }
 
-function applyNoteTransform(session, label, transform) {
+function applyNoteTransform(session: EditorSession, label: string, transform: NoteFieldTransform): void {
   if (session.multiLineActive && session.multiLineMode === 'notes') {
     const result = editCapturedSelection(captureSelection(session), { note: transform });
     commitSelectionEdit(session, result, label);
   } else session.transformSelection(label, transform);
 }
 
-export function renderProperties(session, reportError) {
+export function renderProperties(session: EditorSession, reportError: (error: unknown) => void): void {
   if (session.liveNoteEdit) return;
-  const container = document.querySelector('#properties');
+  const container = document.querySelector('#properties') as HTMLElement;
   container.replaceChildren();
   const entries = selectedNoteEntries(session);
-  document.querySelector('#property-count').textContent = `${entries.length} 已选`;
+  (document.querySelector('#property-count') as HTMLElement).textContent = `${entries.length} 已选`;
   const selectedEntry = entries[0];
   const selectedIndex = selectedEntry?.index;
   const selectedLineIndex = selectedEntry?.lineIndex ?? session.lineIndex;
@@ -29,11 +38,16 @@ export function renderProperties(session, reportError) {
   if (!note) {
     const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '在左侧音符区点选音符；按已配置的音符快捷键放置。Hold 两次定位起止拍，Esc 取消。拖动实时显示吸附位置；竖线吸附可单独关闭。'; container.append(hint); return;
   }
-  const directionOptions = note.type === 2 ? { 0: '下方', 1: '上方' } : { 1: '上方', 2: '下方' };
+  const directionOptions: Record<number, string> = note.type === 2 ? { 0: '下方', 1: '上方' } : { 1: '上方', 2: '下方' };
   const lineOptions = Object.fromEntries((session.chart.judgeLineList ?? []).map((line, index) => [index, `${index} · ${line.Name || '未命名'}`]));
   const selectedLine = session.chart.judgeLineList?.[selectedLineIndex] ?? session.line;
   const selectedFactor = selectedLine?.bpmfactor ?? 1;
-  const fields = [
+  // `tempo` and `division` are attached to the session by `renderSession` on the first render, which
+  // always precedes this panel. The fallbacks keep the reads total: `TempoMap` requires at least one
+  // entry, so the chart's own list is used, and 4 is the editor's default division.
+  const tempo = session.tempo ?? new TempoMap(session.chart.BPMList);
+  const division = session.division ?? 4;
+  const fields: PropertyField[] = [
     ['lineIndex', '所属线号', 'select', lineOptions], ['type', '类型', 'select', NOTE_NAMES], ['startTime', '开始拍', 'beat'], ['endTime', '结束拍', 'beat'],
     ['positionX', 'X 坐标', 'number'], ['above', '方向', 'select', directionOptions],
     ['isFake', 'Fake', 'select', { 0: '否', 1: '是' }], ['speed', '速度', 'number', 1],
@@ -46,29 +60,40 @@ export function renderProperties(session, reportError) {
     label.append(labelText);
     const duration = key === 'visibleTime';
     const beatDuration = duration && session.visibleTimeUnit === 'beats';
+    // `select` fields and everything else share the one generic element `document.createElement`
+    // returns, so it is narrowed to `HTMLInputElement` at the two places that need input-only
+    // attributes rather than being narrowed once here.
     const input = document.createElement(kind === 'select' ? 'select' : 'input');
     input.setAttribute('aria-label', labelText);
-    if (kind === 'select') for (const [value, title] of Object.entries(options)) {
-      const option = document.createElement('option'); option.value = value; option.textContent = title; input.append(option);
+    if (kind === 'select') for (const [value, title] of Object.entries(options ?? {})) {
+      const option = document.createElement('option'); option.value = value; option.textContent = String(title); input.append(option);
     }
-    else input.type = kind === 'number' || duration && !beatDuration ? 'number' : 'text';
+    else (input as HTMLInputElement).type = kind === 'number' || duration && !beatDuration ? 'number' : 'text';
+    // `min`/`max`/`step` are DOMString attributes, so the original's numeric writes are stored as
+    // their decimal text; the parsed value is the same either way.
     const step = key === 'speed' ? 0.1 : key === 'size' ? 0.25 : key === 'positionX' || key === 'yOffset' || key === 'alpha' ? 5 : 1;
-    if (kind === 'number') input.step = step;
-    if (key === 'size') input.min = 0.01;
-    if (key === 'alpha') { input.min = 0; input.max = 255; }
-    input.value = key === 'lineIndex' ? selectedLineIndex : kind === 'beat' ? formatBeat(note[key]) : note[key] ?? (typeof options === 'number' ? options : 0);
-    if (key === 'above') input.value = noteIsAbove(note) ? 1 : note.type === 2 ? 0 : 2;
-    if (beatDuration && note.visibleTime < 999999) input.value = formatBeat(fromNumber(visibleBeats(note, session.tempo, selectedFactor)));
-    if (duration) { input.min = 0; input.title = '999999 表示无限；首次滚轮调节重置为 0，之后每次增减一横线间隔拍'; }
+    if (kind === 'number') (input as HTMLInputElement).step = String(step);
+    if (key === 'size') (input as HTMLInputElement).min = '0.01';
+    if (key === 'alpha') { (input as HTMLInputElement).min = '0'; (input as HTMLInputElement).max = '255'; }
+    // Every scalar field is written as text: `input.value` stringifies on write, so the original's
+    // numeric assignment stored the same decimal text.
+    const shown = note[key];
+    input.value = key === 'lineIndex' ? String(selectedLineIndex) : kind === 'beat' ? formatBeat(shown as Beat) : typeof shown === 'string' || typeof shown === 'number' ? String(shown) : String(typeof options === 'number' ? options : 0);
+    if (key === 'above') input.value = String(noteIsAbove(note) ? 1 : note.type === 2 ? 0 : 2);
+    if (beatDuration && Number(note.visibleTime) < 999999) input.value = formatBeat(fromNumber(visibleBeats(note, tempo, selectedFactor)));
+    if (duration) { (input as HTMLInputElement).min = '0'; input.title = '999999 表示无限；首次滚轮调节重置为 0，之后每次增减一横线间隔拍'; }
     const apply = () => {
       try {
         if (key === 'lineIndex') { session.moveSelectionToLine(Number(input.value)); return; }
         const value = kind === 'beat' ? parseBeat(input.value) : beatDuration ? beatValue(parseBeat(input.value)) : Number(input.value);
         if (kind !== 'beat' && (input.value.trim() === '' || !Number.isFinite(value))) throw new Error('请输入有限数字');
         if (key === 'size' && value <= 0) throw new Error('大小必须大于零');
-        applyNoteTransform(session, `修改${labelText}`, (current, entry) => {
+        applyNoteTransform(session, `修改${labelText}`, (editing, entry) => {
           const factor = session.chart.judgeLineList?.[entry?.lineIndex ?? selectedLineIndex]?.bpmfactor ?? selectedFactor;
-          const next = { ...current, [key]: duration ? beatDuration ? visibleSeconds(current, value, session.tempo, factor) : Math.max(0, value) : value };
+          // `transformSelection` hands back the entry's own note, but its parameter is `Note |
+          // undefined`; the seed keeps the spread total where that note is absent.
+          const current = editing ?? note;
+          const next: Note = { ...current, [key]: duration ? beatDuration ? visibleSeconds(current, value, tempo, factor) : Math.max(0, value) : value };
           if (key === 'startTime') {
             next.endTime = current.type === 2 ? fromNumber(beatValue(current.endTime) + beatValue(value) - beatValue(current.startTime)) : value;
           }
@@ -80,20 +105,20 @@ export function renderProperties(session, reportError) {
           if (key === 'endTime' && (current.type !== 2 || beatValue(value) < beatValue(current.startTime))) throw new Error('结束拍只能用于 Hold，且不能早于开始拍');
           return next;
         });
-      } catch (error) { reportError(error); input.value = key === 'lineIndex' ? selectedLineIndex : kind === 'beat' ? formatBeat(note[key]) : note[key] ?? 0; }
+      } catch (error) { reportError(error); input.value = key === 'lineIndex' ? String(selectedLineIndex) : kind === 'beat' ? formatBeat(note[key] as Beat) : String(note[key] ?? 0); }
     };
     input.onchange = apply;
     input.oninput = () => { if (input.value.trim()) apply(); };
     input.onfocus = () => { session.liveNoteEdit = true; };
     input.onblur = () => { session.liveNoteEdit = false; queueMicrotask(() => { if (!session.liveNoteEdit) renderProperties(session, reportError); }); };
-    if (kind === 'number') numericWheel(input, step);
+    if (kind === 'number') numericWheel(input as HTMLInputElement, step);
     if (duration) {
-      numericWheel(input, 1, direction => {
-        const current = selectedNoteEntries(session)[0]?.note;
-        if (!current) return;
+      numericWheel(input as HTMLInputElement, 1, direction => {
+        const editing = selectedNoteEntries(session)[0]?.note;
+        if (!editing) return;
         const factor = session.chart.judgeLineList?.[selectedLineIndex]?.bpmfactor ?? selectedFactor;
-        const beats = current.visibleTime >= 999999 ? 0 : Math.max(0, visibleBeats(current, session.tempo, factor) + direction / session.division);
-        input.value = beatDuration ? formatBeat(fromNumber(beats)) : Number(visibleSeconds(current, beats, session.tempo, factor).toFixed(8));
+        const beats = Number(editing.visibleTime) >= 999999 ? 0 : Math.max(0, visibleBeats(editing, tempo, factor) + direction / division);
+        input.value = beatDuration ? formatBeat(fromNumber(beats)) : String(Number(visibleSeconds(current, beats, session.tempo, factor).toFixed(8)));
         apply();
       });
       const controls = document.createElement('span'); controls.className = 'duration-input';

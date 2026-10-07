@@ -4,45 +4,108 @@ import { EditorSession } from '../src/application/session.ts';
 import { EditorPlayback } from '../src/application/playback.ts';
 import { Timeline } from '../src/ui/timeline.ts';
 import { TempoMap } from '../src/core/tempo.ts';
-import { createEvent, createNote } from '../src/core/chart.ts';
+import { createChart, createEvent, createNote } from '../src/core/chart.ts';
 import { placedEvent } from '../src/application/event-commands.ts';
 import { beatValue } from '../src/core/beat.ts';
 import { snapPosition, snapTime, verticalGrid, wheelSeconds } from '../src/core/edit-grid.ts';
 import { hitFrame, HIT_DURATION, DEFAULT_LINE_WIDTH, DEFAULT_LINE_HEIGHT } from '../src/core/visual-constants.ts';
 import { easingPicture } from '../src/core/easing-picture.ts';
 import { readEditorPreferences, writeEditorPreferences } from '../src/platform/editor-preferences.ts';
+import type { PreferenceStorage } from '../src/platform/editor-preferences.ts';
 import { migratePreferences, shortcutAction } from '../src/core/preferences.ts';
 
-function canvas() {
+/**
+ * A structural double for the two canvases `Timeline` is built on.
+ *
+ * The constructor only registers listeners and reads the CSS box, so the test supplies those members
+ * and nothing else. Declaring the shape here keeps the double honest: it is not an
+ * `HTMLCanvasElement`, and no code under test treats it as one.
+ */
+interface CanvasDouble {
+  clientWidth: number;
+  clientHeight: number;
+  style: object;
+  addEventListener(): void;
+  focus(): void;
+  setPointerCapture(): void;
+  getBoundingClientRect(): { left: number; top: number; width: number; height: number };
+}
+
+function canvas(): CanvasDouble {
   return { clientWidth: 500, clientHeight: 600, style: {}, addEventListener() {}, focus() {}, setPointerCapture() {}, getBoundingClientRect() { return { left: 0, top: 0, width: 500, height: 600 }; } };
 }
+
+/**
+ * `Timeline` declares its two canvases as the real `HTMLCanvasElement`, which the partial double
+ * above deliberately is not. The helper is the one place that bridges the two, and it is documented
+ * as such rather than spread across every construction site.
+ */
+function timelineSurface(): HTMLCanvasElement { return canvas() as unknown as HTMLCanvasElement; }
+
 function editor() {
   const session = new EditorSession();
-  const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {});
+  const timeline = new Timeline(timelineSurface(), timelineSurface(), () => session, () => {}, () => {});
   return { session, timeline };
 }
 
+/** The audio transport slice `EditorPlayback` drives; the real class satisfies it structurally. */
+interface TransportDouble {
+  time: number;
+  duration: number;
+  rate: number;
+  playing: boolean;
+  pause(): void;
+  seek(seconds: number): void;
+  play(): Promise<void>;
+}
+
+/**
+ * The hit-sound scheduler slice `EditorPlayback.toggle` drives.
+ *
+ * `prepare` resolves to `undefined` here, which is what the real `HitSounds.prepare` does; the
+ * generic keeps that explicit instead of leaving the promise's value type inferred as `unknown`.
+ */
+interface SoundsDouble {
+  stop(): void;
+  prepare(): Promise<void>;
+}
+
+/** The `{ scrollSpeed }` bag the wheel handler reads; the migrated settings carry more. */
+interface WheelSettingsDouble { scrollSpeed: number; scrollAcceleration?: number; }
+
+/** A storage stub for the preference round-trip; `PreferenceStorage` is the module's own contract. */
+function storageDouble(): PreferenceStorage & { value: string | undefined } {
+  const stub = { value: undefined as string | undefined,
+    getItem(): string | null { return stub.value ?? null; },
+    setItem(key: string, next: string): void { stub.value = next; } };
+  return stub;
+}
+
 test('滚轮向上暂停并定位真实时间，继续从新位置播放；准备播放可被滚轮取消', async () => {
-  let resolvePreparation;
-  const sounds = { stop() {}, prepare: () => new Promise(resolve => { resolvePreparation = resolve; }) };
-  const audio = { time: 10, duration: 120, rate: 1, playing: true, pause() { this.playing = false; }, seek(seconds) { this.time = seconds; }, async play() { this.playing = true; } };
+  let resolvePreparation: (() => void) | undefined;
+  const sounds: SoundsDouble = { stop() {}, prepare: () => new Promise<void>(resolve => { resolvePreparation = resolve; }) };
+  const audio: TransportDouble = { time: 10, duration: 120, rate: 1, playing: true, pause() { this.playing = false; }, seek(seconds: number) { this.time = seconds; }, async play() { this.playing = true; } };
   let visible = 0;
   const playback = new EditorPlayback(audio, sounds, () => { visible = audio.time; });
-  playback.wheel({ deltaY: -100 }, { scrollSpeed: 5 }, 0);
+  const settings: WheelSettingsDouble = { scrollSpeed: 5 };
+  playback.wheel({ deltaY: -100 }, settings, 0);
   assert.equal(audio.playing, false); assert.equal(visible, 10.06);
-  const request = playback.toggle({}); resolvePreparation(); await request;
+  const chart = createChart();
+  const request = playback.toggle(chart); resolvePreparation?.(); await request;
   assert.equal(audio.time, 10.06); assert.equal(audio.playing, true);
-  playback.pause(); const delayed = playback.toggle({});
-  playback.wheel({ deltaY: 100 }, { scrollSpeed: 5 }, 1); resolvePreparation(); await delayed;
+  playback.pause(); const delayed = playback.toggle(chart);
+  playback.wheel({ deltaY: 100 }, settings, 1); resolvePreparation?.(); await delayed;
   assert.equal(audio.playing, false); assert.equal(audio.time, 10);
   assert.ok(Math.abs(wheelSeconds(-100, 120, 5, 2, false, 0, true) - 0.6) < 1e-10);
 });
 
 test('第二次空格能取消仍在准备的播放，按键重复不会产生隐式恢复', async () => {
-  let ready;
-  const audio = { playing: false, pause() { this.playing = false; }, async play() { this.playing = true; } };
-  const playback = new EditorPlayback(audio, { stop() {}, prepare: () => new Promise(resolve => { ready = resolve; }) }, () => {});
-  const first = playback.toggle({}); await playback.toggle({}); ready(); await first;
+  let ready: (() => void) | undefined;
+  const audio: TransportDouble = { time: 0, duration: 120, rate: 1, playing: false, pause() { this.playing = false; }, seek() {}, async play() { this.playing = true; } };
+  const sounds: SoundsDouble = { stop() {}, prepare: () => new Promise<void>(resolve => { ready = resolve; }) };
+  const playback = new EditorPlayback(audio, sounds, () => {});
+  const chart = createChart();
+  const first = playback.toggle(chart); await playback.toggle(chart); ready?.(); await first;
   assert.equal(audio.playing, false);
 });
 
@@ -82,14 +145,24 @@ test('拖动实时值和落点一致，对未在网格上的音符吸附绝对�
 
 test('事件继承前一终值与缓动，拒绝冲突；两次定位不产生隐式一拍事件', () => {
   const { session, timeline } = editor();
-  session.line.eventLayers[0].moveXEvents = [{ ...createEvent(5, 42, 0, 2), easingType: 7 }];
-  const candidate = placedEvent(session, 'moveXEvents', 4, 2);
+  // `EditorSession.line` is optional because a chart may lack a line at `lineIndex`; `createChart`
+  // always builds one. `eventLayers` entries are `Partial<Record<AnyEventType, ChartEvent[]>>`, so
+  // the track is optional too and is bound once here.
+  const line = session.line;
+  assert.ok(line);
+  const layers = line.eventLayers[0];
+  layers.moveXEvents = [{ ...createEvent(5, 42, 0, 2), easingType: 7 }];
+  // The fifth parameter is the easing type; the omitted argument is `undefined`, so passing it
+  // explicitly keeps the same call the original made.
+  const candidate = placedEvent(session, 'moveXEvents', 4, 2, undefined);
+  assert.ok(candidate);
   assert.equal(candidate.start, 42); assert.equal(candidate.end, 42); assert.equal(candidate.easingType, 7);
-  assert.throws(() => placedEvent(session, 'moveXEvents', 1, 3));
-  assert.equal(placedEvent(session, 'moveXEvents', 2, 2), null);
-  timeline.eventInteraction.place('moveXEvents', 2); assert.equal(session.line.eventLayers[0].moveXEvents.length, 1);
-  timeline.eventInteraction.place('moveXEvents', 4, 3); assert.equal(session.line.eventLayers[0].moveXEvents.length, 2);
-  assert.equal(session.line.eventLayers[0].moveXEvents[1].easingType, 3);
+  assert.throws(() => placedEvent(session, 'moveXEvents', 1, 3, undefined));
+  assert.equal(placedEvent(session, 'moveXEvents', 2, 2, undefined), null);
+  timeline.eventInteraction.place('moveXEvents', 2); assert.equal((layers.moveXEvents ?? []).length, 1);
+  timeline.eventInteraction.place('moveXEvents', 4, 3); assert.equal((layers.moveXEvents ?? []).length, 2);
+  const placed = layers.moveXEvents ?? [];
+  assert.equal(placed[1].easingType, 3);
   const prefs = migratePreferences(); const key = { key: 'r' };
   assert.equal(shortcutAction(key, prefs, 'notes'), 'AddHold'); assert.equal(shortcutAction(key, prefs, 'events'), 'AddEvent');
 });
@@ -101,9 +174,8 @@ test('打击特效 31 帧按谱面秒播放，缓动图来自数学函数，判�
 });
 
 test('Y 缩放、网格、实时预览和音量跨关闭恢复，非法存储安全回退', () => {
-  let value;
-  const storage = { getItem() { return value; }, setItem(key, next) { value = next; } };
+  const storage = storageDouble();
   const preferences = { scale: 333, division: 12, gridCount: 10, snapX: false, realtime: true, realtimeAlpha: 0.35, volume: 0.2 };
   writeEditorPreferences(preferences, storage); assert.deepEqual(readEditorPreferences(storage), preferences);
-  value = '{broken'; assert.deepEqual(readEditorPreferences(storage), {});
+  storage.value = '{broken'; assert.deepEqual(readEditorPreferences(storage), {});
 });

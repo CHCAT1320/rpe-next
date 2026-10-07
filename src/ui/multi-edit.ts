@@ -6,88 +6,233 @@ import { createEasingPicker, EASING_NAMES } from './easing-picker.ts';
 import { NOTE_COLORS } from './timeline.ts';
 import { MultiEditParameters } from '../application/multi-edit-parameters.ts';
 import { runEventTool } from './event-tools.ts';
+import type { EditorSession } from '../application/session.ts';
+import type { BatchKind, BatchParameters, BatchChannelParameters } from '../application/multi-edit-parameters.ts';
+import type { Chart, ChartEvent, Note } from '../core/types.ts';
+import type { MultiEditOptions, CloneOptions, MultiEditResult, BatchChange, DistributionOptions } from '../application/multi-edit.ts';
+import type { Timeline } from './timeline.ts';
 
-function control(root, title, value, options) {
+/** The two object kinds the panel batches; also the `MultiEditParameters` keys. */
+export type MultiEditKind = BatchKind;
+
+/** A `<select>`/`<input>` pair, which is what the panel's `control()` helper hands back. */
+export type ControlElement = HTMLInputElement | HTMLSelectElement;
+
+/** One `[value, label]` option pair, as `BATCH_OPERATIONS` and friends supply them. */
+type ControlOption = [string | number, string];
+
+/**
+ * The `{ lower, easingType, cycle, disturbance }` bag {@link distributionFields} reads and writes.
+ *
+ * `write` receives whatever the parameter document holds — `load` hands it a whole `BatchParameters`
+ * and, per channel, one `BatchChannelParameters` — so the values arrive as `string | number |
+ * undefined` and are unvalidated; the reader mirrors the controls and always answers strings.
+ */
+export interface DistributionFields {
+  (): DistributionRead;
+  write: (value: DistributionWrite) => void;
+}
+
+/** What {@link DistributionFields.write} accepts: a parameter set, a channel set, or an empty object. */
+export interface DistributionWrite {
+  lower?: string | number;
+  upper?: string | number;
+  easingType?: string | number;
+  cycle?: string | number;
+  disturbance?: string | number;
+}
+
+/** What one distribution row reads out of its controls; also one per-channel offset set. */
+export interface DistributionRead {
+  lower: string;
+  upper: string;
+  easingType: number;
+  cycle: string;
+  disturbance: string;
+}
+
+/**
+ * Everything the batch panel reads off its controls.
+ *
+ * Declared standalone rather than extending `MultiEditOptions`: that interface marks every field
+ * optional (stored parameter sets may omit them) and types `channels` as
+ * `Record<string, DistributionOptions>`, while this reader always produces every field and hands
+ * `previewEventClones` the same per-channel bag. `MultiEditOptions` and `CloneOptions` both admit
+ * this shape, which is what lets one `read()` feed either preview entry point.
+ */
+export interface MultiEditRead {
+  mode: string;
+  field: string;
+  operation: string;
+  eventApplicationMode: string;
+  noteType: number;
+  eventType: string;
+  condition: string;
+  script: string;
+  seed: number;
+  targets: string;
+  increment: string;
+  retainSource: boolean;
+  division: number;
+  /** One per-channel offset set, keyed by event type; `previewEventClones` reads it. */
+  channels: Record<string, DistributionOptions>;
+  lower: string;
+  upper: string;
+  easingType: number;
+  cycle: string;
+  disturbance: string;
+}
+
+/** What {@link MultiEditPanel}'s host supplies. */
+export interface MultiEditPanelOptions {
+  close?: () => void;
+  invalidate?: () => void;
+  notify?: (message: string, level?: string) => void;
+}
+
+function control(root: HTMLElement, title: string, value: string, options?: ControlOption[]): ControlElement {
   const label = document.createElement('label'); label.className = 'field'; label.append(title);
   const input = document.createElement(options ? 'select' : 'input'); input.setAttribute('aria-label', title);
-  if (options) for (const [key, text] of options) input.append(new Option(text, key));
+  if (options) for (const [key, text] of options) input.append(new Option(text, String(key)));
   input.value = value; label.append(input); root.append(label); return input;
 }
 
-function distributionFields(root, prefix = '') {
-  const lower = control(root, `${prefix}数值下界`, '0'); const upper = control(root, `${prefix}数值上界`, '0');
-  const easingType = control(root, `${prefix}缓动类型`, '1', EASING_NAMES.map((name, index) => [index + 1, `${index + 1} · ${name}`]));
-  const cycle = control(root, `${prefix}周期数列`, '1'); const disturbance = control(root, `${prefix}扰动`, '0');
-  const picker = createEasingPicker(1, value => { easingType.value = value; easingType.dispatchEvent(new Event('input', { bubbles: true })); });
+/** Narrows {@link control}'s union for the call sites that know they asked for a text entry. */
+function controlInput(root: HTMLElement, title: string, value: string): HTMLInputElement {
+  const input = control(root, title, value); return input as HTMLInputElement;
+}
+
+/** Narrows {@link control}'s union for the call sites that know they passed an option list. */
+function controlSelect(root: HTMLElement, title: string, value: string, options: ControlOption[]): HTMLSelectElement {
+  const input = control(root, title, value, options); return input as HTMLSelectElement;
+}
+
+function distributionFields(root: HTMLElement, prefix = ''): DistributionFields {
+  const lower = controlInput(root, `${prefix}数值下界`, '0'); const upper = controlInput(root, `${prefix}数值上界`, '0');
+  const easingType = controlSelect(root, `${prefix}缓动类型`, '1', EASING_NAMES.map((name, index) => [index + 1, `${index + 1} · ${name}`]));
+  const cycle = controlInput(root, `${prefix}周期数列`, '1'); const disturbance = controlInput(root, `${prefix}扰动`, '0');
+  const picker = createEasingPicker(1, value => { easingType.value = String(value); easingType.dispatchEvent(new Event('input', { bubbles: true })); });
   easingType.addEventListener('input', () => picker.select(Number(easingType.value))); root.append(picker.element);
-  const read = () => ({ lower: lower.value, upper: upper.value, easingType: Number(easingType.value), cycle: cycle.value, disturbance: disturbance.value });
-  read.write = value => {
-    lower.value = value.lower ?? '0'; upper.value = value.upper ?? '0'; easingType.value = value.easingType ?? 1;
-    cycle.value = value.cycle ?? '1'; disturbance.value = value.disturbance ?? '0'; picker.select(Number(easingType.value));
+  const read = ((): DistributionRead => ({ lower: lower.value, upper: upper.value, easingType: Number(easingType.value), cycle: cycle.value, disturbance: disturbance.value })) as DistributionFields;
+  read.write = (value: DistributionWrite): void => {
+    lower.value = String(value.lower ?? '0'); upper.value = String(value.upper ?? '0'); easingType.value = String(value.easingType ?? 1);
+    cycle.value = String(value.cycle ?? '1'); disturbance.value = String(value.disturbance ?? '0'); picker.select(Number(easingType.value));
   };
   return read;
 }
 
-function hint(root, text) { const paragraph = document.createElement('p'); paragraph.className = 'hint'; paragraph.textContent = text; root.append(paragraph); return paragraph; }
+function hint(root: HTMLElement, text: string): HTMLParagraphElement { const paragraph = document.createElement('p'); paragraph.className = 'hint'; paragraph.textContent = text; root.append(paragraph); return paragraph; }
 
 export class MultiEditPanel {
-  constructor(root, getSession, timeline, { close, invalidate, notify }) {
+  // Declared explicitly: unannotated fields infer too narrowly (`null` for the result, `false` for
+  // the flags) and cascade into every reader, which is most of this file's error count.
+  root: HTMLElement;
+  getSession: () => EditorSession;
+  timeline: Timeline;
+  close: () => void;
+  invalidate: () => void;
+  notify: (message: string, level?: string) => void;
+  active: boolean;
+  previewHovered: boolean;
+  parameters: MultiEditParameters;
+  /** Set by {@link open}; both `drawTimeline` and `refresh` branch on it. */
+  kind: MultiEditKind;
+  /** Rerolled by 重新采样扰动, so a preview can be reproduced from `read()`. */
+  seed: number;
+  /** The pending preview, or `null` when the current parameters do not produce one. */
+  result: MultiEditResult | null;
+  /** The selection the current `result` was built for; `null` until the first sync. */
+  signature: string | null;
+  /** The chart the current `result` was built against. */
+  chart: Chart | undefined;
+  /** Rebuilt by {@link open}; repopulates the two parameter dropdowns. */
+  updateHistory: () => void;
+  /** Rebuilt by {@link open}; reads the whole form into a parameter set. */
+  read: () => MultiEditRead;
+  /** Rebuilt by {@link open}; applies a stored parameter set back onto the controls. */
+  load: (value: BatchParameters) => void;
+  /** Guard so committing does not re-enter {@link sync} through the session's change event. */
+  committing: boolean;
+  /** The status line under the form. */
+  summary: HTMLParagraphElement;
+  /** The 在编辑区显示结果虚影 checkbox, read by `drawTimeline`. */
+  previewEnabled: HTMLInputElement;
+  /** The 应用更改 button, disabled while there is no preview. */
+  apply: HTMLButtonElement;
+
+  constructor(root: HTMLElement, getSession: () => EditorSession, timeline: Timeline, { close = () => {}, invalidate = () => {}, notify = () => {} }: MultiEditPanelOptions = {}) {
+    // The option names are bound to distinct locals: `invalidate`/`notify` are also class field
+    // names, and a destructuring binding would shadow them inside this constructor.
+    const invalidatePanel = invalidate; const notifyPanel = notify;
     this.root = root; this.getSession = getSession; this.timeline = timeline;
-    this.close = close; this.invalidate = invalidate; this.notify = notify; this.active = false; this.previewHovered = false;
+    this.close = close; this.invalidate = invalidatePanel; this.notify = notifyPanel; this.active = false; this.previewHovered = false;
+    // Filled in by `open` before anything can read them; the placeholders keep the declared types.
+    this.kind = 'notes'; this.seed = 1; this.result = null; this.signature = null; this.chart = undefined;
+    this.updateHistory = () => {}; this.read = () => ({}) as MultiEditRead; this.load = () => {};
+    this.committing = false;
+    this.summary = document.createElement('p'); this.previewEnabled = document.createElement('input'); this.apply = document.createElement('button');
     root.addEventListener('pointerenter', () => { this.previewHovered = true; this.invalidate(); });
     root.addEventListener('pointerleave', () => { this.previewHovered = false; this.invalidate(); });
-    this.parameters = new MultiEditParameters(globalThis.localStorage, message => notify(message, 'warning'));
+    this.parameters = new MultiEditParameters(globalThis.localStorage, message => notifyPanel(message, 'warning'));
   }
 
-  open(kind) {
+  open(kind: MultiEditKind): void {
     if (this.active && this.kind === kind) { this.sync(); return; }
     this.active = true; this.kind = kind; this.seed = 1; this.result = null; this.signature = null;
     const root = this.root; root.replaceChildren();
     const title = document.createElement('div'); title.className = 'panel-title'; title.textContent = kind === 'notes' ? '多音符编辑' : '多事件编辑'; root.append(title);
     const parametersBox = document.createElement('details'); parametersBox.className = 'batch-parameters'; root.append(parametersBox);
     const parametersHeading = document.createElement('summary'); parametersHeading.textContent = '参数历史与收藏'; parametersBox.append(parametersHeading);
-    const history = control(parametersBox, '应用历史', '', []);
+    const history = controlSelect(parametersBox, '应用历史', '', []);
     const historyActions = document.createElement('div'); historyActions.className = 'action-grid'; parametersBox.append(historyActions);
     const previous = document.createElement('button'); previous.textContent = '← 上一组';
     const next = document.createElement('button'); next.textContent = '下一组 →'; historyActions.append(previous, next);
-    const saved = control(parametersBox, '已保存参数', '', []);
-    const name = control(parametersBox, '参数名称', ''); name.maxLength = 80;
+    const saved = controlSelect(parametersBox, '已保存参数', '', []);
+    const name = controlInput(parametersBox, '参数名称', ''); name.maxLength = 80;
     const savedActions = document.createElement('div'); savedActions.className = 'action-grid'; parametersBox.append(savedActions);
     const save = document.createElement('button'); save.textContent = '保存当前参数';
     const remove = document.createElement('button'); remove.textContent = '删除收藏'; savedActions.append(save, remove);
     hint(parametersBox, '历史保留最近 50 组已应用参数。命名收藏与草稿保存在本机，可跨谱面使用；同名保存会更新。');
-    this.updateHistory = () => {
-      history.replaceChildren(new Option('选择已应用参数', ''), ...this.parameters.history[kind].map((value, index) => new Option(`${index + 1} · ${value.mode === 'script' ? '脚本' : value.mode === 'clone' ? '克隆' : `${value.field} ${value.operation} ${value.lower}…${value.upper}`}`, index)));
+    this.updateHistory = (): void => {
+      history.replaceChildren(new Option('选择已应用参数', ''), ...this.parameters.history[kind].map((value, index) => new Option(`${index + 1} · ${value.mode === 'script' ? '脚本' : value.mode === 'clone' ? '克隆' : `${value.field} ${value.operation} ${value.lower}…${value.upper}`}`, String(index))));
       saved.replaceChildren(new Option('选择收藏', ''), ...this.parameters.saved[kind].map(entry => new Option(entry.name, entry.name)));
       previous.disabled = next.disabled = !this.parameters.history[kind].length;
     };
-    const loadHistory = index => {
+    const loadHistory = (index: number): void => {
       const entries = this.parameters.history[kind]; if (!entries.length) return;
-      const position = (index + entries.length) % entries.length; history.value = position; this.load(entries[position]);
+      const position = (index + entries.length) % entries.length; history.value = String(position); this.load(entries[position]);
     };
     history.onchange = () => { if (history.value !== '') loadHistory(Number(history.value)); };
     previous.onclick = () => loadHistory(history.value === '' ? this.parameters.history[kind].length - 1 : Number(history.value) - 1);
     next.onclick = () => loadHistory(history.value === '' ? 0 : Number(history.value) + 1);
     saved.onchange = () => { const entry = this.parameters.saved[kind].find(entry => entry.name === saved.value); if (entry) { name.value = entry.name; this.load(entry.value); } };
-    save.onclick = () => { try { this.parameters.save(kind, name.value, this.read()); this.updateHistory(); saved.value = name.value.trim(); this.notify('批量参数已保存到本机', 'success'); } catch (error) { this.notify(error.message, 'warning'); } };
+    save.onclick = () => { try { this.parameters.save(kind, name.value, this.read()); this.updateHistory(); saved.value = name.value.trim(); this.notify('批量参数已保存到本机', 'success'); } catch (error) { this.notify(error instanceof Error ? error.message : String(error), 'warning'); } };
     remove.onclick = () => { if (saved.value) { this.parameters.remove(kind, saved.value); this.updateHistory(); } };
     this.updateHistory();
     hint(root, '在左侧选择物件，调整后先看预览，再应用。虚线为结果，原物件保持不变。');
-    const mode = control(root, '编辑模式', 'form', [['form', '原版批量编辑'], ['script', '脚本编辑'], ...(kind === 'events' ? [['clone', '克隆（批量复制）']] : [])]);
+    const mode = controlSelect(root, '编辑模式', 'form', [['form', '原版批量编辑'], ['script', '脚本编辑'], ...(kind === 'events' ? [['clone', '克隆（批量复制）']] : [])] as ControlOption[]);
     const isMultiEventEdit = kind === 'events' && this.getSession().multiLineActive && this.getSession().multiLineMode === 'events';
-    const applicationMode = isMultiEventEdit ? control(root, '多线应用', 'per-line', [['per-line', '每条线分别应用'], ['global', '总体按时间顺序应用']]) : null;
+    const applicationMode = isMultiEventEdit ? controlSelect(root, '多线应用', 'per-line', [['per-line', '每条线分别应用'], ['global', '总体按时间顺序应用']]) : null;
     const common = document.createElement('div'); root.append(common);
-    const filter = control(common, kind === 'notes' ? '音符种类' : '事件种类', kind === 'notes' ? '0' : 'all', kind === 'notes' ? [[0, '全部'], [1, 'Tap'], [2, 'Hold'], [3, 'Flick'], [4, 'Drag']] : EVENT_BATCH_TYPES);
-    const condition = control(common, '筛选条件', ''); condition.placeholder = kind === 'notes' ? '例如 x < 0 && t1 >= 4' : '例如 start != end';
+    // The two option lists come from const-typed module tables, so they are narrowed to the
+    // `[value, label]` pairs `controlSelect` builds `<option>`s from.
+    const noteKinds: ControlOption[] = [[0, '全部'], [1, 'Tap'], [2, 'Hold'], [3, 'Flick'], [4, 'Drag']];
+    const filter = controlSelect(common, kind === 'notes' ? '音符种类' : '事件种类', kind === 'notes' ? '0' : 'all', kind === 'notes' ? noteKinds : EVENT_BATCH_TYPES);
+
+    const condition = controlInput(common, '筛选条件', ''); condition.placeholder = kind === 'notes' ? '例如 x < 0 && t1 >= 4' : '例如 start != end';
     const form = document.createElement('div'); root.append(form);
-    const field = control(form, '数值种类', kind === 'notes' ? 'x' : 'both', kind === 'notes' ? NOTE_BATCH_FIELDS : EVENT_BATCH_FIELDS);
-    const operation = control(form, '修改方式', 'By', BATCH_OPERATIONS);
+    const field = controlSelect(form, '数值种类', kind === 'notes' ? 'x' : 'both', kind === 'notes' ? NOTE_BATCH_FIELDS : EVENT_BATCH_FIELDS);
+    const operation = controlSelect(form, '修改方式', 'By', BATCH_OPERATIONS);
     const readDistribution = distributionFields(form);
     if (kind === 'events') {
       const tools = document.createElement('div'); tools.className = 'action-grid'; form.append(tools);
-      for (const [action, title] of [['cut', '批量切割'], ['stick', '批量粘合']]) {
+      for (const [action, title] of [['cut', '批量切割'], ['stick', '批量粘合']] as [string, string][]) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = title;
-        button.onclick = () => runEventTool(this.getSession(), action, this.notify, this.timeline.origin); tools.append(button);
+        // `app.ts` hangs `division`, `cutDensity` and `tempo` off the session in `renderSession`,
+        // which is exactly the shape `runEventTool` declares; `EventToolSession` is not exported,
+        // so the same three members are spelled out here rather than widening the session type.
+        const toolSession = this.getSession() as EditorSession & { division: number; cutDensity: number };
+        button.onclick = () => runEventTool(toolSession, action, this.notify, this.timeline.origin); tools.append(button);
       }
       hint(form, '粘合：首值接前一事件尾值。切割：按“横线细分 × 设置中的切割密度”采样为线性段，跳过文字、着色器和零长度事件。');
     }
@@ -108,7 +253,8 @@ export class MultiEditPanel {
     const retainLabel = document.createElement('label'); retainLabel.className = 'field'; retainLabel.append('保留源事件');
     const retainSource = document.createElement('input'); retainSource.type = 'checkbox'; retainSource.checked = true; retainSource.setAttribute('aria-label', '保留源事件'); retainLabel.append(retainSource); clone.append(retainLabel);
     hint(clone, '线号用空格分隔，可重复。第一个副本时间不变；后续每份递增“横线数 ÷ 当前横线细分”拍。取消保留源事件后，应用时移除选中的源事件；副本和未选中的事件保留，基础事件留在同一层。');
-    const channels = new Map();
+    // Keyed by event type; each value is the reader/writer pair of that channel's offset rows.
+    const channels = new Map<string, DistributionFields>();
     for (const [type, name] of EVENT_BATCH_TYPES.slice(1, 5)) {
       const details = document.createElement('details'); const heading = document.createElement('summary'); heading.textContent = `${name} 数值偏移`; details.append(heading); clone.append(details);
       channels.set(type, distributionFields(details, `${name} · `));
@@ -124,24 +270,24 @@ export class MultiEditPanel {
     const reset = document.createElement('button'); reset.type = 'button'; reset.textContent = '重置参数';
     const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = '返回谱面工具'; actions.append(this.apply, reset, cancel);
     cancel.onclick = () => this.close();
-    this.read = () => ({ ...readDistribution(), mode: mode.value, field: field.value, operation: operation.value,
+    this.read = (): MultiEditRead => ({ ...readDistribution(), mode: mode.value, field: field.value, operation: operation.value,
       eventApplicationMode: applicationMode?.value ?? 'per-line',
       noteType: kind === 'notes' ? Number(filter.value) : 0, eventType: kind === 'events' ? filter.value : 'all',
       condition: condition.value, script: script.value, seed: this.seed, targets: targets.value, increment: increment.value, retainSource: retainSource.checked,
       division: this.timeline.division, channels: Object.fromEntries([...channels].map(([key, read]) => [key, read()])) });
-    const updateMode = () => {
+    const updateMode = (): void => {
       form.hidden = mode.value !== 'form'; scriptBox.hidden = mode.value !== 'script'; clone.hidden = mode.value !== 'clone'; common.hidden = mode.value === 'clone';
     };
-    this.load = value => {
-      mode.value = value.mode; field.value = value.field; operation.value = value.operation; if (applicationMode) applicationMode.value = value.eventApplicationMode ?? 'per-line'; filter.value = kind === 'notes' ? value.noteType : value.eventType;
-      condition.value = value.condition; script.value = value.script; this.seed = value.seed; targets.value = value.targets; increment.value = value.increment;
+    this.load = (value: BatchParameters): void => {
+      mode.value = value.mode; field.value = value.field; operation.value = value.operation; if (applicationMode) applicationMode.value = value.eventApplicationMode ?? 'per-line'; filter.value = kind === 'notes' ? String(value.noteType) : value.eventType;
+      condition.value = value.condition; script.value = value.script; this.seed = value.seed; targets.value = value.targets; increment.value = String(value.increment);
       retainSource.checked = value.retainSource !== false;
       readDistribution.write(value); for (const [key, read] of channels) read.write(value.channels?.[key] ?? {});
       updateMode(); this.parameters.update(kind, this.read()); this.refresh();
     };
     reset.onclick = () => { this.parameters.reset(kind); this.load(this.parameters.read(kind)); };
     root.oninput = event => {
-      if (parametersBox.contains(event.target)) return;
+      if (parametersBox.contains(event.target as Node | null)) return;
       updateMode(); this.parameters.update(kind, this.read());
       this.refresh();
     };
@@ -150,13 +296,17 @@ export class MultiEditPanel {
       const result = this.result; const amount = result.changes.length;
       this.committing = true;
       try {
-        commitSelectionEdit(this.getSession(), result, mode.value === 'clone' ? '批量克隆事件' : `多${kind === 'notes' ? '音符' : '事件'}编辑`);
-        const position = this.parameters.remember(kind, this.read()); this.updateHistory(); history.value = position;
+        // `MultiEditResult` carries every member `commitSelectionEdit` writes except
+        // `multiLineSelection`, which the batch previews never touch (they work on one layer at a
+        // time); the optional member is therefore absent, which the writer already tolerates.
+        const commit: SelectionEditResult = result;
+        commitSelectionEdit(this.getSession(), commit, mode.value === 'clone' ? '批量克隆事件' : `多${kind === 'notes' ? '音符' : '事件'}编辑`);
+        const position = this.parameters.remember(kind, this.read()); this.updateHistory(); history.value = String(position);
         this.result = null; this.chart = this.getSession().chart; this.signature = this.selectionSignature();
         this.summary.textContent = `已应用 ${amount} 个物件；参数已保留。调整参数可预览下一次修改。`;
         this.notify(`已应用 ${amount} 个物件的批量编辑`, 'success'); this.invalidate();
       }
-      catch (error) { this.notify(error.message, 'error'); }
+      catch (error) { this.notify(error instanceof Error ? error.message : String(error), 'error'); }
       finally { this.committing = false; }
     };
     this.load(this.parameters.read(kind));
@@ -174,25 +324,25 @@ export class MultiEditPanel {
     this.chart = session.chart; this.signature = signature; this.refresh();
   }
 
-  selectionSignature() {
+  selectionSignature(): string {
     const session = this.getSession();
     const multiEvents = [...(session.multiEventSelection ?? new Map())].map(([line, values]) => `${line}:${[...values].sort().join(',')}`).sort().join('|');
     return `${session.lineIndex}:${session.eventLayer}:${this.timeline.division}:${[...session.selection]}:${[...session.eventSelection]}:${multiEvents}`;
   }
 
-  refresh() {
+  refresh(): void {
     this.result = null;
     try {
       const snapshot = captureSelection(this.getSession()); const options = this.read();
       this.result = options.mode === 'clone' ? previewEventClones(snapshot, options) : previewMultiEdit(snapshot, this.kind, options);
       this.summary.textContent = `${this.result.changes.length} 个结果 · ${new Set(this.result.changes.map(change => change.lineIndex)).size} 条判定线 · 应用后可一次撤销`;
       this.summary.classList.remove('batch-error');
-    } catch (error) { this.summary.textContent = error.message; this.summary.classList.add('batch-error'); }
+    } catch (error) { this.summary.textContent = error instanceof Error ? error.message : String(error); this.summary.classList.add('batch-error'); }
     this.apply.disabled = !this.result;
     this.invalidate();
   }
 
-  drawTimeline() {
+  drawTimeline(): void {
     if (!this.active || !this.result || !this.previewEnabled.checked || this.previewHovered === false) return;
     const timeline = this.timeline; const session = this.getSession();
     const canvas = this.kind === 'notes' ? timeline.notesCanvas : timeline.eventsCanvas;

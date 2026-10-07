@@ -8,6 +8,7 @@ import { EventTrack, SpeedIntegral } from '../src/core/events.ts';
 import { IntervalIndex } from '../src/core/interval-index.ts';
 import { EditorSession } from '../src/application/session.ts';
 import { readZip, writeZip, crc32 } from '../src/platform/archive.ts';
+import type { Note } from '../src/core/types.ts';
 
 test('拍数负数、分母和三元表示', () => {
   assert.deepEqual(fromNumber(-0.25), [-1, 3, 4]);
@@ -33,23 +34,40 @@ test('BPM 切换、边界、倍率及随机往返', () => {
 test('JSON 未知字段、null、版本和原始分数保持不变', () => {
   const chart = createChart();
   chart.META.RPEVersion = 162;
-  chart.customExtension = { nested: [null, { enabled: true }] };
-  chart.customExtension.negativeZero = -0;
+  // Extra keys beyond the schema are kept verbatim by the serialiser; `Chart`'s index signature
+  // hands them back as `unknown`, so the round-trip is staged on a locally-typed binding.
+  const customExtension: Record<string, unknown> = { nested: [null, { enabled: true }] };
+  customExtension.negativeZero = -0;
+  chart.customExtension = customExtension;
   chart.judgeLineList[0].notes = [{ ...createNote(1, 0.5, 20), startTime: [0, 2, 4], custom: [1, 2] }];
-  chart.judgeLineList[0].eventLayers.push(null);
+  // A `null` layer is deliberately present: charts in the wild carry holes here, and the
+  // round-trip must not drop them. `EventLayer` is an object type, so the push goes through a
+  // loose view of the same array.
+  const looseLayers: unknown[] = chart.judgeLineList[0].eventLayers;
+  looseLayers.push(null);
   assert.deepEqual(parseChart(serializeChart(chart)), chart);
   assert.throws(() => parseChart('{"formatVersion":3}'));
 });
 
 test('非法数值在导入边界报出字段路径，不传入画布运行时', () => {
   const chart = createChart();
-  chart.judgeLineList[0].notes = [{ ...createNote(1, 0, 0), speed: 'fast' }];
+  // Every write below is *deliberately* invalid: the point is that `assertChart` rejects it and
+  // names the offending path. The values therefore cannot be expressed through the typed fields, so
+  // each is staged on a loose view of the same object and pushed into place through `unknown[]`.
+  const notes: unknown[] = chart.judgeLineList[0].notes;
+  notes.push({ ...createNote(1, 0, 0), speed: 'fast' });
   assert.throws(() => assertChart(chart), /notes\[0\]\.speed/);
   chart.judgeLineList[0].notes[0].speed = 1;
-  chart.judgeLineList[0].extended.colorEvents = [createEvent([0, 0], [255, 255, 255])];
+  const extended: Record<string, unknown> = chart.judgeLineList[0].extended;
+  // A two-component colour is deliberately malformed, so the validator must reject it. `Color` is a
+  // fixed 3-tuple, so the short array is substituted after `createEvent`, on the loose view.
+  const shortColorEvent: Record<string, unknown> = createEvent(0, 0);
+  shortColorEvent.start = [0, 0];
+  extended.colorEvents = [shortColorEvent];
   assert.throws(() => assertChart(chart), /colorEvents\[0\]/);
   chart.judgeLineList[0].extended = {};
-  chart.judgeLineList[0].yControl = [{ x: 0, y: null }];
+  const looseLine: Record<string, unknown> = chart.judgeLineList[0];
+  looseLine.yControl = [{ x: 0, y: null }];
   assert.throws(() => assertChart(chart), /yControl\[0\]/);
 });
 
@@ -68,7 +86,11 @@ test('RPE 缓动编号、端点、切片及 Bezier', () => {
 test('事件使用真实秒插值，速度积分跨 BPM 及事件间隙', () => {
   const tempo = new TempoMap([{ bpm: 120, startTime: [0, 0, 1] }, { bpm: 60, startTime: [2, 0, 1] }]);
   const track = new EventTrack([createEvent(0, 100, 0, 4)], tempo);
-  assert.ok(Math.abs(track.value(1.5) - 50) < 1e-12);
+  // `value` returns the track's union of number/colour/text. This track is built from numeric
+  // endpoints, so the assertion narrows what the sampler can only describe as a union.
+  const sampled = track.value(1.5);
+  if (typeof sampled !== 'number') throw new Error('数值轨道返回了非数值');
+  assert.ok(Math.abs(sampled - 50) < 1e-12);
   const integral = new SpeedIntegral([createEvent(0, 10, 0, 4)], tempo);
   assert.ok(Math.abs(integral.distance(3) - 1800) < 1e-8);
   assert.ok(Math.abs(integral.distance(4) - 3000) < 1e-8);
@@ -107,7 +129,10 @@ test('无效批量修改保持整次操作原子性', () => {
   const session = new EditorSession();
   session.insertNotes([createNote(1, 1, 0), createNote(2, 3, 0, 4)]);
   const before = session.chart;
-  assert.throws(() => session.transformSelection('失败操作', note => {
+  assert.throws(() => session.transformSelection('失败操作', (note: Note | undefined): Note => {
+    // The throw is the point of the test: it must abort the whole batch. A missing note would be a
+    // different failure than the one under test, so it is rejected explicitly rather than skipped.
+    if (!note) throw new Error('选中索引没有对应音符');
     if (note.type === 2) throw new Error('invalid');
     return { ...note, positionX: 55 };
   }));

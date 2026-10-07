@@ -1,4 +1,5 @@
 import { EditorSession } from '../application/session.ts';
+import type { EditorSession as EditorSessionClass } from '../application/session.ts';
 import { assertChart, createChart, diagnose, EVENT_TYPES, previewLimitations } from '../core/chart.ts';
 import { beatValue, parseBeat, formatBeat, fromNumber, upperBound } from '../core/beat.ts';
 import { TempoMap } from '../core/tempo.ts';
@@ -18,6 +19,7 @@ import { AssetLibraryPanel } from './asset-library.ts';
 import { HELP_TEXT } from './help.ts';
 import { download } from '../platform/files.ts';
 import { RpeSkin } from './skin.ts';
+import type { RpeSkin as RpeSkinType } from './skin.ts';
 import { ProjectImages } from '../platform/images.ts';
 import { HitSounds } from '../platform/hitsounds.ts';
 import { renderEventInspector } from './event-inspector.ts';
@@ -52,9 +54,200 @@ import { numericWheel } from './numeric-wheel.ts';
 import { SceneRuntime } from '../core/scene.ts';
 import { TimelineActivity } from '../core/timeline-activity.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import type { Beat, Chart, ChartEvent, Note } from '../core/types.ts';
+import type { Timeline as TimelineClass, TimelineSession, CursorPosition } from './timeline.ts';
+import type { AudioContextLike } from '../platform/audio.ts';
+import type { DiagnosticIssue } from '../core/chart.ts';
+import type { CurveNoteOptions } from '../core/curve-notes.ts';
+import type { EasingPicker } from './easing-picker.ts';
+import type { EditorPreferences } from '../platform/editor-preferences.ts';
+import type { MigratedPreferences } from '../core/preferences.ts';
+import type { StoredProject } from '../platform/library.ts';
+import type { Draft } from '../platform/recovery.ts';
+import type { ChartCandidate } from '../platform/files.ts';
+import type { ProjectSummary } from '../platform/library.ts';
 
-const element = selector => document.querySelector(selector);
-const displayFields = [
+
+/**
+ * The two shapes `app.ts` hangs off `Timeline` and `Preview` after construction.
+ *
+ * `timeline.ts` and `preview.ts` declare the fields their own methods read; the composition root is
+ * the only place that installs these hooks and extra display state, so they are declared here as
+ * declaration merges over the imported classes (a pure type-level construct, erased at build time)
+ * rather than reached through an unchecked cast at every assignment site.
+ */
+declare module './timeline.ts' {
+  interface Timeline {
+    /**
+     * The session the timeline renders.
+     *
+     * `Timeline` types this as its structural `TimelineSession`, but `app.ts` installs the concrete
+     * `EditorSession`; re-declaring the member with the class type keeps the specific methods
+     * (`selectedNoteEntries`, `commit`, …) visible on `timeline.getSession()`.
+     */
+    get getSession(): () => EditorSessionClass;
+    /** Placement type the next event edit uses; pushed by `editEvent` and the layer buttons. */
+    eventPlacementType: string;
+    /** Canvas-space cursor of the last pointer move over the event area, or `null`. */
+    eventCursor: CursorPosition | null;
+    /** Which clipboard gesture the keyup handler is mirroring; `{}` when none is active. */
+    clipboardMode: { mirror?: boolean; keepTime?: boolean };
+    /** Callback the keyup handler invokes when a preview key is released. */
+    notify: (message: string, level?: string) => void;
+    /**
+     * Callback that reports the scrollbar drag to the transport.
+     *
+     * The base class declares it `onDragScroll: (...) => void` (non-optional), while `timeline.ts`
+     * only ever reads it through `?.`; restating it with the accessor pair keeps that one declared
+     * modifier while allowing the `undefined` the read already tolerates.
+     */
+    get onDragScroll(): ((seconds: number) => void) | undefined;
+    set onDragScroll(value: ((seconds: number) => void) | undefined);
+    /** Callback that offers the note under the preview cursor; `false` means "not handled". */
+    previewPick: ((event: PointerEvent) => boolean) | undefined;
+    /** Callback that supplies the curve-editor anchor ghost notes. */
+    curveGhost: (() => Note[]) | undefined;
+    /** The note texture skin, installed once the document is loaded. */
+    skin: RpeSkinType | undefined;
+  }
+}
+
+declare module './preview.ts' {
+  interface Preview {
+    /**
+     * Rebuilds the background from the project's assets.
+     *
+     * `ProjectImages.load` already returns a promise, so the declared type is the promise's own;
+     * `app.ts` never awaits it, exactly as before.
+     */
+    load: (chart: Chart, assets: Map<string, Uint8Array>, name: string, info?: Record<string, string>) => unknown;
+  }
+}
+
+declare module './line-switcher.ts' {
+  interface LineSwitcher {
+    /** Whether the Ctrl+wheel switcher is enabled; bound to the saved display preference. */
+    enabled: boolean;
+  }
+}
+
+declare module './multi-edit.ts' {
+  interface MultiEditPanel {
+    /** Notifies the user; the panel calls it with a severity as the second argument. */
+    notify: (message: string, level?: string) => void;
+    invalidate: () => void;
+  }
+}
+
+declare module './multi-line.ts' {
+  interface MultiLinePanel {
+    /** Notifies the user; the panel calls it with a severity as the second argument. */
+    notify: (message: string, level?: string) => void;
+  }
+}
+
+/**
+ * The audio transport's members this file reads back.
+ *
+ * `AudioTransport` types `context` as its own structural `AudioContextLike` and the getters
+ * (`time`, `clockReady`, …) read through it. `HitSounds` declares the subset it drives against the
+ * platform `AudioContext`; the two describe the same object, and the only honest way to state that
+ * without an asserted cast is to name the members this file needs. `unknown` would erase the
+ * numeric reads below, so the concrete types are listed instead.
+ */
+interface EditorAudio {
+  playing: boolean;
+  position: number;
+  time: number;
+  duration: number;
+  volume: number;
+  clockReady: boolean;
+  playRevision: number;
+  ensureContext(): AudioContextLike;
+  pause(): void;
+  clear(): void;
+  seek(seconds: number): void;
+  update(): void;
+  setRate(rate: number): void;
+  setVolume(volume: number): void;
+  setPreservePitch(enabled: unknown): void;
+  load(bytes: ArrayBuffer, name?: string): Promise<boolean>;
+}
+
+/**
+ * A curve-editor anchor: the two beat/position fields the panel reads back off a picked note.
+ *
+ * The picked note is a full `Note`, but the panel only ever reads these three members, and the
+ * generator below consumes the same shape, so the anchor is declared as its own narrow record.
+ */
+interface CurveAnchor {
+  startTime: Beat;
+  positionX: number;
+  type: number;
+}
+
+/** The curve panel's parameter set; exactly the options `generateCurveNotes` accepts. */
+type CurveValues = CurveNoteOptions & { startTime: Beat; endTime: Beat };
+
+/** The note-density strip frames cached between draws. */
+interface StripCache {
+  chart: Chart;
+  line: number;
+  layer: number;
+  extended: boolean;
+  duration: number;
+  width: number;
+  historyWidth: number;
+  height: number;
+  historySignature: string;
+  note: HTMLCanvasElement;
+  history: HTMLCanvasElement;
+}
+
+/** A `createStripCanvas` frame: the offscreen canvas plus its measured logical size. */
+interface StripFrame {
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+  width: number;
+  height: number;
+}
+
+/** One row of the recent-edit history list. */
+interface HistoryEntry {
+  label: string;
+  index: number;
+}
+
+/**
+ * A candidate chart being opened.
+ *
+ * `assets` is always passed alongside, so the record carries only what the loader needs; the chart
+ * itself arrives from user data and is validated by `assertChart` before it is used.
+ */
+interface LoadCandidate {
+  chart: Chart;
+  name?: string;
+  info?: Record<string, string>;
+  project?: { assetFolders?: string[]; viewState?: { lineIndex?: number } } | null;
+}
+
+/** The open timeline context menu, or `null` when it is closed. */
+interface PendingTimelineMenu {
+  time: number | null;
+  markerIndex: number | null;
+}
+
+/** What the keyup handler remembers about a held preview shortcut. */
+interface HeldPreview {
+  action: string;
+  code: string;
+}
+
+/** The note-density and history strips' click handler receives a plain click event. */
+type StripEvent = MouseEvent;
+
+const element = (selector: string): HTMLElement => document.querySelector(selector) as HTMLElement;
+const displayFields: [string, string, number | boolean][] = [
   ['event-cut-density', 'cutDensity', 4],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
@@ -65,41 +258,48 @@ const displayFields = [
   ['autosave-enabled', 'autoSave', true], ['autosave-seconds', 'autoSaveSeconds', 60], ['autosave-limit', 'autoSaveLimit', 10],
 ];
 const settingsDialog = createSettingsPanel();
-let session = new EditorSession();
-let assets = new Map();
-let assetFolders = new Set();
+let session: EditorSession = new EditorSession();
+let assets: Map<string, Uint8Array> = new Map();
+let assetFolders: Set<string> = new Set();
 let assetDirty = false;
 let chartName = 'chart.json';
 let recoveryId = crypto.randomUUID();
-let tempo = new TempoMap(session.chart.BPMList);
+let tempo: TempoMap = new TempoMap(session.chart.BPMList);
 let tempoEntries = session.chart.BPMList;
 let dirtyFrame = true;
-let lastDraftDocument;
-let preferences = migratePreferences();
-let libraryProject = null;
+let lastDraftDocument: Chart | undefined;
+let preferences: MigratedPreferences = migratePreferences();
+let libraryProject: StoredProject | null = null;
 let saving = false;
-let editorPreferences = readEditorPreferences();
+let editorPreferences: EditorPreferences = readEditorPreferences();
 let atHome = true;
 let hasDocument = false;
 let previewReturnTime = 0;
-let placementContext;
-let heldPreview;
-let curveStart;
-let curveEnd;
-let curveAnchorMode = null;
+let placementContext: string | undefined;
+let heldPreview: HeldPreview | null = null;
+let curveStart: CurveAnchor | null = null;
+let curveEnd: CurveAnchor | null = null;
+let curveAnchorMode: 'start' | 'end' | null = null;
 let curveEditorOpen = false;
-let curveEasingPicker;
-let curveValues = { startTime: [0, 0, 1], endTime: [4, 0, 1], startX: -405, endX: 405, density: 1, type: 4, easingType: 1 };
-let loop = null;
+let curveEasingPicker: EasingPicker | undefined;
+let curveValues: CurveValues = { startTime: [0, 0, 1], endTime: [4, 0, 1], startX: -405, endX: 405, density: 1, type: 4, easingType: 1 };
+let loop: { start: number; end: number } | null = null;
 let activePaneName = 'chart';
 let lastSelectionSignature = '';
 let editTimeSeconds = 0;
 let editClockTick = performance.now();
-let lastDiagnosticSignature = null;
+let lastDiagnosticSignature: string | null = null;
 const audio = new AudioTransport();
-const hitSounds = new HitSounds(audio);
-const preview = new Preview(element('#preview'));
-const realtimePreview = new Preview(element('#realtime-preview'));
+/**
+ * `HitSounds` declares the transport it drives as its own structural `HitSoundTransport`
+ * (`ensureContext(): AudioContext`). `AudioTransport` is typed against a `AudioContextLike`
+ * interface deliberately, so the one place the two meet is named here and the concrete transport is
+ * viewed through that shape; `EditorAudio` lists only the members the scheduler and this file use.
+ */
+const hitsoundTransport: EditorAudio = audio;
+const hitSounds = new HitSounds(hitsoundTransport);
+const preview = new Preview(element('#preview') as HTMLCanvasElement);
+const realtimePreview = new Preview(element('#realtime-preview') as HTMLCanvasElement);
 const lineInfoScene = new SceneRuntime();
 const timelineActivity = new TimelineActivity();
 const invalidate = () => { dirtyFrame = true; };
@@ -107,53 +307,55 @@ preview.invalidate = realtimePreview.invalidate = invalidate;
 realtimePreview.applyShaders = false;
 realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
-const images = new ProjectImages(invalidate, message => status(message));
-const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error), openTimelineContextMenu);
+const images = new ProjectImages(invalidate, (message: string) => status(message));
+const timelineSession = (): TimelineSession => session;
+const timeline = new Timeline(element('#notes') as HTMLCanvasElement, element('#events') as HTMLCanvasElement, timelineSession, (...args: unknown[]) => (editEvent as (...parameters: unknown[]) => unknown)(...args), invalidate, (error: unknown) => reportError(error as Error), (...args: unknown[]) => (openTimelineContextMenu as (...parameters: unknown[]) => unknown)(...args));
 timeline.multiLineLabels = element('#multi-line-labels');
-timeline.multiLineScrollElement = element('#multi-line-scroll');
-timeline.multiLineScrollElement.addEventListener('input', event => {
+timeline.multiLineScrollElement = element('#multi-line-scroll') as HTMLInputElement;
+const multiLineScrollElement = timeline.multiLineScrollElement as HTMLInputElement;
+multiLineScrollElement.addEventListener('input', event => {
   const area = session.multiLineMode === 'events' ? 'events' : 'notes';
   if (typeof timeline.multiLineScroll === 'number') timeline.multiLineScroll = { notes: timeline.multiLineScroll, events: timeline.multiLineScroll };
-  timeline.multiLineScroll[area] = Number(event.target.value) || 0;
+  timeline.multiLineScroll[area] = Number((event.target as HTMLInputElement).value) || 0;
   invalidate();
 });
 let draggingMultiLineScroll = false;
-function updateMultiLineScrollFromPointer(event) {
-  const range = timeline.multiLineScrollElement;
+function updateMultiLineScrollFromPointer(event: PointerEvent) {
+  const range = multiLineScrollElement;
   const rectangle = range.getBoundingClientRect();
   if (!rectangle.width) return;
   const ratio = Math.max(0, Math.min(1, (event.clientX - rectangle.left) / rectangle.width));
   range.value = String(Number(range.max || 0) * ratio);
   range.dispatchEvent(new Event('input', { bubbles: true }));
 }
-timeline.multiLineScrollElement.addEventListener('pointerdown', event => {
+multiLineScrollElement.addEventListener('pointerdown', event => {
   event.preventDefault(); event.stopPropagation(); draggingMultiLineScroll = true;
-  timeline.multiLineScrollElement.setPointerCapture?.(event.pointerId);
+  multiLineScrollElement.setPointerCapture?.(event.pointerId);
   updateMultiLineScrollFromPointer(event);
 });
-timeline.multiLineScrollElement.addEventListener('pointermove', event => {
+multiLineScrollElement.addEventListener('pointermove', event => {
   if (!draggingMultiLineScroll) return;
   event.preventDefault(); event.stopPropagation(); updateMultiLineScrollFromPointer(event);
 });
-const stopMultiLineScrollDrag = event => {
+const stopMultiLineScrollDrag = (event?: Event) => {
   if (!draggingMultiLineScroll) return;
   draggingMultiLineScroll = false; event?.stopPropagation?.();
 };
-timeline.multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
-timeline.multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
-timeline.multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
-const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, error => reportError(error));
+multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
+multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
+multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
+const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, (error: unknown) => reportError(error as Error));
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
-  close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
+  close: () => activatePane('chart'), invalidate, notify: (message: string, severity: string) => notify(message, severity),
 });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
-const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => images.load(session.chart, assets, chartName) });
+const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => { images.load(session.chart, assets, chartName); } });
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
   notify,
-  onChange: (nextAssets, nextFolders) => {
+  onChange: (nextAssets: Map<string, Uint8Array>, nextFolders?: Iterable<string>) => {
     assets = nextAssets; assetFolders = new Set(nextFolders ?? []); images.load(session.chart, assets, chartName); assetDirty = true; status('素材库已修改，请保存谱面以保留资源'); renderSession();
   },
-  onTexture: (oldName, newName = oldName) => {
+  onTexture: (oldName: string, newName: string = oldName) => {
     const lines = [...session.chart.judgeLineList];
     if (newName !== oldName) {
       let changed = false; for (let index = 0; index < lines.length; index++) if (lines[index]?.Texture === oldName) { lines[index] = { ...lines[index], Texture: newName }; changed = true; }
@@ -173,35 +375,36 @@ const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
   layer: timeline.layer, extended: timeline.extended,
   start: timeline.timeAt(timeline.viewHeight()), end: timeline.timeAt(0),
   visible: hasDocument && !atHome && !preview.visible && !dialogOpen(),
-}), { select: index => selectOverviewLine(index) });
+}), { select: (index: number) => selectOverviewLine(index) });
 function clipboardTargetLine() {
   return timeline.hoverArea === 'events'
     ? timeline.lineIndexAt(timeline.eventCursor?.x ?? 0, timeline.eventsCanvas.clientWidth, 'events')
     : timeline.lineIndexAt(timeline.cursor?.x ?? 0, timeline.notesCanvas.clientWidth, 'notes');
 }
 const pasteGesture = new PasteGesture({
-  paste: context => { try { pasteObjects(session, context.beat, { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() }); } catch (error) { reportError(error); } },
+  paste: (context: { beat: number }) => { try { pasteObjects(session, context.beat, { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() }); } catch (error) { reportError(error as Error); } },
   open: () => { activatePane('clipboard'); renderClipboardPanel(); },
-  reportError: error => notify(`剪贴板历史：${error.message}`, 'error'),
-  valid: context => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
+  reportError: (error: Error) => notify(`剪贴板历史：${error.message}`, 'error'),
+  valid: (context: { session: EditorSession; chart: Chart; layer: number }) => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
 });
 window.addEventListener('blur', () => pasteGesture.cancel());
-let stripCache;
-function createStripCanvas(width, height) {
+let stripCache: StripCache | undefined;
+function createStripCanvas(width: number, height: number): StripFrame {
   const canvas = document.createElement('canvas'); const ratio = globalThis.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.round(width * ratio)); canvas.height = Math.max(1, Math.round(height * ratio));
-  const context = canvas.getContext('2d'); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
+  const context = (canvas.getContext('2d') as CanvasRenderingContext2D); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
   return { canvas, context, width, height };
 }
 function drawTimelineStrips() {
-  const height = timeline.notesCanvas.clientHeight; const densityCanvas = element('#note-density'); const historyCanvas = element('#history-strip');
+  const height = timeline.notesCanvas.clientHeight; const densityCanvas = element('#note-density') as HTMLCanvasElement; const historyCanvas = element('#history-strip') as HTMLCanvasElement;
   const width = densityCanvas.clientWidth; if (!height || !width) return;
   timelineActivity.compile(session.chart, tempo);
   const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : timelineActivity.duration);
   const historyEntries = session.recentEdits ?? [];
   const historySignature = `${historyEntries.length}:${historyEntries.at(-1)?.start ?? ''}:${historyEntries.at(-1)?.end ?? ''}:${historyEntries.at(-1)?.label ?? ''}`;
   const key = { chart: session.chart, line: session.lineIndex, layer: timeline.layer, extended: timeline.extended, duration, width, historyWidth: historyCanvas.clientWidth, height, historySignature };
-  if (!stripCache || Object.keys(key).some(name => stripCache[name] !== key[name])) {
+  const cached = stripCache;
+  if (!cached || Object.keys(key).some(name => (cached as unknown as Record<string, unknown>)[name] !== (key as unknown as Record<string, unknown>)[name])) {
     const noteFrame = createStripCanvas(width, height); const historyFrame = createStripCanvas(historyCanvas.clientWidth, height);
     const { bins, noteBins, eventBins, maximum } = timelineActivity.density(session.lineIndex, timeline.layer, timeline.extended, duration, height);
     const logarithm = Math.log1p(maximum); const half = Math.max(1, width / 2 - 2);
@@ -222,21 +425,23 @@ function drawTimelineStrips() {
     stripCache = { ...key, note: noteFrame.canvas, history: historyFrame.canvas };
   }
   const noteFrame = prepareCanvas(densityCanvas); const historyFrame = prepareCanvas(historyCanvas);
-  noteFrame.context.drawImage(stripCache.note, 0, 0, width, height);
-  historyFrame.context.drawImage(stripCache.history, 0, 0, historyCanvas.clientWidth, height);
+  noteFrame.context.drawImage((stripCache as StripCache).note, 0, 0, width, height);
+  historyFrame.context.drawImage((stripCache as StripCache).history, 0, 0, historyCanvas.clientWidth, height);
   const markerY = height - Math.max(0, Math.min(duration, chartSeconds())) / duration * height;
   for (const frame of [noteFrame, historyFrame]) { frame.context.strokeStyle = '#f5e59a'; frame.context.lineWidth = 1; frame.context.beginPath(); frame.context.moveTo(0, markerY + .5); frame.context.lineTo(frame.width, markerY + .5); frame.context.stroke(); }
 }
-function seekFromStrip(event) {
-  const rect = event.currentTarget.getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+function seekFromStrip(event: StripEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  const rect = target.getBoundingClientRect(); const ratio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
   timelineActivity.compile(session.chart, tempo);
   const duration = audio.duration > 0 ? audio.duration : timelineActivity.duration; playback.seek((1 - ratio) * duration + offsetSeconds());
 }
 element('#note-density').addEventListener('click', seekFromStrip);
 element('#history-strip').addEventListener('click', seekFromStrip);
-timeline.curvePick = note => {
+timeline.curvePick = (note: Note) => {
   if (!curveAnchorMode) return false;
-  const anchor = { startTime: [...note.startTime], positionX: note.positionX, type: note.type };
+  const anchor: CurveAnchor = { startTime: [...note.startTime], positionX: note.positionX, type: note.type };
   if (curveAnchorMode === 'start') {
     curveStart = anchor;
     curveAnchorMode = null;
@@ -256,29 +461,29 @@ timeline.curvePick = note => {
 };
 timeline.curveGhost = () => {
   if (!curveEditorOpen || !curveStart) return [];
-  const exists = anchor => session.notes.some(note => note.positionX === anchor.positionX && beatValue(note.startTime) === beatValue(anchor.startTime));
-  const anchors = [{ startTime: [...curveValues.startTime], positionX: curveValues.startX, type: curveValues.type, anchor: exists(curveStart) && curveValues.startX === curveStart.positionX && beatValue(curveValues.startTime) === beatValue(curveStart.startTime) }];
-  if (!curveEnd) return anchors;
-  const end = { startTime: [...curveValues.endTime], positionX: curveValues.endX, type: curveValues.type, anchor: exists(curveEnd) && curveValues.endX === curveEnd.positionX && beatValue(curveValues.endTime) === beatValue(curveEnd.startTime) };
+  const exists = (anchor: CurveAnchor) => session.notes.some(note => note.positionX === anchor.positionX && beatValue(note.startTime) === beatValue(anchor.startTime));
+  const anchors: (Note | undefined)[] = [{ startTime: [...curveValues.startTime], positionX: curveValues.startX, type: curveValues.type, anchor: exists(curveStart) && curveValues.startX === curveStart.positionX && beatValue(curveValues.startTime) === beatValue(curveStart.startTime) } as unknown as Note];
+  if (!curveEnd) return anchors as Note[];
+  const end = { startTime: [...curveValues.endTime], positionX: curveValues.endX, type: curveValues.type, anchor: exists(curveEnd) && curveValues.endX === curveEnd.positionX && beatValue(curveValues.endTime) === beatValue(curveEnd.startTime) } as unknown as Note;
   try {
-    return [...anchors, ...generateCurveNotes({ ...curveValues, division: timeline.division }), end];
-  } catch { return [...anchors, end]; }
+    return [...(anchors as Note[]), ...generateCurveNotes({ ...curveValues, division: timeline.division }), end];
+  } catch { return [...(anchors as Note[]), end]; }
 };
 timeline.skin = skin; preview.skin = skin; preview.images = images;
 realtimePreview.skin = skin; realtimePreview.images = images;
 skin.load();
 document.fonts.load('35px RPEGame').then(invalidate);
-const status = message => { element('#status').textContent = message; };
-const notificationTimers = new Set();
-function notify(message, level = 'success', duration = 2800) {
+const status = (message: string) => { element('#status').textContent = message; };
+const notificationTimers = new Set<number>();
+function notify(message: string, level = 'success', duration = 2800) {
   if (level === 'success' && editorPreferences.successNotifications === false) return;
   const host = element('#notifications'); if (!host) return;
   const item = document.createElement('div'); item.className = `editor-notification ${level}`; item.textContent = message; host.append(item);
   requestAnimationFrame(() => item.classList.add('visible'));
   const timer = setTimeout(() => { item.classList.add('leaving'); setTimeout(() => item.remove(), 260); notificationTimers.delete(timer); }, duration); notificationTimers.add(timer);
 }
-timeline.notify = (message, level = 'warning') => notify(message, level);
-const reportError = error => { status(error.message); notify(error.message, 'error', 5000); showDialog('操作未完成', error.message); };
+timeline.notify = (message: string, level = 'warning') => notify(message, level);
+const reportError = (error: Error) => { status(error.message); notify(error.message, 'error', 5000); showDialog('操作未完成', error.message); };
 const tips = [
   'Tips: 坐标系范围为 [-675,675]x[-450,450]', 'Tips: 速度为10表示每秒移动 1200 像素~', 'Tips: 编辑器的分辨率正比于 1920*1080', 'Tips: 很多金色的组件都是可以被点击的',
   'Tips: 谱面名可不为英文，但标识名只能是一串数字', 'Tips: 添加资源文件时闪退可能是其损坏，常见于直接改后缀名', 'Tips: CTRL+滚轮 可以快速切换线',

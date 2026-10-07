@@ -159,15 +159,17 @@ export class ShaderPipeline {
   textureWidth: number | undefined;
   textureHeight: number | undefined;
 
-  constructor(invalidate: () => void = () => {}) { this.invalidate = invalidate; this.gl = null; this.canvas = null; this.programs = new Map(); this.sourceTexture = null; this.pingTexture = null; this.pongTexture = null; this.framebuffer = null; this.buffer = null; this.disabled = false; }
+  constructor(invalidate: () => void = () => {}) { this.invalidate = invalidate; this.gl = null; this.canvas = null; this.programs = new Map(); this.sourceTexture = null; this.pingTexture = null; this.pongTexture = null; this.framebuffer = null; this.buffer = null; this.disabled = false; this.webgl2 = false; }
 
   ensure(canvas: ShaderCanvas): boolean {
     if (this.canvas === canvas && this.gl) return true;
     this.canvas = canvas;
     try {
       const options = { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: false };
-      this.gl = canvas.getContext('webgl2', options); this.webgl2 = Boolean(this.gl);
-      this.gl ??= canvas.getContext('webgl', options);
+      // `getContext` is typed as a union of every context kind; the requested string determines
+      // which member comes back, so each call is narrowed to the WebGL context it asked for.
+      this.gl = canvas.getContext('webgl2', options) as WebGL2RenderingContext | null; this.webgl2 = Boolean(this.gl);
+      this.gl ??= canvas.getContext('webgl', options) as WebGLRenderingContext | null;
     }
     catch { this.gl = null; }
     if (!this.gl) { this.disabled = true; return false; }
@@ -180,11 +182,13 @@ export class ShaderPipeline {
   }
 
   configureTexture(texture: WebGLTexture | null): void {
-    const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, texture); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // These two only run on textures the pipeline just created after `ensure` succeeded, matching
+    // the original's unguarded dereference; the assertion is erased at runtime.
+    const gl = this.gl!; gl.bindTexture(gl.TEXTURE_2D, texture); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
   resizeTexture(texture: WebGLTexture | null, width: number, height: number): void {
-    const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const gl = this.gl!; gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
   compile(name: string, source: string): ShaderProgram | null {
@@ -193,22 +197,27 @@ export class ShaderPipeline {
     const gl = this.gl!; const vertex = gl.createShader(gl.VERTEX_SHADER)!; const fragment = gl.createShader(gl.FRAGMENT_SHADER)!;
     gl.shaderSource(vertex, this.webgl2 ? '#version 300 es\n' + VERTEX_SOURCE.replace(/attribute\b/g, 'in').replace(/varying\b/g, 'out') : VERTEX_SOURCE); gl.compileShader(vertex);
     gl.shaderSource(fragment, fragmentSource(source, this.webgl2)); gl.compileShader(fragment);
-    if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS) || !gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) { this.lastError = gl.getShaderInfoLog(vertex) + gl.getShaderInfoLog(fragment); gl.deleteShader(vertex); gl.deleteShader(fragment); return null; }
+    if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS) || !gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) { this.lastError = (gl.getShaderInfoLog(vertex) ?? '') + (gl.getShaderInfoLog(fragment) ?? ''); gl.deleteShader(vertex); gl.deleteShader(fragment); return null; }
     const program = gl.createProgram(); gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program); gl.deleteShader(vertex); gl.deleteShader(fragment);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { this.lastError = gl.getProgramInfoLog(program); gl.deleteProgram(program); return null; }
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { this.lastError = gl.getProgramInfoLog(program) ?? undefined; gl.deleteProgram(program); return null; }
     const uniforms: Map<string, WebGLUniformLocation | null> = new Map(); const types: Map<string, number> = new Map();
-    for (let index = 0; index < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); index++) { const info = gl.getActiveUniform(program, index); const name = info.name.replace(/\[0\]$/, ''); uniforms.set(name, gl.getUniformLocation(program, info.name)); types.set(name, info.type); }
+    // An active uniform's record is only null past the end of the list, which the loop bound excludes.
+    for (let index = 0; index < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); index++) { const info = gl.getActiveUniform(program, index)!; const name = info.name.replace(/\[0\]$/, ''); uniforms.set(name, gl.getUniformLocation(program, info.name)); types.set(name, info.type); }
     const defaults = shaderDefaults(source);
     const result = { program, uniforms, types, defaults }; this.programs.set(key, result); return result;
   }
 
-  setUniforms(result, values, seconds, width, height, rect, resolution) {
-    const gl = this.gl;
-    const set = (name, value) => {
+  setUniforms(result: ShaderProgram, values: Record<string, unknown>, seconds: number, width: number, height: number,
+    rect: ShaderRect, resolution: [number, number]): void {
+    const gl = this.gl!;
+    const set = (name: string, value: unknown): void => {
       const location = result.uniforms.get(name); if (location === null || location === undefined) return;
       let normalised = normaliseUniformValue(name, value);
       if (result.types.get(name) === gl.FLOAT && Array.isArray(normalised)) normalised = normalised[0];
-      if ([gl.SAMPLER_2D, gl.INT, gl.BOOL].includes(result.types.get(name))) { gl.uniform1i(location, Number(normalised) || 0); return; }
+      const type = result.types.get(name);
+      // Integer-like uniform types take the `uniform1i` path; comparing against the wide `number`
+      // the map stores needs the list to be widened to number[], which the literal GL enums are not.
+      if (type !== undefined && ([gl.SAMPLER_2D, gl.INT, gl.BOOL] as number[]).includes(type)) { gl.uniform1i(location, Number(normalised) || 0); return; }
       if (Array.isArray(normalised)) {
         if (normalised.length === 2) gl.uniform2fv(location, normalised);
         else if (normalised.length === 3) gl.uniform3fv(location, normalised);
@@ -224,17 +233,19 @@ export class ShaderPipeline {
     }
   }
 
-  drawQuad(result, inputTexture, framebuffer, values, seconds, width, height, rect, resolution) {
-    const gl = this.gl; gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer); gl.viewport(0, 0, width, height); gl.useProgram(result.program); gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+  drawQuad(result: ShaderProgram, inputTexture: WebGLTexture | null, framebuffer: WebGLFramebuffer | null,
+    values: Record<string, unknown>, seconds: number, width: number, height: number, rect: ShaderRect, resolution: [number, number]): void {
+    const gl = this.gl!; gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer); gl.viewport(0, 0, width, height); gl.useProgram(result.program); gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     const position = gl.getAttribLocation(result.program, 'a_position'); const texCoord = gl.getAttribLocation(result.program, 'a_texCoord');
     if (position >= 0) { gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 16, 0); }
     if (texCoord >= 0) { gl.enableVertexAttribArray(texCoord); gl.vertexAttribPointer(texCoord, 2, gl.FLOAT, false, 16, 8); }
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, inputTexture); this.setUniforms(result, values, seconds, width, height, rect, resolution); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  render(sourceCanvas, targetCanvas, passes, seconds, sourceFor, viewport) {
+  render(sourceCanvas: ShaderCanvas, targetCanvas: ShaderCanvas, passes: ShaderPass[], seconds: number,
+    sourceFor: (pass: ShaderPass) => string | undefined, viewport: PreviewViewport): boolean {
     if (!passes.length || !this.ensure(targetCanvas)) return false;
-    const gl = this.gl; const width = sourceCanvas.width; const height = sourceCanvas.height;
+    const gl = this.gl!; const width = sourceCanvas.width; const height = sourceCanvas.height;
     if (targetCanvas.width !== width || targetCanvas.height !== height || this.textureWidth !== width || this.textureHeight !== height) {
       targetCanvas.width = width; targetCanvas.height = height;
       this.resizeTexture(this.pingTexture, width, height); this.resizeTexture(this.pongTexture, width, height);
@@ -243,10 +254,10 @@ export class ShaderPipeline {
     const display = sourceCanvas.getBoundingClientRect?.() ?? { width, height };
     const view = viewport ?? { left: 0, top: 0, width: display.width, height: display.height, scale: 1 };
     const rect = shaderViewport(view, display.width, display.height);
-    const resolution = [view.width / (view.scale || 1), view.height / (view.scale || 1)];
+    const resolution: [number, number] = [view.width / (view.scale || 1), view.height / (view.scale || 1)];
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
     let input = this.sourceTexture; let output = this.pingTexture; let rendered = 0;
-    const usable = [];
+    const usable: { pass: ShaderPass; program: ShaderProgram }[] = [];
     for (const pass of passes) { const source = sourceFor(pass); const program = source && this.compile(pass.shader, source); if (program) usable.push({ pass, program }); }
     for (let index = 0; index < usable.length; index++) {
       const { pass, program } = usable[index]; const final = index === usable.length - 1; const framebuffer = final ? null : this.framebuffer;
