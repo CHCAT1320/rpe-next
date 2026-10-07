@@ -6,7 +6,7 @@ import { eventList, eventKey, selectedEvents, commitEventLists } from './event-c
 
 const cutTypes = new Set([...EVENT_TYPES, 'scaleXEvents', 'scaleYEvents', 'colorEvents']);
 export function canCutEvent(type, event) {
-  return cutTypes.has(type) && beatValue(event.endTime) > beatValue(event.startTime);
+  return !event.trajectory && cutTypes.has(type) && beatValue(event.endTime) > beatValue(event.startTime);
 }
 
 export function cutEventParts(type, event, { division = 4, density = 4, beat, tempo, factor = 1 } = {}) {

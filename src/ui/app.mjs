@@ -3,7 +3,8 @@ import { assertChart, createChart, diagnose, EVENT_TYPES, previewLimitations } f
 import { beatValue, parseBeat, formatBeat, fromNumber, upperBound } from '../core/beat.mjs';
 import { TempoMap } from '../core/tempo.mjs';
 import { AudioTransport } from '../platform/audio.mjs';
-import { openFiles, exportChart, exportPackage, assetBytes, resourceReferences, attachExternalEffects } from '../platform/files.mjs';
+import { openFiles, assetBytes, resourceReferences, attachExternalEffects } from '../platform/files.mjs';
+import { showExportDialog } from './export-dialog.mjs';
 import { listDrafts, readDraft, saveSnapshot } from '../platform/recovery.mjs';
 import { Timeline, prepareCanvas } from './timeline.mjs';
 import { Preview } from './preview.mjs';
@@ -35,7 +36,7 @@ import { BatchControls } from './batch-controls.mjs';
 import { MultiEditPanel } from './multi-edit.mjs';
 import { MultiLinePanel } from './multi-line.mjs';
 import { clipboardBeat } from './clipboard-preview.mjs';
-import { shaderEvents, replaceShaderEvents } from '../core/shader-events.mjs';
+import { shaderEvents, replaceShaderEvents, shaderIdentity } from '../core/shader-events.mjs';
 import { renderMetadataPanel, renderBpmPanel } from './forms.mjs';
 import { EditorPlayback } from '../application/playback.mjs';
 import { readEditorPreferences, writeEditorPreferences } from '../platform/editor-preferences.mjs';
@@ -52,15 +53,19 @@ import { numericWheel } from './numeric-wheel.mjs';
 import { SceneRuntime } from '../core/scene.mjs';
 import { TimelineActivity } from '../core/timeline-activity.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
+import { AudioAnalysis } from './audio-analysis.mjs';
+import { TrajectoryPanel } from './trajectory-panel.mjs';
 
 const element = selector => document.querySelector(selector);
 const displayFields = [
   ['event-cut-density', 'cutDensity', 4],
+  ['judgement-offset', 'judgementOffset', 92],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
   ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
   ['background-blur', 'backgroundBlur', 10.5], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
   ['line-numbers', 'lineNumbers', true], ['line-arrows', 'lineArrows', true], ['line-tint', 'lineTint', true], ['merge-line-numbers', 'mergeLineNumbers', true], ['pick-preview-lines', 'pickPreviewLines', true],
+  ['note-source-hover', 'noteSourceHover', true],
   ['preserve-pitch', 'preservePitch', true], ['autoplay-view', 'autoplayView', true], ['highlight-notes', 'highlight', true],
   ['autosave-enabled', 'autoSave', true], ['autosave-seconds', 'autoSaveSeconds', 60], ['autosave-limit', 'autoSaveLimit', 10],
 ];
@@ -109,6 +114,33 @@ realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
 const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error), openTimelineContextMenu);
+const audioAnalysis = new AudioAnalysis(element('#audio-analysis-overlay'), () => timeline, () => audio, () => persistEditor());
+let noteHoverTimer = null;
+let noteHoverKey = null;
+function clearNoteSourceToast() {
+  if (noteHoverTimer) { clearTimeout(noteHoverTimer); noteHoverTimer = null; }
+  noteHoverKey = null;
+  const toast = element('#note-source-toast');
+  if (toast) { toast.hidden = true; toast.onclick = null; }
+}
+timeline.onNoteHover = entry => {
+  clearTimeout(noteHoverTimer); noteHoverTimer = null;
+  const toast = element('#note-source-toast');
+  const hoverEnabled = editorPreferences.noteSourceHover ?? preferences.settings.noteSourceHover ?? true;
+  if (!hoverEnabled) { clearNoteSourceToast(); return; }
+  if (!entry || atHome || !preview.visible || session.multiLineActive || !toast) { clearNoteSourceToast(); return; }
+  const key = `${entry.lineIndex}:${entry.index}`;
+  if (key === noteHoverKey && !toast.hidden) return;
+  noteHoverKey = key; toast.hidden = true;
+  noteHoverTimer = setTimeout(() => {
+    if (noteHoverKey !== key || !entry?.lineIndex && entry?.lineIndex !== 0) return;
+    const line = session.chart.judgeLineList?.[entry.lineIndex];
+    if (!line) return;
+    toast.textContent = `该音符来自 ${entry.lineIndex} 号线 · 点击切换`;
+    toast.hidden = false;
+    toast.onclick = () => { session.selectLine(entry.lineIndex); clearNoteSourceToast(); invalidate(); };
+  }, 1000);
+};
 timeline.multiLineLabels = element('#multi-line-labels');
 timeline.multiLineScrollElement = element('#multi-line-scroll');
 timeline.multiLineScrollElement.addEventListener('input', event => {
@@ -146,6 +178,7 @@ const batchControls = new BatchControls(element('.stage'), timeline, () => sessi
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
 });
+const trajectoryPanel = new TrajectoryPanel(element('#trajectory-editor'), () => ({ session, timeline, tempo, previewVisible: preview.visible }), { invalidate, notify, activate: activatePane });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => images.load(session.chart, assets, chartName) });
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
@@ -355,7 +388,30 @@ const pickPreviewLine = (renderer, event) => {
   if (index === null) return false;
   timeline.cancelPlacement(); session.selectLine(index); return true;
 };
-element('#preview').addEventListener('click', event => { if (preview.visible) pickPreviewLine(preview, event); });
+element('#preview').addEventListener('click', event => {
+  if (!preview.visible) return;
+  const noteLine = preview.pickNote(event.clientX, event.clientY);
+  if (Number.isInteger(noteLine)) { timeline.cancelPlacement(); session.selectLine(noteLine); clearNoteSourceToast(); invalidate(); return; }
+  pickPreviewLine(preview, event);
+});
+element('#preview').addEventListener('pointermove', event => {
+  if (!preview.visible || (editorPreferences.noteSourceHover ?? preferences.settings.noteSourceHover ?? true) === false) { clearNoteSourceToast(); return; }
+  const lineIndex = preview.pickNote(event.clientX, event.clientY);
+  if (!Number.isInteger(lineIndex)) { clearNoteSourceToast(); return; }
+  const key = `preview:${lineIndex}`;
+  clearTimeout(noteHoverTimer); noteHoverTimer = null;
+  if (key === noteHoverKey && !element('#note-source-toast')?.hidden) return;
+  noteHoverKey = key;
+  const toast = element('#note-source-toast'); if (!toast) return;
+  toast.hidden = true;
+  noteHoverTimer = setTimeout(() => {
+    if (noteHoverKey !== key || !preview.visible) return;
+    toast.textContent = `该音符来自 ${lineIndex} 号线 · 点击切换`;
+    toast.hidden = false;
+    toast.onclick = () => { session.selectLine(lineIndex); clearNoteSourceToast(); invalidate(); };
+  }, 1000);
+});
+element('#preview').addEventListener('pointerleave', event => { if (!element('#note-source-toast')?.contains(event.relatedTarget)) clearNoteSourceToast(); });
 timeline.previewPick = () => false;
 const home = new ProjectHome(async id => {
   const project = await readProject(id);
@@ -373,6 +429,7 @@ const home = new ProjectHome(async id => {
 
 function setHome(visible) {
   atHome = visible;
+  if (visible) clearNoteSourceToast();
   if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element('#mute-current-line')?.classList.remove('active'); }
   if (visible) { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); }
   element('#document-name').textContent = visible ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
@@ -380,7 +437,7 @@ function setHome(visible) {
   element('.workspace').hidden = visible;
   element('.transport').hidden = visible;
   element('#resume-editor').hidden = !hasDocument;
-  for (const selector of ['#save', '#export-json', '#package']) element(selector).disabled = !hasDocument;
+  for (const selector of ['#save', '#export']) element(selector).disabled = !hasDocument;
   if (visible) { playback.pause(); timeline.cancelPlacement(); home.refresh().catch(reportError); }
   invalidate();
 }
@@ -411,6 +468,14 @@ function openTimelineContextMenu(event, canvas = null, markerIndex = null) {
   pendingTimelineMenu = { time: point ? timeline.timeAt(point.y) : null, markerIndex };
   element('#timeline-add-marker').hidden = !canvas;
   element('#timeline-delete-marker').hidden = markerIndex === null;
+  const selections = session.multiLineActive && session.multiLineMode === 'events'
+    ? [...session.multiEventSelection].flatMap(([lineIndex, keys]) => [...keys].map(key => ({ lineIndex, key })))
+    : [...session.eventSelection].map(key => ({ lineIndex: session.lineIndex, key }));
+  const selection = selections.length === 1 ? selections[0] : null;
+  const [type, index] = selection?.key.split(':') ?? [];
+  const selected = type === 'moveXEvents' ? session.chart.judgeLineList[selection.lineIndex]?.eventLayers?.[timeline.layer]?.moveXEvents?.[Number(index)] : null;
+  const split = element('#trajectory-context-split'); split.hidden = !selected?.trajectory || canvas !== timeline.eventsCanvas;
+  split.onclick = () => { closeTimelineContextMenu(); trajectoryPanel.open(selected, selection.lineIndex, timeline.layer); trajectoryPanel.split(); };
   menu.style.left = `${Math.max(4, Math.min(window.innerWidth - 190, event.clientX))}px`;
   menu.style.top = `${Math.max(4, Math.min(window.innerHeight - 90, event.clientY))}px`;
   menu.hidden = false;
@@ -436,14 +501,16 @@ element('#timeline-add-marker').addEventListener('click', addTimelineMarker);
 element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarker);
 
 function persistEditor() {
-  editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
+  editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, judgementOffset: timeline.judgementOffset, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
     realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
-    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, blockDistortion: preview.blockSceneDistortion !== false, blockEffectDivisor: preview.blockEffectDivisor ?? 4, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
+    hitEnabled: hitSounds.enabled, allLines: preview.allLines, blockPipeline: preview.blockRenderer === 'block', blockOptional: preview.blockSceneEffects !== false, blockDistortion: preview.blockSceneDistortion !== false, blockEffectDivisor: preview.blockEffectDivisor ?? 4, toolbarMode: editorPreferences.toolbarMode ?? 'icons',
+    analysisEnabled: audioAnalysis.enabled, analysisMode: audioAnalysis.mode, analysisAlpha: audioAnalysis.alpha, analysisWidth: audioAnalysis.width };
   try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
 }
 
 function activatePane(name) {
   if (name !== 'multi') multiEdit.hide();
+  if (name !== 'trajectory') trajectoryPanel.hide();
   activePaneName = name;
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
@@ -472,6 +539,7 @@ for (const form of document.querySelectorAll('#properties, #event-properties')) 
 for (const button of document.querySelectorAll('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
 function togglePreview(force, stay = false, replay = false) {
   const visible = force ?? !preview.visible;
+  if (visible) clearNoteSourceToast();
   if (visible && (!preview.visible || replay)) {
     previewReturnTime = audio.time; timeline.cancelPlacement();
     if (replay) playback.seek(0);
@@ -546,7 +614,17 @@ function updateLineInfo() {
   }
   const eventSpeed = selectedSpeeds.length ? selectedSpeeds : activeSpeeds;
   const eventText = `X Y R Speed: ${lineInfoNumber(xSpeed)}, ${lineInfoNumber(ySpeed)}, ${lineInfoNumber(rotateSpeed)}${eventSpeed.length ? `\nEvent Speed: ${eventSpeed.slice(0, 6).join(', ')}` : ''}`;
-  overlay.textContent = `${lineText}\n${eventText}`;
+  const globalShaders = [];
+  for (const index of session.chart.judgeLineList?.keys?.() ?? []) {
+    const eventBeat = tempo.beat(seconds, session.chart.judgeLineList[index]?.bpmfactor ?? 1);
+    for (const event of shaderEvents(session.chart, index)) {
+      if (!event.global) continue;
+      const start = beatValue(event.startTime); const end = beatValue(event.endTime ?? event.startTime);
+      if (eventBeat >= start && eventBeat < end) globalShaders.push(shaderIdentity(event));
+    }
+  }
+  const shaderText = globalShaders.length ? `\nShader: ${globalShaders.join(', ')}` : '';
+  overlay.textContent = `${lineText}\n${eventText}${shaderText}`;
   overlay.hidden = false;
 }
 
@@ -578,6 +656,13 @@ function renderSession() {
     description.textContent = value;
     return [term, description];
   }));
+  const songName = session.chart.META?.song;
+  const backgroundName = session.chart.META?.background;
+  const missingMedia = [!songName || !assets.has(songName) ? '音乐' : '', !backgroundName || !assets.has(backgroundName) ? '封面' : ''].filter(Boolean);
+  const materialHint = element('#chart-material-hint');
+  if (materialHint) materialHint.textContent = missingMedia.length ? `缺少${missingMedia.join('、')} · 进入谱面信息添加` : '';
+  const mediaStatus = element('#metadata-media-status');
+  if (mediaStatus) mediaStatus.textContent = `音乐：${songName && assets.has(songName) ? songName : '未载入'}　封面：${backgroundName && assets.has(backgroundName) ? backgroundName : '未载入'}`;
   if (!session.liveBeatEdit) element('#offset').value = session.chart.META.offset ?? 0;
   element('#selection-info').textContent = session.focus === 'events' ? `${session.eventSelection.size} 个事件已选` : `${session.selection.size} 个音符已选`;
   element('#undo').disabled = !session.history.undoStack.length;
@@ -638,10 +723,20 @@ function renderSession() {
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
     if (multiEdit.committing) multiEdit.sync();
+    else if (trajectoryPanel.active && selectionCount !== 1) activatePane('trajectory');
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
     else if (selectionCount > 1) { activatePane('multi'); multiEdit.open(session.focus === 'events' ? 'events' : 'notes'); }
-    else if (selectionCount === 1) activatePane(session.focus === 'events' ? 'events' : 'notes');
+    else if (selectionCount === 1) {
+      const entries = session.multiLineActive && session.multiLineMode === 'events'
+        ? [...session.multiEventSelection].flatMap(([lineIndex, keys]) => [...keys].map(key => ({ lineIndex, key })))
+        : [...session.eventSelection].map(key => ({ lineIndex: session.lineIndex, key }));
+      const selected = entries.length === 1 ? entries[0] : null;
+      const [type, index] = selected?.key.split(':') ?? [];
+      const event = session.chart.judgeLineList[selected?.lineIndex]?.eventLayers?.[timeline.layer]?.[type]?.[Number(index)];
+      if (session.focus === 'events' && event?.trajectory) { curveEditorOpen = false; trajectoryPanel.open(event, selected.lineIndex, timeline.layer); }
+      else activatePane(session.focus === 'events' ? 'events' : 'notes');
+    }
     else if (!['multi-line', 'lines', 'assets'].includes(activePaneName)) activatePane('chart');
   }
   const limits = previewLimitations(session.chart);
@@ -655,6 +750,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   assertChart(chart);
   lineSwitcher.reset();
   playback.pause(); audio.clear();
+  audioAnalysis.setBuffer(null);
   hitSounds.stop(); hitSounds.onlyCurrentLine = false; element('#mute-current-line').setAttribute('aria-pressed', 'false'); element('#mute-current-line').classList.remove('active'); images.clear(); libraryProject = null;
   session.removeEventListener('change', renderSession);
   session = new EditorSession(chart);
@@ -712,6 +808,7 @@ async function loadMusic(bytes, name, updateMetadata = true) {
   const loadingSession = session;
   const loaded = await audio.load(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), name);
   if (!loaded || session !== loadingSession) return;
+  audioAnalysis.setBuffer(audio.buffer);
   assets.set(name, bytes);
   element('#music-name').textContent = name;
   element('#scrubber').max = audio.duration;
@@ -731,24 +828,17 @@ async function togglePlayback() {
   invalidate();
 }
 
-async function save(packageMode = false, exportOnly = false) {
-  if (!packageMode && !exportOnly) {
-    if (saving) return;
-    saving = true;
-    const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
-    const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
-      chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
-    try {
-      await storeProject(project);
-      savingSession.history.markSaved(savingSession.chart);
-      if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
-    } finally { saving = false; }
-    return;
-  }
-  const snapshot = { ...session.chart }; delete snapshot.chartTime;
-  if (packageMode) exportPackage(snapshot, assets, chartName);
-  else exportChart(snapshot, chartName);
-  status(packageMode ? '已发起 PEZ 下载；包含当前载入的附属资源' : '已发起 JSON 下载；音乐和图片请另行保留');
+async function save() {
+  if (saving) return;
+  saving = true;
+  const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
+  const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
+    chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
+  try {
+    await storeProject(project);
+    savingSession.history.markSaved(savingSession.chart);
+    if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
+  } finally { saving = false; }
 }
 
 function validateCommit(label, next) { assertChart(next); session.commit(label, next); }
@@ -784,8 +874,7 @@ element('#file-input').addEventListener('change', async event => {
   finally { event.target.value = ''; }
 });
 listen('#save', () => save());
-listen('#export-json', () => save(false, true));
-listen('#package', () => save(true));
+listen('#export', () => showExportDialog(session.chart, assets, chartName, name => status(`已发起下载：${name}`)));
 listen('#view-toggle', () => togglePreview());
 listen('#close-preview', () => togglePreview(false, true));
 listen('#background', () => element('#background-input').click());
@@ -1015,6 +1104,7 @@ function travel(direction, silent = false) {
 listen('#undo', () => travel('undo'));
 listen('#redo', () => travel('redo'));
 listen('#curve-notes', openCurvePanel);
+listen('#curve-trajectory', () => { curveEditorOpen = false; trajectoryPanel.open(); });
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
@@ -1083,6 +1173,9 @@ listen('#mirror', () => {
 listen('#metadata', () => { activatePane('metadata'); renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); }); });
 listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); }); });
 listen('#assets', () => { activatePane('assets'); assetLibrary.render(); });
+listen('#audio-analysis-tool', () => {
+  audioAnalysis.enabled = true; activatePane('audio-analysis'); audioAnalysis.render(element('#audio-analysis-panel')); audioAnalysis.draw(offsetSeconds()); persistEditor();
+});
 function renderHistoryPanel() {
   const host = element('#history-results'); if (!host) return;
   host.replaceChildren();
@@ -1376,7 +1469,7 @@ function frame(timestamp) {
   if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
-  if (!atHome && (audio.playing || dirtyFrame) && timestamp - lastFrameTime >= 1000 / preferences.settings.fpsLimit) {
+  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active) && timestamp - lastFrameTime >= 1000 / preferences.settings.fpsLimit) {
     lastFrameTime = timestamp;
     const start = performance.now();
     const beat = currentBeat();
@@ -1389,12 +1482,20 @@ function frame(timestamp) {
       selectionOverlay.draw();
       drawTimelineStrips();
       updateLayerButtons();
+      audioAnalysis.draw(offsetSeconds());
     }
     preview.duration = realtimePreview.duration = audio.duration;
     const viewSession = timeline.getSession();
-    const viewChart = multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart;
-    preview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
-    if (!preview.visible) realtimePreview.draw(viewChart, tempo, chartSeconds(), viewSession.lineIndex);
+    const trajectoryView = trajectoryPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
+    const viewChart = trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
+    const viewSeconds = trajectoryView?.seconds ?? chartSeconds();
+    preview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+    if (!preview.visible) {
+      const visible = realtimePreview.visible;
+      if (trajectoryView) realtimePreview.visible = true;
+      realtimePreview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+      realtimePreview.visible = visible;
+    }
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
     element('#play').dataset.playing = String(audio.playing);
     element('#play').title = audio.playing ? '暂停' : '播放';
@@ -1449,6 +1550,10 @@ function applyPreferences(next) {
   element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
   element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
   realtimePreview.opacity = Number(element('#realtime-alpha').value);
+  audioAnalysis.enabled = editorPreferences.analysisEnabled ?? false;
+  audioAnalysis.mode = editorPreferences.analysisMode === 'spectrum' ? 'spectrum' : 'waveform';
+  audioAnalysis.alpha = Number.isFinite(Number(editorPreferences.analysisAlpha)) ? Number(editorPreferences.analysisAlpha) : 0.2;
+  audioAnalysis.width = Number.isFinite(Number(editorPreferences.analysisWidth)) ? Number(editorPreferences.analysisWidth) : 0.62;
   hitSounds.enabled = editorPreferences.hitEnabled ?? true; element('#hit-enabled').checked = hitSounds.enabled;
   preview.allLines = realtimePreview.allLines = editorPreferences.allLines ?? true; element('#preview-mode').value = preview.allLines ? 'all' : 'current';
   timeline.scrollSpeed = next.settings.scrollSpeed / 5;
@@ -1541,7 +1646,7 @@ function applyDisplaySettings() {
   element('.editor-toolbar').classList.remove('mode-compact', 'mode-icons', 'mode-wide');
   element('.editor-toolbar').classList.add(`mode-${toolbarMode}`);
   element('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;
-  timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value);
+  timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value); timeline.judgementOffset = Number(element('#judgement-offset').value);
   timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventValueThreshold = Number(element('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element('#event-curve-threshold').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
   timeline.seamlessEvents = element('#seamless-events').checked;
   session.cutDensity = Number(element('#event-cut-density').value);

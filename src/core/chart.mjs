@@ -1,6 +1,8 @@
 import { beatValue, fromNumber } from './beat.mjs';
 import { TempoMap } from './tempo.mjs';
 import { BLOCK_EASE_TYPES } from './block-area.mjs';
+import { sampleCurveTrajectory } from './curve-trajectory.mjs';
+import { trajectorySplitSettings } from './trajectory-simplify.mjs';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'];
 export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'];
@@ -126,6 +128,12 @@ export function assertChart(chart) {
       for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {
         if (layer[type] != null && !Array.isArray(layer[type])) throw new Error(`${path}.${type} 必须为数组`);
         for (const [index, event] of (layer[type] ?? []).entries()) {
+          if (event?.trajectory) {
+            if (type !== 'moveXEvents' || event.trajectory.version !== 1) throw new Error('整体轨迹必须位于 X 轨道，且使用受支持的版本');
+            sampleCurveTrajectory(event.trajectory.options, 65);
+            trajectorySplitSettings(event.trajectory.split);
+            if (!Number.isInteger(event.trajectory.segments) || event.trajectory.segments < 4 || event.trajectory.segments > 8192) throw new Error('轨迹拆分段数无效');
+          }
           beatValue(event?.startTime, `${path}.${type}[${index}].startTime`);
           beatValue(event?.endTime, `${path}.${type}[${index}].endTime`);
           const validValue = value => type === 'textEvents' ? typeof value === 'string' : type === 'colorEvents' ? Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) : Number.isFinite(value);
