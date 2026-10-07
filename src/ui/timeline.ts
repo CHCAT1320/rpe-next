@@ -18,7 +18,15 @@ const isHookedEvent = (event: ChartEvent | undefined): boolean => event?.inst ==
 const labels = ['X', 'Y', '旋转', '透明', '速度'];
 const extendedLabels: string[] = SPECIAL_TRACKS.map(track => track.label);
 
-/** The editing state the timeline reads and writes; `EditorSession` satisfies it. */
+/**
+ * The editing state the timeline reads from the session.
+ *
+ * Spelled out structurally rather than importing `EditorSession`, so the timeline depends only on
+ * what it actually touches. There is deliberately no index signature: a class type never carries
+ * one, so adding `[key: string]: unknown` here would stop `EditorSession` — and every test double
+ * shaped like it — from satisfying this interface. Members the editor attaches at runtime rather
+ * than declaring on the class are optional below.
+ */
 export interface TimelineSession {
   chart: Chart;
   lineIndex: number;
@@ -34,7 +42,16 @@ export interface TimelineSession {
   multiLineActive: boolean;
   clipboardVisible?: boolean;
   shaderAutoAlign?: boolean;
-  [key: string]: unknown;
+  /** Set by the editor around programmatic edits so watchers can ignore their own writes. */
+  liveNoteEdit?: boolean;
+  liveEventEdit?: boolean;
+  liveBeatEdit?: boolean;
+  /** Per-track wheel increments, and the grid settings the timeline measures with. */
+  eventWheelSteps?: Partial<Record<AnyEventType, number>>;
+  visibleTimeUnit?: string;
+  tempo?: TempoMap;
+  division?: number;
+  cutDensity?: number;
 }
 
 /** A point in canvas space. */

@@ -9,6 +9,63 @@ import { eventKey, eventList, insertEvent, copyEvents, pasteEvents, deleteEvents
 import { HitSounds, hitTimeline } from '../src/platform/hitsounds.ts';
 import { AudioTransport } from '../src/platform/audio.ts';
 import { migratePreferences } from '../src/core/preferences.ts';
+import type { AudioContextLike, AudioBufferLike, GainNodeLike } from '../src/platform/audio.ts';
+import type { Note, EventValue } from '../src/core/types.ts';
+
+/**
+ * A fake `AudioBufferSourceNode` that records what the scheduler did to it.
+ *
+ * `HitSounds` only ever calls `start`/`stop`/`connect`/`disconnect`, but the assertions below read
+ * back the scheduled time and whether the voice was stopped, so those are declared here.
+ */
+interface FakeSource {
+  at?: number;
+  stopped?: boolean;
+  connect(): void;
+  disconnect(): void;
+  start(at: number): void;
+  stop(): void;
+}
+
+/**
+ * The transport the hit scheduler is handed in these tests.
+ *
+ * `HitSounds`' constructor is typed against its own structural `HitSoundTransport`, which names the
+ * real DOM `AudioContext`/`GainNode`. The doubles are far narrower, so they are described by the
+ * surface the scheduler actually touches and converted once at the constructor call.
+ */
+interface FakeHitTransport {
+  playing: boolean;
+  time: number;
+  rate: number;
+  playRevision: number;
+  context: { currentTime: number; createBufferSource(): FakeSource };
+}
+
+/**
+ * `HitSounds` is constructed directly for these tests, bypassing `AudioTransport`.
+ *
+ * The declared parameter is the scheduler's internal structural type, which asks for real DOM audio
+ * nodes; the doubles above provide only the slice `tick`/`prepare` read. The conversion is confined
+ * to this one helper so the rest of the file stays fully typed.
+ */
+function hitSounds(transport: FakeHitTransport): HitSounds {
+  return new HitSounds(transport as unknown as ConstructorParameters<typeof HitSounds>[0]);
+}
+
+/** `HitSounds.gain` is only assigned once a context exists; the tests assign it themselves. */
+function gainOf(sounds: HitSounds): GainNodeLike {
+  const gain = sounds.gain;
+  if (!gain) throw new Error('打击音尚未创建增益节点');
+  return gain;
+}
+
+/** `AudioTransport.gain` is created by `ensureContext`; the callers below always run it first. */
+function audioGain(audio: AudioTransport): GainNodeLike {
+  const gain = audio.gain;
+  if (!gain) throw new Error('音频上下文尚未创建');
+  return gain;
+}
 
 test('音乐和打击音量分别即时应用，打击音默认 30%，迁移保留原音量', async () => {
   const context = { destination: {}, createGain: () => ({ gain: { value: 1 }, connect() {} }) };

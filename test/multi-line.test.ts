@@ -9,6 +9,7 @@ import { lineFeatureLabels } from '../src/core/line-groups.ts';
 import { Timeline } from '../src/ui/timeline.ts';
 import type { Note } from '../src/core/types.ts';
 import type { ChartEvent } from '../src/core/types.ts';
+import type { TimelineSession } from '../src/ui/timeline.ts';
 
 function sessionWithLines(count = 3) {
   const chart = createChart(); chart.judgeLineList = Array.from({ length: count }, (_, index) => createLine(`Line ${index + 1}`));
@@ -185,7 +186,11 @@ test('多线线号表达式支持空格和闭区间并拒绝反向范围', () =>
 
 test('多线事件和音符共享单线宽度，仍可保留事件显式覆盖', () => {
   const session = sessionWithLines(2); session.setMultiLineEnabled(true, 'events'); session.addMultiLine(1);
-  const timeline = new Timeline(asCanvas(canvas()), asCanvas(canvas()), () => session, () => {}, () => {}); timeline.multiLineWidth = 320;
+  // `TimelineSession` is an open-ended structural view whose index signature `EditorSession` — a
+  // class — does not satisfy. The editor passes the session in exactly this way at runtime, so the
+  // callback hands the same object over through the interface the timeline actually declares.
+  const getSession = (): TimelineSession => session as unknown as TimelineSession;
+  const timeline = new Timeline(asCanvas(canvas()), asCanvas(canvas()), getSession, () => {}, () => {}); timeline.multiLineWidth = 320;
   assert.equal(timeline.panelWidth(500, 'notes'), 320);
   assert.equal(timeline.panelWidth(500, 'events'), 320);
   timeline.multiLineEventWidth = 180; assert.equal(timeline.panelWidth(500, 'events'), 320);

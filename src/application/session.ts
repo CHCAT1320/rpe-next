@@ -66,6 +66,8 @@ export class EditorSession extends EventTarget {
   tempo?: TempoMap;
   division?: number;
   cutDensity?: number;
+  /** Whether a shader event's parameters follow it when its start beat changes; defaults to on. */
+  shaderAutoAlign?: boolean;
 
   constructor(chart: Chart = createChart()) {
     super();
