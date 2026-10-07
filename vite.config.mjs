@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
 
 // GitHub Pages publishes the site under /rpe-next/; every other target (local preview and the
 // Electron desktop build) serves it from the domain root. `--mode pages` selects the subpath.
@@ -44,7 +45,7 @@ export default defineConfig(({ mode }) => ({
   // The editor is a single document with no client-side routing, so unknown paths must 404
   // instead of falling back to index.html — that keeps the smoke test's asset checks meaningful.
   appType: 'mpa',
-  plugins: [distributionExtras(import.meta.dirname), appVersion(import.meta.dirname)],
+  plugins: [vue(), distributionExtras(import.meta.dirname), appVersion(import.meta.dirname)],
   build: {
     outDir: 'dist',
     emptyOutDir: true,

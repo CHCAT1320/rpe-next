@@ -7,15 +7,21 @@
   "author": "cmdysj",
   "license": "PolyForm-Noncommercial-1.0.0",
   "homepage": "https://kclg-ysj.github.io/rpe-next/",
-  "repository": { "type": "git", "url": "https://github.com/kclg-YSJ/rpe-next.git" },
-  "engines": { "node": ">=22.12" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kclg-YSJ/rpe-next.git"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "start": "vite --open",
     "dev": "vite",
     "build": "vite build",
     "build:pages": "vite build --mode pages",
     "preview": "vite preview",
-    "test": "node --test",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "smoke-build": "node tools/smoke-build.mjs",
     "smoke-pages": "node tools/smoke-pages.mjs",
     "copy-assets": "node tools/copy-rpe-assets.mjs",
@@ -30,5 +36,15 @@
     "build:desktop": "node tools/build-desktop.mjs",
     "desktop": "vite build && electron desktop/main.cjs --dist"
   },
-  "devDependencies": { "electron": "44.5.1", "vite": "^8.3.3" }
+  "dependencies": {
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "@vue/tsconfig": "^0.9.1",
+    "electron": "44.5.1",
+    "typescript": "~5.9",
+    "vite": "^8.3.3",
+    "vue-tsc": "^3.3.12"
+  }
 }
