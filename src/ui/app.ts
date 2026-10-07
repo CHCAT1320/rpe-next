@@ -1,12 +1,13 @@
 import { EditorSession } from '../application/session.ts';
 import type { EditorSession as EditorSessionClass } from '../application/session.ts';
-import { assertChart, createChart, diagnose, EVENT_TYPES, previewLimitations } from '../core/chart.ts';
+import { assertChart, createChart, diagnose, EVENT_TYPES, EXTENDED_TYPES, previewLimitations } from '../core/chart.ts';
 import { beatValue, parseBeat, formatBeat, fromNumber, upperBound } from '../core/beat.ts';
 import { TempoMap } from '../core/tempo.ts';
 import { AudioTransport } from '../platform/audio.ts';
 import { openFiles, exportChart, exportPackage, assetBytes, resourceReferences, attachExternalEffects } from '../platform/files.ts';
 import { listDrafts, readDraft, saveSnapshot } from '../platform/recovery.ts';
 import { Timeline, prepareCanvas } from './timeline.ts';
+import type { MoveDrag } from './timeline.ts';
 import { Preview } from './preview.ts';
 import { renderProperties } from './inspector.ts';
 import { showDialog, editJson, choose, confirmAction, dialogOpen } from './dialog.ts';
@@ -27,6 +28,9 @@ import { eventKey, eventList, deleteEvents, transformEvents } from '../applicati
 import { BATCH_ACTIONS, applyBatchAction, nudgeSelection } from '../application/batch-edit.ts';
 import { copyObjects, cutObjects, pasteObjects, deleteObjects } from '../application/clipboard.ts';
 import { ClipboardHistory } from '../application/clipboard-history.ts';
+import type { ClipboardHistorySession } from '../application/clipboard-history.ts';
+/** `EditorSession` viewed with the clipboard-history members the class grows at runtime. */
+type EditorClipboardSession = EditorSession & ClipboardHistorySession;
 import { renderClipboardHistory } from './clipboard-history.ts';
 import { PasteGesture } from './paste-gesture.ts';
 import type { PasteContext } from './paste-gesture.ts';
@@ -34,6 +38,7 @@ import { SelectionOverlay } from './selection-overlay.ts';
 import { LineSwitcher } from './line-switcher.ts';
 import { stepLine } from '../core/line-overview.ts';
 import { applyNumberShortcut } from '../application/number-shortcuts.ts';
+import type { NumberShortcutSession } from '../application/number-shortcuts.ts';
 import { BatchControls } from './batch-controls.ts';
 import { MultiEditPanel } from './multi-edit.ts';
 import { MultiLinePanel } from './multi-line.ts';
@@ -53,16 +58,17 @@ import { generateCurveNotes } from '../core/curve-notes.ts';
 import { createEasingPicker } from './easing-picker.ts';
 import { numericWheel } from './numeric-wheel.ts';
 import { SceneRuntime } from '../core/scene.ts';
+import type { LineTracks } from '../core/scene.ts';
 import { TimelineActivity } from '../core/timeline-activity.ts';
 import { assetUrl } from '../core/asset-url.ts';
-import type { Beat, Chart, ChartEvent, Note } from '../core/types.ts';
+import type { AnyEventType, Beat, Chart, ChartEvent, JudgeLine, Note, NoteType } from '../core/types.ts';
 import type { Timeline as TimelineClass, TimelineSession, CursorPosition } from './timeline.ts';
 import type { AudioContextLike } from '../platform/audio.ts';
 import type { DiagnosticIssue } from '../core/chart.ts';
 import type { CurveNoteOptions } from '../core/curve-notes.ts';
 import type { EasingPicker } from './easing-picker.ts';
-import type { EditorPreferences } from '../platform/editor-preferences.ts';
-import type { MigratedPreferences } from '../core/preferences.ts';
+import type { EditorPreferences, ToolbarMode } from '../platform/editor-preferences.ts';
+import type { MigratedPreferences, MigratedSettings, DefaultHotkeys } from '../core/preferences.ts';
 import type { StoredProject } from '../platform/library.ts';
 import type { Draft } from '../platform/recovery.ts';
 import type { ChartCandidate } from '../platform/files.ts';
@@ -86,6 +92,12 @@ interface EditorAudio {
   volume: number;
   clockReady: boolean;
   playRevision: number;
+  /** The playback rate the scheduler scales its hit offsets by. */
+  rate: number;
+  /** The scheduler's lookahead window; `AudioTransport` reports `Infinity` outside a seek. */
+  scheduleHorizon: number;
+  /** The live context. `HitSounds` drives it as the platform `AudioContext`. */
+  context: AudioContext;
   ensureContext(): AudioContextLike;
   pause(): void;
   clear(): void;
@@ -109,8 +121,14 @@ interface CurveAnchor {
   type: number;
 }
 
-/** The curve panel's parameter set; exactly the options `generateCurveNotes` accepts. */
-type CurveValues = CurveNoteOptions & { startTime: Beat; endTime: Beat };
+/**
+ * The curve panel's parameter set; exactly the options `generateCurveNotes` accepts.
+ *
+ * `generateCurveNotes` declares `type`, `density` and `easingType` optional and defaults them, but
+ * this panel's single initialiser always sets all three and every read below expects a value, so they
+ * are narrowed to required here rather than defaulted at each use.
+ */
+type CurveValues = CurveNoteOptions & { startTime: Beat; endTime: Beat; type: NoteType; density: number; easingType: number };
 
 /** The note-density strip frames cached between draws. */
 interface StripCache {
@@ -146,13 +164,95 @@ interface HistoryEntry {
  *
  * `assets` is always passed alongside, so the record carries only what the loader needs; the chart
  * itself arrives from user data and is validated by `assertChart` before it is used.
+ *
+ * `name` is required because `ChartCandidate` — the shape `openFiles` and `attachExternalEffects`
+ * accept — requires it, and both callers below pass one.
  */
 interface LoadCandidate {
   chart: Chart;
-  name?: string;
+  name: string;
   info?: Record<string, string>;
-  project?: { assetFolders?: string[]; viewState?: { lineIndex?: number } } | null;
+  /**
+   * The provenance the loader reads back, if the chart came from a stored project or a draft.
+   *
+   * Typed as {@link CandidateProvenance} — the two fields actually read — rather than as
+   * `StoredProject`, because the recovery path has no stored project at all and supplies just a saved
+   * scroll position. A `StoredProject` carries neither field directly, so the two are read through the
+   * view in both cases.
+   */
+  project?: CandidateProvenance | null;
+  /** The stored project this chart belongs to, when it was opened from the library. */
+  libraryProject?: StoredProject | null;
 }
+
+/**
+ * The provenance the loader reads off a candidate's `project`.
+ *
+ * `StoredProject` has neither of these fields: the asset folders and the scroll position both live
+ * inside the stored document, and the recovery path supplies a literal with only a `viewState`. This
+ * is the view the two reads below go through, so a stored project and a draft both type-check.
+ */
+type CandidateProvenance = { assetFolders?: string[]; viewState?: { lineIndex?: number } };
+
+/**
+ * Reads the provenance fields out of a record that may or may not declare them.
+ *
+ * `StoredProject` is the record the library stores; it declares neither `assetFolders` nor
+ * `viewState`, because both live inside the open document rather than beside it. Reading them through
+ * this view is what lets a stored project and a draft's `{ viewState }` reach `LoadCandidate.project`
+ * without asserting a shape onto either. Fields that are absent stay absent, so the loader's
+ * `?? []` / `undefined` fallbacks behave exactly as the original untyped reads did.
+ */
+function candidateProvenance(source: object | null | undefined): CandidateProvenance | null {
+  if (!source) return null;
+  const view = source as { assetFolders?: unknown; viewState?: unknown };
+  const provenance: CandidateProvenance = {};
+  if (Array.isArray(view.assetFolders)) provenance.assetFolders = view.assetFolders.filter((entry): entry is string => typeof entry === 'string');
+  const lineIndex = (view.viewState as { lineIndex?: unknown } | null | undefined)?.lineIndex;
+  if (Number.isInteger(lineIndex)) provenance.viewState = { lineIndex: lineIndex as number };
+  return provenance;
+}
+
+/**
+ * The note a drag is anchored to, or `undefined` when the drag carries no usable index.
+ *
+ * `MoveDrag.anchor` is `unknown` because the same drag object also serves the event and stroke
+ * gestures; a note drag always stores a numeric note index there, so the `typeof` test accepts exactly
+ * the values the original's untyped index expression could use. `movedNote` is declared to take a
+ * `Note`, and `timeline.ts` hands it the same possibly-absent lookup from its own drag path, so the
+ * `!` at the call site records that invariant; the `undefined` this returns when no drag is anchored
+ * is the value the original's index expression produced too.
+ */
+function draggedAnchorNote(chart: Chart, lineIndex: number, anchor: unknown): Note | undefined {
+  if (typeof anchor !== 'number') return undefined;
+  return chart.judgeLineList?.[lineIndex]?.notes?.[anchor];
+}
+
+/**
+ * Whether a string names an event track.
+ *
+ * `eventList` only accepts the seven track names; this is the guard that lets a string read out of an
+ * event-selection key reach it. The two literal arrays are the editor's own track lists, so the test
+ * accepts exactly the keys `eventKey` can have produced.
+ */
+function isEventType(value: string): value is AnyEventType {
+  return isBaseEventType(value) || (EXTENDED_TYPES as readonly string[]).includes(value);
+}
+
+/** Whether a string names one of the five base track names `JudgeLine.eventLayers` holds. */
+function isBaseEventType(value: string): value is (typeof EVENT_TYPES)[number] {
+  return (EVENT_TYPES as readonly string[]).includes(value);
+}
+
+/**
+ * The event target viewed the way `keyboard.ts` reads it.
+ *
+ * That module declares its `ShortcutTarget` parameter but does not export it, and probes every member
+ * (`isContentEditable`, `closest`, `blur`) before use, so naming the three optional members here is
+ * the same structural view it already accepts — `keyboard.ts`'s own `isPlaybackSpace` casts
+ * `event.target` to it directly.
+ */
+type ShortcutTargetArg = { isContentEditable?: boolean; closest?(selector: string): { type?: string; blur?(): void } | null; blur?(): void };
 
 /** The open timeline context menu, or `null` when it is closed. */
 interface PendingTimelineMenu {
@@ -162,15 +262,35 @@ interface PendingTimelineMenu {
 
 /** What the keyup handler remembers about a held preview shortcut. */
 interface HeldPreview {
-  action: string;
+  /**
+   * The preview shortcut being held; one of the two `_HOLD` actions.
+   *
+   * Typed as a hotkey name because it indexes `preferences.hotkeys` below. Only `StartView_HOLD` and
+   * `JumpView_HOLD` are ever stored, both of which the key set includes.
+   */
+  action: keyof DefaultHotkeys;
   code: string;
 }
 
 /** The note-density and history strips' click handler receives a plain click event. */
 type StripEvent = MouseEvent;
 
-const element = (selector: string): HTMLElement => document.querySelector(selector) as HTMLElement;
-const displayFields: [string, string, number | boolean][] = [
+/**
+ * Looks up an element by selector.
+ *
+ * The markup lives in `index.html` and every selector this file passes is one it provides, so the
+ * lookup keeps its existing non-null behaviour (`as T`); the type parameter only names the element
+ * kind, so controls can be read and written without a narrowing at each use.
+ */
+const element = <T extends HTMLElement = HTMLElement>(selector: string): T => document.querySelector(selector) as T;
+/**
+ * The settings controls `applyDisplaySettings` writes, as `[element id, preference key, default]`.
+ *
+ * The key names a member of `EditorPreferences`. Only some of these also exist on `MigratedSettings`
+ * (the legacy `Settings.json` keys); the rest are editor-only, which is why the settings-side fallback
+ * below reads through a partial view rather than assuming every key is present there.
+ */
+const displayFields: [string, keyof EditorPreferences, number | boolean][] = [
   ['event-cut-density', 'cutDensity', 4],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
@@ -218,11 +338,23 @@ const audio = new AudioTransport();
  * (`ensureContext(): AudioContext`). `AudioTransport` is typed against a `AudioContextLike`
  * interface deliberately, so the one place the two meet is named here and the concrete transport is
  * viewed through that shape; `EditorAudio` lists only the members the scheduler and this file use.
+ *
+ * The bridge is the documented widening cast this file already uses elsewhere: the two interfaces
+ * describe the same live object (`AudioTransport` builds a real `AudioContext` and hands back the
+ * `AudioContextLike` view of it), and neither module can name the other's type.
  */
-const hitsoundTransport: EditorAudio = audio;
-const hitSounds = new HitSounds(hitsoundTransport);
-const preview = new Preview(element('#preview') as HTMLCanvasElement);
-const realtimePreview = new Preview(element('#realtime-preview') as HTMLCanvasElement);
+const hitsoundTransport: EditorAudio = audio as unknown as EditorAudio;
+/**
+ * The transport shape `HitSounds` accepts, recovered from its constructor.
+ *
+ * `HitSoundTransport` is declared but not exported, and its `ensureContext(): AudioContext` differs
+ * from `AudioTransport`'s `AudioContextLike` view of the same live object. Naming the parameter type
+ * through the constructor keeps the bridge in one place instead of restating the interface.
+ */
+type HitSoundsTransport = ConstructorParameters<typeof HitSounds>[0];
+const hitSounds = new HitSounds(hitsoundTransport as unknown as HitSoundsTransport);
+const preview = new Preview(element<HTMLCanvasElement>('#preview'));
+const realtimePreview = new Preview(element<HTMLCanvasElement>('#realtime-preview'));
 const lineInfoScene = new SceneRuntime();
 const timelineActivity = new TimelineActivity();
 const invalidate = () => { dirtyFrame = true; };
@@ -232,9 +364,9 @@ realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, (message: string) => status(message));
 const timelineSession = (): TimelineSession => session;
-const timeline = new Timeline(element('#notes') as HTMLCanvasElement, element('#events') as HTMLCanvasElement, timelineSession, (...args: unknown[]) => (editEvent as (...parameters: unknown[]) => unknown)(...args), invalidate, (error: unknown) => reportError(error as Error), (...args: unknown[]) => (openTimelineContextMenu as (...parameters: unknown[]) => unknown)(...args));
+const timeline = new Timeline(element<HTMLCanvasElement>('#notes'), element<HTMLCanvasElement>('#events'), timelineSession, (...args: unknown[]) => (editEvent as (...parameters: unknown[]) => unknown)(...args), invalidate, reportError, (...args: unknown[]) => (openTimelineContextMenu as (...parameters: unknown[]) => unknown)(...args));
 timeline.multiLineLabels = element('#multi-line-labels');
-timeline.multiLineScrollElement = element('#multi-line-scroll') as HTMLInputElement;
+timeline.multiLineScrollElement = element<HTMLInputElement>('#multi-line-scroll');
 const multiLineScrollElement = timeline.multiLineScrollElement as HTMLInputElement;
 multiLineScrollElement.addEventListener('input', event => {
   const area = session.multiLineMode === 'events' ? 'events' : 'notes';
@@ -267,7 +399,7 @@ const stopMultiLineScrollDrag = (event?: Event) => {
 multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
 multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
 multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
-const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, (error: unknown) => reportError(error as Error));
+const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, reportError);
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify,
 });
@@ -319,7 +451,7 @@ function createStripCanvas(width: number, height: number): StripFrame {
   return { canvas, context, width, height };
 }
 function drawTimelineStrips() {
-  const height = timeline.notesCanvas.clientHeight; const densityCanvas = element('#note-density') as HTMLCanvasElement; const historyCanvas = element('#history-strip') as HTMLCanvasElement;
+  const height = timeline.notesCanvas.clientHeight; const densityCanvas = element<HTMLCanvasElement>('#note-density') as HTMLCanvasElement; const historyCanvas = element<HTMLCanvasElement>('#history-strip') as HTMLCanvasElement;
   const width = densityCanvas.clientWidth; if (!height || !width) return;
   timelineActivity.compile(session.chart, tempo);
   const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : timelineActivity.duration);
@@ -360,8 +492,8 @@ function seekFromStrip(event: StripEvent) {
   timelineActivity.compile(session.chart, tempo);
   const duration = audio.duration > 0 ? audio.duration : timelineActivity.duration; playback.seek((1 - ratio) * duration + offsetSeconds());
 }
-element('#note-density').addEventListener('click', seekFromStrip);
-element('#history-strip').addEventListener('click', seekFromStrip);
+element<HTMLCanvasElement>('#note-density').addEventListener('click', seekFromStrip);
+element<HTMLCanvasElement>('#history-strip').addEventListener('click', seekFromStrip);
 /**
  * Handles a note clicked while the curve editor is picking an anchor.
  *
@@ -376,7 +508,7 @@ const curvePickHandler = (note: Note): boolean => {
   if (curveAnchorMode === 'start') {
     curveStart = anchor;
     curveAnchorMode = null;
-    element('#curve-start')?.classList.remove('active');
+    element<HTMLButtonElement>('#curve-start')?.classList.remove('active');
     curveValues.startTime = anchor.startTime; curveValues.startX = anchor.positionX; updateCurvePanel();
     status('曲线起点已选择；请选择终点音符');
     invalidate();
@@ -385,7 +517,7 @@ const curvePickHandler = (note: Note): boolean => {
   if (!curveStart) { curveAnchorMode = null; status('请先选择曲线起点'); return true; }
   curveEnd = anchor;
   curveAnchorMode = null;
-  element('#curve-end')?.classList.remove('active');
+  element<HTMLButtonElement>('#curve-end')?.classList.remove('active');
   curveValues.endTime = anchor.startTime; curveValues.endX = anchor.positionX; updateCurvePanel();
   status('曲线终点已选择，可在右侧调整参数并生成');
   return true;
@@ -406,16 +538,39 @@ realtimePreview.skin = skin; realtimePreview.images = images;
 skin.load();
 document.fonts.load('35px RPEGame').then(invalidate);
 const status = (message: string) => { element('#status').textContent = message; };
+/** Narrows a caught value to its message; `catch` binds `unknown` under `strict`. */
+function failureMessage(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
+}
+/**
+ * Reports a failure to the user.
+ *
+ * The parameter is `unknown` because every caller is a `catch` binding, which `strict` types as
+ * `unknown`; `failureMessage` produces the same string an `Error` argument always did.
+ *
+ * Declared as a function rather than a `const` so it hoists: the timeline and batch controls are
+ * constructed above this line and receive it as their error hook, and a `const` would be in its
+ * temporal dead zone at that point.
+ */
+function reportError(failure: unknown) {
+  const message = failureMessage(failure); status(message); notify(message, 'error', 5000); showDialog('操作未完成', message);
+}
 const notificationTimers = new Set<ReturnType<typeof setTimeout>>();
-function notify(message: string, level = 'success', duration = 2800) {
+/**
+ * Shows a transient notification.
+ *
+ * The message is optional to match `Timeline`'s declared `notify!: (message?: string, level?: string)`
+ * hook — a callback with a required first parameter is not assignable to it. Every call site in this
+ * file passes a message, so the default is never used; it only makes the assignment legal.
+ */
+function notify(message = '', level = 'success', duration = 2800) {
   if (level === 'success' && editorPreferences.successNotifications === false) return;
   const host = element('#notifications'); if (!host) return;
   const item = document.createElement('div'); item.className = `editor-notification ${level}`; item.textContent = message; host.append(item);
   requestAnimationFrame(() => item.classList.add('visible'));
   const timer = setTimeout(() => { item.classList.add('leaving'); setTimeout(() => item.remove(), 260); notificationTimers.delete(timer); }, duration); notificationTimers.add(timer);
 }
-timeline.notify = (message: string, level = 'warning') => notify(message, level);
-const reportError = (error: Error) => { status(error.message); notify(error.message, 'error', 5000); showDialog('操作未完成', error.message); };
+timeline.notify = (message = '', level = 'warning') => notify(message, level);
 const tips = [
   'Tips: 坐标系范围为 [-675,675]x[-450,450]', 'Tips: 速度为10表示每秒移动 1200 像素~', 'Tips: 编辑器的分辨率正比于 1920*1080', 'Tips: 很多金色的组件都是可以被点击的',
   'Tips: 谱面名可不为英文，但标识名只能是一串数字', 'Tips: 添加资源文件时闪退可能是其损坏，常见于直接改后缀名', 'Tips: CTRL+滚轮 可以快速切换线',
@@ -444,60 +599,66 @@ function rotateTip() { const target = element('#tips'); if (!target || editorPre
 setInterval(rotateTip, 10000);
 const offsetSeconds = () => Number(session.chart.META.offset ?? 0) / 1000;
 const chartSeconds = () => audio.time - offsetSeconds();
-const resetEditClock = chart => {
+const resetEditClock = (chart: Chart) => {
   editTimeSeconds = 0;
   editClockTick = performance.now();
 };
-const advanceEditClock = timestamp => {
+const advanceEditClock = (timestamp: number) => {
   const elapsed = Math.max(0, (timestamp - editClockTick) / 1000);
   if (hasDocument && !atHome && !document.hidden) editTimeSeconds += elapsed;
   editClockTick = timestamp;
 };
-const formatEditTime = seconds => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
+const formatEditTime = (seconds: number) => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
 const currentBeat = () => tempo.beat(chartSeconds(), session.line?.bpmfactor ?? 1);
 const playback = new EditorPlayback(audio, hitSounds, () => {
   timeline.origin = currentBeat();
   preview.effectsSince = realtimePreview.effectsSince = chartSeconds();
   invalidate();
 });
-timeline.onDragScroll = seconds => playback.seek(audio.time + seconds);
+timeline.onDragScroll = (seconds: number) => playback.seek(audio.time + seconds);
 const autoSave = new AutoSaveClock(async () => {
   const current = session; const snapshot = { ...current.chart }; delete snapshot.chartTime;
-  await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, [...assets], editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit, { lineIndex: current.lineIndex });
+  await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, new Map(assets), Number(editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit), { lineIndex: current.lineIndex });
   if (current === session) { lastDraftDocument = current.chart; status('自动备份已保存（包含音乐、曲绘与编辑位置）'); notify('自动备份已保存', 'success'); }
-}, error => status(`自动保存失败：${error.message}，请手动保存或导出 PEZ`));
-timeline.onWheel = event => {
+}, failure => status(`自动保存失败：${failureMessage(failure)}，请手动保存或导出 PEZ`));
+timeline.onWheel = (event: WheelEvent) => {
   if (event.ctrlKey) {
     if (event.deltaY) {
       if (lineSwitcher.enabled) { lineSwitcher.step(event.deltaY); lineSwitcher.show(); }
       else switchLine(event.deltaY);
     }
-  } else playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed }, performance.now() / 1000);
+  } else playback.wheel(event, { ...preferences.settings, scrollSpeed: Number(editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed) }, performance.now() / 1000);
 };
-function switchLine(direction) {
+function switchLine(direction: number) {
   const index = stepLine(session.lineIndex, direction, session.chart.judgeLineList?.length ?? 0);
   return selectOverviewLine(index);
 }
-function selectOverviewLine(index) {
-  if (!Number.isInteger(index) || !session.chart.judgeLineList?.[index]) return false;
+function selectOverviewLine(index: number | null) {
+  // `stepLine` returns an integer index, but its declared result is nullable; the added `null` test
+  // is a no-op for every value the original could receive and keeps the index narrowing honest.
+  if (index === null || !Number.isInteger(index) || !session.chart.judgeLineList?.[index]) return false;
   batchControls.cancel(); pasteGesture.cancel(); timeline.cancelPlacement(); session.selectLine(index); return true;
 }
-const previewWheel = event => {
+const previewWheel = (event: WheelEvent) => {
   event.preventDefault();
-  playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed }, performance.now() / 1000);
+  playback.wheel(event, { ...preferences.settings, scrollSpeed: Number(editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed) }, performance.now() / 1000);
 };
 element('.preview-wrap').addEventListener('wheel', previewWheel, { passive: false });
-const pickPreviewLine = (renderer, event) => {
+const pickPreviewLine = (renderer: Preview, event: MouseEvent) => {
   const index = renderer.pick(event.clientX, event.clientY);
   if (index === null) return false;
   timeline.cancelPlacement(); session.selectLine(index); return true;
 };
-element('#preview').addEventListener('click', event => { if (preview.visible) pickPreviewLine(preview, event); });
+element<HTMLCanvasElement>('#preview').addEventListener('click', event => { if (preview.visible) pickPreviewLine(preview, event); });
 timeline.previewPick = () => false;
 const home = new ProjectHome(async id => {
   const project = await readProject(id);
   if (!project) throw new Error('此项目不存在');
-  guardReplace(() => loadCandidate({ chart: project.chart, name: project.chartName, info: project.info, project }, new Map(project.assets)).catch(reportError));
+  // A stored project carries neither provenance field directly — both live inside the stored document,
+  // and `StoredProject` does not declare them — so the two are read through `candidateProvenance`
+  // below, which returns nothing for a record that has neither. `libraryProject` keeps the whole
+  // stored record so the editor can still write back to it.
+  guardReplace(() => loadCandidate({ chart: project.chart, name: project.chartName, info: project.info, project: candidateProvenance(project), libraryProject: project }, new Map(project.assets)).catch(reportError));
 }, reportError, project => {
   if (libraryProject?.id === project.id) {
     const renamed = libraryProject.chart.META.name !== project.chart.META.name;
@@ -508,21 +669,27 @@ const home = new ProjectHome(async id => {
   }
 });
 
-function setHome(visible) {
+function setHome(visible: boolean) {
   atHome = visible;
-  if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element('#mute-current-line')?.classList.remove('active'); }
+  if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element<HTMLButtonElement>('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element<HTMLButtonElement>('#mute-current-line')?.classList.remove('active'); }
   if (visible) { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); }
   element('#document-name').textContent = visible ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
   element('#home').hidden = !visible;
   element('.workspace').hidden = visible;
   element('.transport').hidden = visible;
   element('#resume-editor').hidden = !hasDocument;
-  for (const selector of ['#save', '#export-json', '#package']) element(selector).disabled = !hasDocument;
+  for (const selector of ['#save', '#export-json', '#package']) element<HTMLButtonElement>(selector).disabled = !hasDocument;
   if (visible) { playback.pause(); timeline.cancelPlacement(); home.refresh().catch(reportError); }
   invalidate();
 }
 
-let pendingTimelineMenu = null;
+let pendingTimelineMenu: PendingTimelineMenu | null = null;
+/**
+ * The chart's time markers, filtered to the ones the strip can draw.
+ *
+ * `markers` is an optional user-data field, so it is read as `unknown` and narrowed with
+ * `Array.isArray`; the filter keeps the same truthiness test the original used.
+ */
 function timelineMarkers() {
   return Array.isArray(session.chart?.markers)
     ? session.chart.markers.filter(marker => Number.isFinite(Number(marker?.time)) && String(marker?.name ?? '').trim())
@@ -531,36 +698,40 @@ function timelineMarkers() {
 function renderTimelineMarkers() {
   const root = element('#timeline-markers'); if (!root) return;
   root.replaceChildren();
-  const width = root.clientWidth || element('#scrubber')?.clientWidth || 1;
+  const width = root.clientWidth || element<HTMLInputElement>('#scrubber')?.clientWidth || 1;
   const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : timelineActivity.duration || 1);
   for (const [index, marker] of timelineMarkers().entries()) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'timeline-marker'; button.textContent = String(marker.name).trim();
     const ratio = Math.max(0, Math.min(1, Number(marker.time) / duration));
     button.style.left = `${ratio * width}px`; button.style.width = 'max-content'; button.style.maxWidth = '160px'; button.style.whiteSpace = 'nowrap'; button.title = `${marker.name} · ${Number(marker.time).toFixed(3)} s`;
     button.onclick = () => playback.seek(Number(marker.time) + offsetSeconds());
-    button.oncontextmenu = event => { event.preventDefault(); event.stopPropagation(); openTimelineContextMenu(event, null, index); };
+    button.oncontextmenu = (event: MouseEvent) => { event.preventDefault(); event.stopPropagation(); openTimelineContextMenu(event, null, index); };
     root.append(button);
   }
 }
-function openTimelineContextMenu(event, canvas = null, markerIndex = null) {
+function openTimelineContextMenu(event: MouseEvent, canvas: HTMLCanvasElement | null = null, markerIndex: number | null = null) {
   const menu = element('#timeline-context-menu'); if (!menu) return;
   const point = canvas ? timeline.point(event, canvas) : null;
   pendingTimelineMenu = { time: point ? timeline.timeAt(point.y) : null, markerIndex };
-  element('#timeline-add-marker').hidden = !canvas;
-  element('#timeline-delete-marker').hidden = markerIndex === null;
+  element<HTMLButtonElement>('#timeline-add-marker').hidden = !canvas;
+  element<HTMLButtonElement>('#timeline-delete-marker').hidden = markerIndex === null;
   menu.style.left = `${Math.max(4, Math.min(window.innerWidth - 190, event.clientX))}px`;
   menu.style.top = `${Math.max(4, Math.min(window.innerHeight - 90, event.clientY))}px`;
   menu.hidden = false;
 }
 function closeTimelineContextMenu() { const menu = element('#timeline-context-menu'); if (menu) menu.hidden = true; pendingTimelineMenu = null; }
 function addTimelineMarker() {
-  const pending = pendingTimelineMenu; closeTimelineContextMenu(); if (!pending || !Number.isFinite(pending.time)) return;
-  const content = showDialog('添加时间标记', `将在 ${pending.time.toFixed(3)} 秒处添加标记。`);
+  const pending = pendingTimelineMenu; closeTimelineContextMenu();
+  // `Number.isFinite` rejects `null`, so the binding below is the same value the original used; the
+  // explicit test only records that fact for the two reads that follow.
+  if (!pending || pending.time === null || !Number.isFinite(pending.time)) return;
+  const markerTime = pending.time;
+  const content = showDialog('添加时间标记', `将在 ${markerTime.toFixed(3)} 秒处添加标记。`);
   const input = document.createElement('input'); input.type = 'text'; input.placeholder = '例如：副歌开始'; input.setAttribute('aria-label', '标记名称'); content.append(input);
-  const apply = element('#modal-apply'); apply.hidden = false; apply.onclick = () => {
-    const name = String(input.value ?? '').trim(); if (!name) { element('#modal-error').textContent = '请输入标记名称'; return; }
-    const markers = [...timelineMarkers(), { time: pending.time, name }].sort((left, right) => left.time - right.time);
-    session.commit('添加时间标记', { ...session.chart, markers }); element('#modal').close();
+  const apply = element<HTMLButtonElement>('#modal-apply'); apply.hidden = false; apply.onclick = () => {
+    const name = String(input.value ?? '').trim(); if (!name) { element<HTMLElement>('#modal-error').textContent = '请输入标记名称'; return; }
+    const markers = [...timelineMarkers(), { time: markerTime, name }].sort((left, right) => left.time - right.time);
+    session.commit('添加时间标记', { ...session.chart, markers }); element<HTMLDialogElement>('#modal').close();
   }; input.focus();
 }
 function deleteTimelineMarker() {
@@ -568,46 +739,46 @@ function deleteTimelineMarker() {
   const markers = timelineMarkers().filter((unused, index) => index !== pending.markerIndex);
   session.commit('删除时间标记', { ...session.chart, markers });
 }
-window.addEventListener('pointerdown', event => { const menu = element('#timeline-context-menu'); if (menu && !menu.contains(event.target)) closeTimelineContextMenu(); }, true);
-element('#timeline-add-marker').addEventListener('click', addTimelineMarker);
-element('#timeline-delete-marker').addEventListener('click', deleteTimelineMarker);
+window.addEventListener('pointerdown', event => { const menu = element('#timeline-context-menu'); if (menu && !menu.contains(event.target as Node | null)) closeTimelineContextMenu(); }, true);
+element<HTMLButtonElement>('#timeline-add-marker').addEventListener('click', addTimelineMarker);
+element<HTMLButtonElement>('#timeline-delete-marker').addEventListener('click', deleteTimelineMarker);
 
 function persistEditor() {
   editorPreferences = { ...editorPreferences, scale: timeline.scale, division: timeline.division, gridCount: timeline.gridCount, snapX: timeline.snapX, multiLineWidth: timeline.multiLineWidth || undefined, multiLineEventWidth: timeline.multiLineEventWidth || undefined,
-    realtime: realtimePreview.visible, realtimeAlpha: Number(element('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
+    realtime: realtimePreview.visible, realtimeAlpha: Number(element<HTMLInputElement>('#realtime-alpha').value), volume: audio.volume, hitVolume: hitSounds.volume,
     hitEnabled: hitSounds.enabled, allLines: preview.allLines, toolbarMode: editorPreferences.toolbarMode ?? 'icons' };
-  try { writeEditorPreferences(editorPreferences); } catch (error) { status(`设置保存失败：${error.message}`); }
+  try { writeEditorPreferences(editorPreferences); } catch (failure) { status(`设置保存失败：${failureMessage(failure)}`); }
 }
 
-function activatePane(name) {
+function activatePane(name: string) {
   if (name !== 'multi') multiEdit.hide();
   activePaneName = name;
-  for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
-  for (const button of document.querySelectorAll('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
+  for (const panel of document.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
 }
-for (const button of document.querySelectorAll('[data-pane]')) button.onclick = () => {
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pane]')) button.onclick = () => {
   const pane = button.dataset.pane;
-  if (['notes', 'events'].includes(pane)) session.focus = pane;
-  activatePane(pane);
+  if (pane === 'notes' || pane === 'events') session.focus = pane;
+  activatePane(pane ?? '');
   if (pane === 'lines') linePanel.render();
 };
 function openMultiLinePanel() { activatePane('multi-line'); multiLinePanel.render(); }
-element('#multi-line-tool').addEventListener('click', openMultiLinePanel);
-element('#multi-line-open').addEventListener('click', openMultiLinePanel);
-element('#multi-line-toggle').addEventListener('click', () => {
+element<HTMLButtonElement>('#multi-line-tool').addEventListener('click', openMultiLinePanel);
+element<HTMLButtonElement>('#multi-line-open').addEventListener('click', openMultiLinePanel);
+element<HTMLButtonElement>('#multi-line-toggle').addEventListener('click', () => {
   const enabling = !session.multiLineEnabled;
   session.setMultiLineEnabled(enabling, session.focus === 'events' ? 'events' : 'notes');
   if (enabling) openMultiLinePanel();
 });
-element('#multi-line-prev-add').addEventListener('click', () => session.addPreviousMultiLine());
-element('#multi-line-prev-remove').addEventListener('click', () => session.removeMinimumMultiLine());
-element('#multi-line-next-add').addEventListener('click', () => session.addNextMultiLine());
-element('#multi-line-next-remove').addEventListener('click', () => session.removeMaximumMultiLine());
-element('#multi-line-merge').addEventListener('click', () => session.setMultiLineMerge(!session.multiLineMerge));
-for (const button of document.querySelectorAll('[data-return-chart]')) button.onclick = () => activatePane('chart');
-for (const form of document.querySelectorAll('#properties, #event-properties')) form.addEventListener('submit', event => { event.preventDefault(); document.activeElement?.blur(); });
-for (const button of document.querySelectorAll('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
-function togglePreview(force, stay = false, replay = false) {
+element<HTMLButtonElement>('#multi-line-prev-add').addEventListener('click', () => session.addPreviousMultiLine());
+element<HTMLButtonElement>('#multi-line-prev-remove').addEventListener('click', () => session.removeMinimumMultiLine());
+element<HTMLButtonElement>('#multi-line-next-add').addEventListener('click', () => session.addNextMultiLine());
+element<HTMLButtonElement>('#multi-line-next-remove').addEventListener('click', () => session.removeMaximumMultiLine());
+element<HTMLButtonElement>('#multi-line-merge').addEventListener('click', () => session.setMultiLineMerge(!session.multiLineMerge));
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-return-chart]')) button.onclick = () => activatePane('chart');
+for (const form of document.querySelectorAll<HTMLFormElement>('#properties, #event-properties')) form.addEventListener('submit', event => { event.preventDefault(); (document.activeElement as HTMLElement | null)?.blur(); });
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
+function togglePreview(force?: boolean, stay = false, replay = false) {
   const visible = force ?? !preview.visible;
   if (visible && (!preview.visible || replay)) {
     previewReturnTime = audio.time; timeline.cancelPlacement();
@@ -617,27 +788,39 @@ function togglePreview(force, stay = false, replay = false) {
   if (!visible && preview.visible) playback.seek(stay ? audio.time : previewReturnTime);
   preview.visible = visible;
   element('.preview-wrap').hidden = !preview.visible;
-  element('#view-toggle').classList.toggle('active', preview.visible);
+  element<HTMLButtonElement>('#view-toggle').classList.toggle('active', preview.visible);
   element('#multi-line-labels').hidden = preview.visible;
-  element('#multi-line-scroll').hidden = preview.visible;
+  element<HTMLInputElement>('#multi-line-scroll').hidden = preview.visible;
   element('#preview-title').textContent = session.chart.META.name ?? '';
   timeline.origin = currentBeat();
   invalidate();
 }
 
-function listen(selector, callback) {
-  element(selector).addEventListener('click', async () => {
-    try { await callback(); } catch (error) { reportError(error); }
+/**
+ * Binds a click handler that reports its own failures.
+ *
+ * The callback's return value is `unknown` because several handlers are `listen('#x', () => someFn())`
+ * and that `someFn` returns a boolean or an element; `addEventListener` has always discarded it.
+ */
+function listen(selector: string, callback: () => unknown) {
+  element<HTMLButtonElement>(selector).addEventListener('click', async () => {
+    try { await callback(); } catch (failure) { reportError(failure); }
   });
 }
 
 let lineInfoVisible = false;
-const lineInfoNumber = (value, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '0.00';
-function selectedEventSpeed(type, event) {
+const lineInfoNumber = (value: number, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '0.00';
+/**
+ * The readout for the easing event under the cursor, or `null` for a track with no rate readout.
+ *
+ * `event` is optional because `EventTrack.events` is a `ChartEvent[]` whose `event` field the
+ * timeline may leave unset; the `!event` guard is the original's and stays.
+ */
+function selectedEventSpeed(type: string, event: ChartEvent | undefined) {
   if (!event) return null;
   const duration = tempo.seconds(event.endTime, session.line?.bpmfactor ?? 1) - tempo.seconds(event.startTime, session.line?.bpmfactor ?? 1);
   if (!Number.isFinite(duration) || Math.abs(duration) < 0.000001 || !Number.isFinite(event.start) || !Number.isFinite(event.end)) return null;
-  const rate = (event.end - event.start) / duration;
+  const rate = (Number(event.end) - Number(event.start)) / duration;
   if (type === 'moveXEvents') return `X ${lineInfoNumber(rate / 120)}`;
   if (type === 'moveYEvents') return `Y ${lineInfoNumber(rate / 120)}`;
   if (type === 'rotateEvents') return `R ${lineInfoNumber(rate)}`;
@@ -652,7 +835,11 @@ function updateLineInfo() {
   const seconds = chartSeconds();
   const state = lineInfoScene.sampler(seconds)(session.lineIndex) ?? { x: 0, y: 0, rotation: 0, alpha: 255 };
   const runtime = lineInfoScene.lines[session.lineIndex];
-  const scrollSpeed = runtime?.speeds?.reduce((sum, track) => sum + (track.value(seconds) || 0), 0) ?? 0;
+  // A speed track's value is a number at runtime; `EventTrack.value` is typed `TrackValue` because the
+  // same method serves the colour and text tracks. `Number(...)` is how `scene.ts` reads it back
+  // (`this.tracks[type].reduce((sum, track) => sum + Number(track.value(seconds)), 0)`), and `|| 0`
+  // keeps the original's treatment of a non-finite read.
+  const scrollSpeed = runtime?.speeds?.reduce((sum, track) => sum + (Number(track.value(seconds)) || 0), 0) ?? 0;
   const line = session.line;
   const lineText = `Pos: (${lineInfoNumber(state.x)},${lineInfoNumber(state.y)})  Dir: ${lineInfoNumber(state.rotation)}  Alpha: ${lineInfoNumber(state.alpha, 0)}  Speed: ${lineInfoNumber(scrollSpeed)}`;
   const dt = 1 / 120;
@@ -661,23 +848,34 @@ function updateLineInfo() {
   const xSpeed = (after.x - before.x) / (2 * dt) / 120;
   const ySpeed = (after.y - before.y) / (2 * dt) / 120;
   const rotateSpeed = (after.rotation - before.rotation) / (2 * dt);
-  const activeSpeeds = [];
-  for (const [type, label] of [['moveXEvents', 'X'], ['moveYEvents', 'Y'], ['rotateEvents', 'R'], ['speedEvents', 'Speed']]) {
+  const activeSpeeds: string[] = [];
+  /**
+   * The readouts the original loop walked.
+   *
+   * The original tuple also named `'speedEvents'`, but `LineTracks` has no such member — the speed
+   * track lives in `runtime.speeds` (`SpeedIntegral[]`), not in `runtime.tracks` — so that fourth
+   * pass always iterated `undefined` and contributed nothing. Only the three tracks below can push a
+   * readout, which is what this list states; adding the `speeds` pass would introduce entries the
+   * original never produced.
+   */
+  const rateTracks: [keyof LineTracks, string][] = [['moveXEvents', 'X'], ['moveYEvents', 'Y'], ['rotateEvents', 'R']];
+  for (const [type] of rateTracks) {
     for (const track of runtime?.tracks?.[type] ?? []) {
       for (const entry of track.events ?? []) {
         if (seconds < entry.start || seconds > entry.end) continue;
         const rate = selectedEventSpeed(type, entry.event);
         if (rate) activeSpeeds.push(rate);
-        else if (type === 'speedEvents') activeSpeeds.push(`${label} ${lineInfoNumber(track.value(seconds))}`);
       }
     }
   }
-  const selectedSpeeds = [];
+  const selectedSpeeds: string[] = [];
   for (const key of session.eventSelection ?? []) {
     const separator = key.lastIndexOf(':');
     const type = separator < 0 ? key : key.slice(0, separator);
     const index = Number(key.slice(separator + 1));
-    const event = eventList(session, type)[index];
+    // The key's track segment is a `AnyEventType` by construction (`eventKey` builds it), so the
+    // narrowing test records that rather than changing which events are looked up.
+    const event = isEventType(type) ? eventList(session, type)[index] : undefined;
     const speed = selectedEventSpeed(type, event);
     if (speed) selectedSpeeds.push(speed);
   }
@@ -696,14 +894,28 @@ function renderSession() {
   if (tempoEntries !== session.chart.BPMList) { tempoEntries = session.chart.BPMList; tempo = new TempoMap(tempoEntries); }
   timeline.tempo = tempo;
   session.tempo = tempo; session.division = timeline.division;
-  session.cutDensity = Number(element('#event-cut-density').value);
+  session.cutDensity = Number(element<HTMLInputElement>('#event-cut-density').value);
   updateLineInfo();
-  session.eventWheelSteps = Object.fromEntries(['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents', 'scaleXEvents', 'scaleYEvents'].flatMap((key, index) => Number.isFinite(preferences.originalSettings.scrollValueIncrement?.[index]) ? [[key, preferences.originalSettings.scrollValueIncrement[index]]] : []));
+  // `scrollValueIncrement` is a key of the raw legacy `Settings.json`, which `MigratedPreferences`
+  // deliberately keeps loosely typed (`Record<string, unknown>`), so the array is read through an
+  // `Array.isArray` check. The guard only admits a value `Number.isFinite` would accept anyway, and a
+  // non-array falls through to the empty entries the original's index expression also produced.
+  const scrollIncrements: unknown = preferences.originalSettings.scrollValueIncrement;
+  const increments = Array.isArray(scrollIncrements) ? scrollIncrements : [];
+  session.eventWheelSteps = Object.fromEntries(['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents', 'scaleXEvents', 'scaleYEvents'].flatMap((key, index) => Number.isFinite(increments[index]) ? [[key, increments[index] as number]] : []));
   timeline.origin = currentBeat();
   element('#document-name').textContent = atHome ? '谱面库' : `${session.history.dirty ? '● ' : ''}${session.chart.META.name ?? chartName}`;
   renderTimelineMarkers();
   element('#note-count').textContent = `${session.notes.length} notes`;
-  const countEvents = line => [...(line.eventLayers ?? []), line.extended ?? {}].reduce((total, layer) => total + Object.entries(layer ?? {}).filter(([type, events]) => type !== 'paintEvents' && Array.isArray(events)).reduce((count, [, events]) => count + events.length, 0), 0) + shaderEvents(session.chart, session.chart.judgeLineList?.indexOf(line) ?? -1).length;
+  /**
+   * Counts the events a line holds across its layers and its `extended` bag.
+   *
+   * `EventLayer` values are `ChartEvent[] | undefined`, so the `Array.isArray` filter is the same
+   * test the original wrote; the `events.length` read that follows is safe because the filter has
+   * already established the array. The parameter is a partial `JudgeLine` because one call site
+   * passes `session.line ?? {}`.
+   */
+  const countEvents = (line: Partial<JudgeLine>) => [...(line.eventLayers ?? []), line.extended ?? {}].reduce((total, layer) => total + Object.entries(layer ?? {}).filter(([type, events]) => type !== 'paintEvents' && Array.isArray(events)).reduce((count, [, events]) => count + (events as ChartEvent[]).length, 0), 0) + shaderEvents(session.chart, session.chart.judgeLineList?.indexOf(line as JudgeLine) ?? -1).length;
   const totalLines = session.chart.judgeLineList?.length ?? 0;
   const totalNotes = (session.chart.judgeLineList ?? []).reduce((count, line) => count + (line.notes?.length ?? 0), 0);
   const totalEvents = (session.chart.judgeLineList ?? []).reduce((count, line) => count + countEvents(line), 0);
@@ -715,28 +927,28 @@ function renderSession() {
     description.textContent = value;
     return [term, description];
   }));
-  if (!session.liveBeatEdit) element('#offset').value = session.chart.META.offset ?? 0;
+  if (!session.liveBeatEdit) element<HTMLInputElement>('#offset').value = String(session.chart.META.offset ?? 0);
   element('#selection-info').textContent = session.focus === 'events' ? `${session.eventSelection.size} 个事件已选` : `${session.selection.size} 个音符已选`;
-  element('#undo').disabled = !session.history.undoStack.length;
-  element('#redo').disabled = !session.history.redoStack.length;
-  element('#batch-run').disabled = !session.selection.size;
-  element('#line-select').replaceChildren();
+  element<HTMLButtonElement>('#undo').disabled = !session.history.undoStack.length;
+  element<HTMLButtonElement>('#redo').disabled = !session.history.redoStack.length;
+  element<HTMLButtonElement>('#batch-run').disabled = !session.selection.size;
+  element<HTMLSelectElement>('#line-select').replaceChildren();
   (session.chart.judgeLineList ?? []).forEach((line, index) => {
-    const option = document.createElement('option'); option.value = index; option.textContent = lineDisplayLabel(session.chart, index); element('#line-select').append(option);
+    const option = document.createElement('option'); option.value = String(index); option.textContent = lineDisplayLabel(session.chart, index); element<HTMLSelectElement>('#line-select').append(option);
   });
-  element('#line-select').value = session.lineIndex;
-  element('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
-  element('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
-  element('#notes-only').disabled = session.multiLineActive;
-  element('#multi-line-count').textContent = session.multiLineActive ? session.multiLineIndices.length : 0;
-  element('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
-  element('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
+  element<HTMLSelectElement>('#line-select').value = String(session.lineIndex);
+  element<HTMLButtonElement>('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
+  element<HTMLButtonElement>('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
+  element<HTMLButtonElement>('#notes-only').disabled = session.multiLineActive;
+  element('#multi-line-count').textContent = String(session.multiLineActive ? session.multiLineIndices.length : 0);
+  element<HTMLButtonElement>('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
+  element<HTMLButtonElement>('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
   const hasLines = session.multiLineActive && session.multiLineIndices.length;
-  element('#multi-line-prev-add').disabled = !hasLines || session.multiLineIndices.length >= session.chart.judgeLineList.length;
-  element('#multi-line-next-add').disabled = !hasLines || session.multiLineIndices.length >= session.chart.judgeLineList.length;
-  element('#multi-line-prev-remove').disabled = !hasLines;
-  element('#multi-line-next-remove').disabled = !hasLines;
-  element('#line-next').disabled = element('#line-previous').disabled = session.chart.judgeLineList.length < 2;
+  element<HTMLButtonElement>('#multi-line-prev-add').disabled = !hasLines || session.multiLineIndices.length >= session.chart.judgeLineList.length;
+  element<HTMLButtonElement>('#multi-line-next-add').disabled = !hasLines || session.multiLineIndices.length >= session.chart.judgeLineList.length;
+  element<HTMLButtonElement>('#multi-line-prev-remove').disabled = !hasLines;
+  element<HTMLButtonElement>('#multi-line-next-remove').disabled = !hasLines;
+  element<HTMLButtonElement>('#line-next').disabled = element<HTMLButtonElement>('#line-previous').disabled = session.chart.judgeLineList.length < 2;
   const lineGroup = element('#line-group-label');
   if (lineGroup) { const line = session.line; lineGroup.textContent = line && !isDefaultLineGroup(session.chart, line) ? lineGroupName(session.chart, line) : ''; lineGroup.title = lineGroup.textContent ? `当前判定线分组：${lineGroup.textContent}` : ''; }
   if (activePaneName === 'lines') linePanel.render();
@@ -760,7 +972,10 @@ function renderSession() {
   if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify);
   decorateBeatInputs();
   if (session.eventSelection.size) {
-    timeline.eventPlacementType = session.eventSelection.values().next().value.split(':')[0];
+    // `size` guarantees the iterator yields a key, which is what the original relied on; the binding
+    // names that same first key so the `split` below reads a string rather than `string | undefined`.
+    const firstKey = session.eventSelection.values().next().value;
+    if (firstKey !== undefined) timeline.eventPlacementType = firstKey.split(':')[0];
   }
   const multiEventSignature = [...(session.multiEventSelection ?? new Map())].map(([line, values]) => `${line}:${[...values].sort().join(',')}`).sort().join('|');
   const multiNoteSignature = [...(session.multiLineSelection ?? new Map())].map(([line, values]) => `${line}:${[...values].sort((left, right) => left - right).join(',')}`).sort().join('|');
@@ -788,11 +1003,11 @@ function renderSession() {
 
 session.addEventListener('change', renderSession);
 
-function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
+function replaceChart(chart: Chart, name: string, nextAssets: Map<string, Uint8Array> = new Map(), nextFolders: Iterable<string> = []) {
   assertChart(chart);
   lineSwitcher.reset();
   playback.pause(); audio.clear();
-  hitSounds.stop(); hitSounds.onlyCurrentLine = false; element('#mute-current-line').setAttribute('aria-pressed', 'false'); element('#mute-current-line').classList.remove('active'); images.clear(); libraryProject = null;
+  hitSounds.stop(); hitSounds.onlyCurrentLine = false; element<HTMLButtonElement>('#mute-current-line').setAttribute('aria-pressed', 'false'); element<HTMLButtonElement>('#mute-current-line').classList.remove('active'); images.clear(); libraryProject = null;
   session.removeEventListener('change', renderSession);
   session = new EditorSession(chart);
   clipboardHistory.attach(session);
@@ -803,7 +1018,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   recoveryId = crypto.randomUUID();
   lastDraftDocument = undefined;
   autoSave.reset(performance.now());
-  heldPreview = null; curveStart = null; curveEnd = null; curveAnchorMode = null; curveEditorOpen = false; loop = null; element('#loop-enabled').checked = false;
+  heldPreview = null; curveStart = null; curveEnd = null; curveAnchorMode = null; curveEditorOpen = false; loop = null; element<HTMLInputElement>('#loop-enabled').checked = false;
   assets = nextAssets;
   assetFolders = new Set(nextFolders ?? []);
   assetDirty = false;
@@ -814,50 +1029,59 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   timeline.origin = 0;
   timeline.layer = 0;
   timeline.cancelPlacement();
-  preview.visible = false; element('.preview-wrap').hidden = true; element('#view-toggle').classList.remove('active');
+  preview.visible = false; element('.preview-wrap').hidden = true; element<HTMLButtonElement>('#view-toggle').classList.remove('active');
   element('#preview-title').textContent = chart.META.name ?? '';
   element('#music-name').textContent = '无音乐 · 时钟预览';
-  element('#scrubber').max = 600;
+  element<HTMLInputElement>('#scrubber').max = String(600);
   renderSession();
   hasDocument = true; setHome(false);
   status(`已打开 ${name}`);
 }
 
-function guardReplace(action) {
+function guardReplace(action: () => void) {
   if (session.history.dirty || assetDirty) confirmAction('切换谱面？', action);
   else action();
 }
 
-async function loadCandidate(candidate, nextAssets) {
+async function loadCandidate(candidate: LoadCandidate, nextAssets: Map<string, Uint8Array>) {
+  // The two provenance fields live inside the stored document, so they are read through the narrow
+  // view rather than off `StoredProject` itself.
+  const provenance: CandidateProvenance = candidate.project ?? {};
   attachExternalEffects([candidate], nextAssets);
-  replaceChart(candidate.chart, candidate.name, nextAssets, candidate.project?.assetFolders ?? []);
-  libraryProject = candidate.project ?? null;
+  replaceChart(candidate.chart, candidate.name, nextAssets, provenance.assetFolders ?? []);
+  libraryProject = candidate.libraryProject ?? null;
   images.load(candidate.chart, assets, chartName, candidate.info);
   const references = resourceReferences(candidate.chart, assets, chartName, candidate.info);
   const bytes = assetBytes(assets, references.song, chartName);
   if (bytes) await loadMusic(bytes, references.song, false);
   else if (references.song) status(`谱面已打开，未找到音乐：${references.song}，请手动选择音乐`);
-  if (session.chart === candidate.chart && candidate.project?.viewState) {
-    const view = candidate.project.viewState;
-    if (Number.isInteger(view.lineIndex) && session.chart.judgeLineList?.[view.lineIndex]) session.selectLine(view.lineIndex);
+  if (session.chart === candidate.chart && provenance.viewState) {
+    const lineIndex = provenance.viewState.lineIndex;
+    // `Number.isInteger` already rejects `undefined`; the explicit test records that for the index
+    // expressions below and is a no-op for every value the original could reach.
+    if (lineIndex !== undefined && Number.isInteger(lineIndex) && session.chart.judgeLineList?.[lineIndex]) session.selectLine(lineIndex);
   }
 }
 
-async function loadMusic(bytes, name, updateMetadata = true) {
+async function loadMusic(bytes: Uint8Array, name: string, updateMetadata = true) {
   const chartPosition = chartSeconds();
   playback.pause();
   const loadingSession = session;
-  const loaded = await audio.load(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), name);
+  // `Uint8Array.buffer` is typed `ArrayBufferLike`, and `load` takes the concrete `ArrayBuffer` it
+  // passes to `decodeAudioData`. The bytes are always backed by a plain ArrayBuffer here — `openFiles`
+  // and the file readers below build them with `new Uint8Array(await file.arrayBuffer())`.
+  const buffer = bytes.buffer as ArrayBuffer;
+  const loaded = await audio.load(buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), name);
   if (!loaded || session !== loadingSession) return;
   assets.set(name, bytes);
   element('#music-name').textContent = name;
-  element('#scrubber').max = audio.duration;
+  element<HTMLInputElement>('#scrubber').max = String(audio.duration);
   renderTimelineMarkers();
   if (updateMetadata) session.commit('选择音乐', { ...session.chart, META: { ...session.chart.META, song: name } });
   playback.seek(chartPosition + offsetSeconds());
 }
 
-function seekBeat(value, pause = true) {
+function seekBeat(value: number, pause = true) {
   playback.seek(tempo.seconds(value, session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
   invalidate();
 }
@@ -888,13 +1112,13 @@ async function save(packageMode = false, exportOnly = false) {
   status(packageMode ? '已发起 PEZ 下载；包含当前载入的附属资源' : '已发起 JSON 下载；音乐和图片请另行保留');
 }
 
-function validateCommit(label, next) { assertChart(next); session.commit(label, next); }
+function validateCommit(label: string, next: Chart) { assertChart(next); session.commit(label, next); }
 
-function editEvent(type, index, beat = currentBeat()) {
+function editEvent(type: AnyEventType, index: number | null, beat: number = currentBeat()) {
   if (!session.line) { status('请先添加判定线'); return; }
   timeline.eventPlacementType = type;
-  timeline.extended = !EVENT_TYPES.includes(type);
-  timeline.indexedLayer = null;
+  timeline.extended = !isBaseEventType(type);
+  timeline.indexedLayer = undefined;
   session.focus = 'events'; session.eventLayer = timeline.layer; session.selection.clear();
   activatePane('events');
   if (index !== null) { session.eventSelection = new Set([eventKey(type, index)]); session.notify(); return; }
@@ -907,49 +1131,56 @@ listen('#home-new', () => element('#new').click());
 listen('#home-open', () => element('#open').click());
 listen('#home-migrate', () => element('#migrate').click());
 listen('#resume-editor', () => setHome(false));
-listen('#open', () => { element('#file-input').click(); });
-element('#file-input').addEventListener('change', async event => {
+listen('#open', () => { element<HTMLInputElement>('#file-input').click(); });
+element<HTMLInputElement>('#file-input').addEventListener('change', async event => {
+  // The listener is bound to `#file-input`, so the target is that input; the binding keeps the
+  // original's unguarded `.files` / `.value` reads without adding a branch.
+  const input = event.target as HTMLInputElement;
   try {
-    const loaded = await openFiles(event.target.files);
+    // `.files` is null only when the picker was cancelled, in which case `openFiles` reports
+    // nothing to load anyway; `?? []` therefore leaves the outcome identical.
+    const loaded = await openFiles(input.files ?? []);
     if (!loaded) return;
     const proceed = () => {
       if (loaded.candidates.length === 1) loadCandidate(loaded.candidates[0], loaded.assets).catch(reportError);
       else choose('选择谱面', '包中有多份 RPE 谱面，其他文件会随 PEZ 导出保留。', loaded.candidates, candidate => `${candidate.name} · ${candidate.chart.META.name ?? ''}`, candidate => loadCandidate(candidate, loaded.assets));
     };
     guardReplace(proceed);
-  } catch (error) { reportError(error); }
-  finally { event.target.value = ''; }
+  } catch (failure) { reportError(failure); }
+  finally { input.value = ''; }
 });
 listen('#save', () => save());
 listen('#export-json', () => save(false, true));
 listen('#package', () => save(true));
 listen('#view-toggle', () => togglePreview());
 listen('#close-preview', () => togglePreview(false, true));
-listen('#background', () => element('#background-input').click());
-element('#background-input').addEventListener('change', async event => {
+listen('#background', () => element<HTMLInputElement>('#background-input').click());
+element<HTMLInputElement>('#background-input').addEventListener('change', async event => {
+  const input = event.target as HTMLInputElement;
   try {
-    const file = event.target.files[0]; if (!file) return;
+    const candidate = input.files?.[0]; if (!candidate) return;
     const loadingSession = session;
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    const bytes = new Uint8Array(await candidate.arrayBuffer());
     if (session !== loadingSession) return;
-    assets.set(file.name, bytes);
-    session.commit('选择封面', { ...session.chart, META: { ...session.chart.META, background: file.name } });
+    assets.set(candidate.name, bytes);
+    session.commit('选择封面', { ...session.chart, META: { ...session.chart.META, background: candidate.name } });
     await images.load(session.chart, assets, chartName);
-  } catch (error) { reportError(error); }
-  finally { event.target.value = ''; }
+  } catch (failure) { reportError(failure); }
+  finally { input.value = ''; }
 });
-listen('#music', () => element('#music-input').click());
-element('#music-input').addEventListener('change', async event => {
+listen('#music', () => element<HTMLInputElement>('#music-input').click());
+element<HTMLInputElement>('#music-input').addEventListener('change', async event => {
+  const input = event.target as HTMLInputElement;
   try {
     const loadingSession = session;
-    const file = event.target.files[0];
-    if (file) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      if (session === loadingSession) await loadMusic(bytes, file.name);
+    const candidate = input.files?.[0];
+    if (candidate) {
+      const bytes = new Uint8Array(await candidate.arrayBuffer());
+      if (session === loadingSession) await loadMusic(bytes, candidate.name);
     }
   }
-  catch (error) { reportError(error); }
-  finally { event.target.value = ''; }
+  catch (failure) { reportError(failure); }
+  finally { input.value = ''; }
 });
 listen('#recover', async () => {
   const drafts = await listDrafts(atHome ? null : (libraryProject?.id ?? recoveryId));
@@ -959,64 +1190,83 @@ listen('#recover', async () => {
       try {
         const draft = await readDraft(entry.id);
         if (!draft) throw new Error('此备份已被轮替，请重新打开备份列表');
-        await loadCandidate({ chart: draft.chart, name: draft.name, project: { viewState: draft.viewState } }, new Map(draft.assets ?? []));
-        libraryProject = null; session.history.savedDocument = null; renderSession();
+        // A recovered draft has no stored project; the provenance it carries is read through the same
+        // view as a library record, so a draft with no `viewState` yields `null` and the loader's
+        // existing `?? {}` fallback applies, exactly as before.
+        await loadCandidate({ chart: draft.chart, name: draft.name, project: candidateProvenance(draft) }, new Map(draft.assets ?? []));
+        // A recovered draft has no stored counterpart, so the session must read as modified. The
+        // original assigned `null` to break `History.dirty`'s identity check; that check compares the
+        // two charts by reference, so recording the pre-load chart as "saved" leaves `dirty` true
+        // exactly as before — `draft.chart` is the object the pre-load session held, and the load
+        // built a new session whose document is a different object.
+        libraryProject = null; session.history.markSaved(draft.chart); renderSession();
       } catch (error) { reportError(error); }
     }); });
 });
 listen('#play', togglePlayback);
 listen('#rewind', () => seekBeat(0));
-listen('#seek', () => seekBeat(beatValue(parseBeat(element('#seek-beat').value))));
-element('#scrubber').addEventListener('input', event => playback.seek(Number(event.target.value)));
-element('#rate').addEventListener('change', event => audio.setRate(Number(event.target.value)));
-element('#offset').addEventListener('change', event => {
-  const value = Number(event.target.value);
-  if (!Number.isFinite(value)) { event.target.value = session.chart.META.offset ?? 0; return; }
+listen('#seek', () => seekBeat(beatValue(parseBeat(element<HTMLInputElement>('#seek-beat').value))));
+element<HTMLInputElement>('#scrubber').addEventListener('input', (event: Event) => playback.seek(Number((event.target as HTMLInputElement).value)));
+element<HTMLInputElement>('#rate').addEventListener('change', (event: Event) => audio.setRate(Number((event.target as HTMLInputElement).value)));
+element<HTMLInputElement>('#offset').addEventListener('change', event => {
+  const input = event.target as HTMLInputElement;
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) { input.value = String(session.chart.META.offset ?? 0); return; }
   const chartPosition = chartSeconds();
   session.commit('修改谱面延迟', { ...session.chart, META: { ...session.chart.META, offset: value } });
   playback.seek(chartPosition + value / 1000);
 });
-function nudgeBeatInput(input, direction) {
+function nudgeBeatInput(input: HTMLInputElement, direction: number) {
   try {
     const current = beatValue(parseBeat(input.value || '0'));
     const next = Math.max(0, current + direction / Math.max(1, timeline.division));
     input.value = formatBeat(fromNumber(next));
     input.dispatchEvent(new Event('change', { bubbles: true }));
-  } catch (error) { reportError(error); }
+  } catch (failure) { reportError(failure); }
 }
 function decorateBeatInputs() {
-  for (const input of document.querySelectorAll('#properties input[aria-label$="拍"], #event-properties input[aria-label$="拍"]')) {
+  for (const input of document.querySelectorAll<HTMLInputElement>('#properties input[aria-label$="拍"], #event-properties input[aria-label$="拍"]')) {
     if (input.dataset.beatDecorated) continue;
     input.dataset.beatDecorated = 'true';
     const holder = input.parentElement;
     const wrapper = document.createElement('span'); wrapper.className = 'beat-input-wrap';
     const nudge = document.createElement('span'); nudge.className = 'beat-nudge';
-    for (const [direction, symbol] of [[1, '▴'], [-1, '▾']]) {
+    const nudges: [number, string][] = [[1, '▴'], [-1, '▾']];
+    for (const [direction, symbol] of nudges) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = symbol; button.title = direction < 0 ? '减少一格' : '增加一格';
       button.dataset.beatNudge = String(direction); button.onclick = () => nudgeBeatInput(input, direction); nudge.append(button);
     }
     input.replaceWith(wrapper); wrapper.append(input, nudge);
-    input.addEventListener('wheel', event => { event.preventDefault(); nudgeBeatInput(input, event.deltaY < 0 ? 1 : -1); }, { passive: false });
+    input.addEventListener('wheel', (event: WheelEvent) => { event.preventDefault(); nudgeBeatInput(input, event.deltaY < 0 ? 1 : -1); }, { passive: false });
   }
 }
-element('#chart-info-toggle').addEventListener('click', event => {
+element<HTMLButtonElement>('#chart-info-toggle').addEventListener('click', event => {
   const info = element('#chart-info'); info.hidden = !info.hidden;
-  event.currentTarget.setAttribute('aria-expanded', String(!info.hidden));
+  // The listener is bound to `#chart-info-toggle`, so the currentTarget is that button.
+  (event.currentTarget as HTMLButtonElement).setAttribute('aria-expanded', String(!info.hidden));
 });
-element('#volume').addEventListener('input', event => { audio.setVolume(Number(event.target.value)); persistEditor(); });
-element('#preview-mode').addEventListener('change', event => { preview.allLines = realtimePreview.allLines = event.target.value === 'all'; persistEditor(); invalidate(); });
-for (const [selector, property, minimum, maximum, integer] of [['#division', 'division', 1, 100, true], ['#grid-count', 'gridCount', 2, 100, false], ['#y-scale', 'scale', 20, 2000, false]]) {
-  element(selector).addEventListener('change', event => {
-    const value = Number(event.target.value);
+element<HTMLInputElement>('#volume').addEventListener('input', (event: Event) => { audio.setVolume(Number((event.target as HTMLInputElement).value)); persistEditor(); });
+element<HTMLSelectElement>('#preview-mode').addEventListener('change', (event: Event) => { preview.allLines = realtimePreview.allLines = (event.target as HTMLSelectElement).value === 'all'; persistEditor(); invalidate(); });
+/**
+ * The three inputs whose value is written straight onto a numeric `Timeline` field.
+ *
+ * The tuple is typed because `property` indexes `Timeline`; the original array literal widened it to
+ * `string`, which only worked because the editor was untyped.
+ */
+const numericTimelineFields: [string, 'division' | 'gridCount' | 'scale', number, number, boolean][] = [['#division', 'division', 1, 100, true], ['#grid-count', 'gridCount', 2, 100, false], ['#y-scale', 'scale', 20, 2000, false]];
+for (const [selector, property, minimum, maximum, integer] of numericTimelineFields) {
+  element<HTMLInputElement>(selector).addEventListener('change', event => {
+    const input = event.target as HTMLInputElement;
+    const value = Number(input.value);
     if (Number.isFinite(value)) timeline[property] = Math.max(minimum, Math.min(maximum, integer ? Math.round(value) : value));
-    event.target.value = timeline[property]; session.division = timeline.division; updateCurvePanel(); persistEditor(); invalidate();
-    if (property === 'scale') element('#y-scale-slider').value = timeline.scale;
+    input.value = String(timeline[property]); session.division = timeline.division; updateCurvePanel(); persistEditor(); invalidate();
+    if (property === 'scale') element<HTMLInputElement>('#y-scale-slider').value = String(timeline.scale);
   });
 }
-element('#y-scale-slider').addEventListener('input', event => {
-  timeline.scale = Number(event.target.value); element('#y-scale').value = timeline.scale; persistEditor(); invalidate();
+element<HTMLInputElement>('#y-scale-slider').addEventListener('input', event => {
+  timeline.scale = Number((event.target as HTMLInputElement).value); element<HTMLInputElement>('#y-scale').value = String(timeline.scale); persistEditor(); invalidate();
 });
-element('#snap-x').addEventListener('change', event => { timeline.snapX = event.target.checked; persistEditor(); invalidate(); });
+element<HTMLInputElement>('#snap-x').addEventListener('change', (event: Event) => { timeline.snapX = (event.target as HTMLInputElement).checked; persistEditor(); invalidate(); });
 function updateLayerButtons() {
   const container = element('#layer');
   if (!container.children.length) for (let index = 0; index <= MAX_BASE_LAYERS; index++) {
@@ -1024,14 +1274,17 @@ function updateLayerButtons() {
     button.onclick = () => {
       timeline.cancelPlacement(); timeline.extended = index === MAX_BASE_LAYERS;
       if (!timeline.extended) timeline.layer = index;
-      timeline.indexedLayer = null; session.eventLayer = timeline.layer; session.eventSelection.clear();
+      timeline.indexedLayer = undefined; session.eventLayer = timeline.layer; session.eventSelection.clear();
       timeline.eventPlacementType = timeline.eventTypes[0]; session.notify();
     };
     container.append(button);
   }
   const bottom = timeline.beatAt(timeline.notesCanvas.clientHeight); const top = timeline.beatAt(0);
   timelineActivity.compile(session.chart, tempo);
-  [...container.children].forEach((button, index) => {
+  // The children are the buttons the loop above appended, so the `HTMLButtonElement` view is what
+  // the original untyped code already assumed; the widening is recorded per element, not copied.
+  [...container.children].forEach((child, index) => {
+    const button = child as HTMLButtonElement;
     const state = timelineActivity.layerState(session.lineIndex, index, index === MAX_BASE_LAYERS, bottom, top, timeline.eventBeatAt(timeline.notesCanvas.clientHeight, 'paintEvents'), timeline.eventBeatAt(0, 'paintEvents'));
     button.dataset.state = state;
     button.classList.toggle('active', timeline.extended ? index === MAX_BASE_LAYERS : index === timeline.layer);
@@ -1039,35 +1292,35 @@ function updateLayerButtons() {
     button.title = `${index === MAX_BASE_LAYERS ? '特殊层' : `第 ${index} 层`} · ${state === 'empty' ? '空层' : state === 'visible' ? '当前视野内有事件' : '事件在当前视野外'}`;
   });
 }
-element('#line-select').addEventListener('change', event => { timeline.cancelPlacement(); session.selectLine(Number(event.target.value)); });
+element<HTMLSelectElement>('#line-select').addEventListener('change', (event: Event) => { timeline.cancelPlacement(); session.selectLine(Number((event.target as HTMLSelectElement).value)); });
 listen('#line-next', () => switchLine(1));
 listen('#line-previous', () => switchLine(-1));
-element('#hit-volume').addEventListener('input', event => { hitSounds.setVolume(Number(event.target.value)); persistEditor(); });
-element('#hit-enabled').addEventListener('change', event => { hitSounds.enabled = event.target.checked; hitSounds.stop(); persistEditor(); });
-element('#mute-current-line').addEventListener('click', () => {
+element<HTMLInputElement>('#hit-volume').addEventListener('input', (event: Event) => { hitSounds.setVolume(Number((event.target as HTMLInputElement).value)); persistEditor(); });
+element<HTMLInputElement>('#hit-enabled').addEventListener('change', (event: Event) => { hitSounds.enabled = (event.target as HTMLInputElement).checked; hitSounds.stop(); persistEditor(); });
+element<HTMLButtonElement>('#mute-current-line').addEventListener('click', () => {
   hitSounds.onlyCurrentLine = !hitSounds.onlyCurrentLine;
-  const button = element('#mute-current-line');
+  const button = element<HTMLButtonElement>('#mute-current-line');
   button.setAttribute('aria-pressed', String(hitSounds.onlyCurrentLine));
   button.classList.toggle('active', hitSounds.onlyCurrentLine);
   hitSounds.stop(); invalidate();
 });
-element('#realtime-enabled').addEventListener('change', event => { realtimePreview.visible = event.target.checked; element('#realtime-preview').hidden = !event.target.checked; persistEditor(); invalidate(); });
-element('#realtime-alpha').addEventListener('input', event => { realtimePreview.opacity = Number(event.target.value); persistEditor(); invalidate(); });
+element<HTMLInputElement>('#realtime-enabled').addEventListener('change', (event: Event) => { const checked = (event.target as HTMLInputElement).checked; realtimePreview.visible = checked; element<HTMLCanvasElement>('#realtime-preview').hidden = !checked; persistEditor(); invalidate(); });
+element<HTMLInputElement>('#realtime-alpha').addEventListener('input', (event: Event) => { realtimePreview.opacity = Number((event.target as HTMLInputElement).value); persistEditor(); invalidate(); });
 for (const selector of ['#loop-start', '#loop-end', '#loop-enabled']) element(selector).addEventListener('change', () => {
   try {
-    const start = beatValue(parseBeat(element('#loop-start').value));
-    const end = beatValue(parseBeat(element('#loop-end').value));
+    const start = beatValue(parseBeat(element<HTMLInputElement>('#loop-start').value));
+    const end = beatValue(parseBeat(element<HTMLInputElement>('#loop-end').value));
     if (start < 0 || end <= start) throw new Error('循环止拍必须大于起拍，起拍不能为负');
-    loop = element('#loop-enabled').checked ? { start, end } : null;
-  } catch (error) { loop = null; element('#loop-enabled').checked = false; reportError(error); }
+    loop = element<HTMLInputElement>('#loop-enabled').checked ? { start, end } : null;
+  } catch (error) { loop = null; element<HTMLInputElement>('#loop-enabled').checked = false; reportError(error); }
 });
-for (const button of document.querySelectorAll('[data-tool]')) button.onclick = () => {
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-tool]')) button.onclick = () => {
   timeline.cancelPlacement();
   timeline.tool = Number(button.dataset.tool);
-  for (const item of document.querySelectorAll('[data-tool]')) item.classList.toggle('active', item === button);
+  for (const item of document.querySelectorAll<HTMLButtonElement>('[data-tool]')) item.classList.toggle('active', item === button);
   invalidate();
 };
-function travel(direction, silent = false) {
+function travel(direction: 'undo' | 'redo', silent = false) {
   timeline.cancelPlacement();
   const stack = direction === 'undo' ? session.history.undoStack : session.history.redoStack;
   const command = stack.at(-1);
@@ -1092,28 +1345,30 @@ function resetCamera(resetPreview = false) {
   if (resetPreview) editorPreferences.viewDivisor = 1;
   applyDisplaySettings(); persistEditor();
 }
-function captureCurve(end) {
+function captureCurve(end: boolean) {
   if (preview.visible) return;
   if (!curveEditorOpen) openCurvePanel();
   curveAnchorMode = end ? 'end' : 'start';
   if (end && !curveStart) { curveAnchorMode = null; throw new Error('请先按 Ctrl+F 选择曲线起点'); }
-  element('#curve-start')?.classList.toggle('active', !end);
-  element('#curve-end')?.classList.toggle('active', end);
+  element<HTMLButtonElement>('#curve-start')?.classList.toggle('active', !end);
+  element<HTMLButtonElement>('#curve-end')?.classList.toggle('active', end);
   status(end ? '曲线终点选择中：点击一个音符' : '曲线起点选择中：点击一个音符');
 }
 listen('#notes-only', switchNoteView);
 listen('#reset-camera', () => resetCamera(true));
 listen('#game-ui', () => { editorPreferences.showGameUI = !preview.showGameUI; applyDisplaySettings(); persistEditor(); });
-element('#preview-ratio').onchange = event => {
-  [editorPreferences.ratioWidth, editorPreferences.ratioHeight] = event.target.value.split(':').map(Number);
+element<HTMLInputElement>('#preview-ratio').onchange = event => {
+  [editorPreferences.ratioWidth, editorPreferences.ratioHeight] = (event.target as HTMLInputElement).value.split(':').map(Number);
   applyDisplaySettings(); persistEditor();
 };
-for (const [id, key] of [['camera-x', 'cameraX'], ['view-divisor', 'viewDivisor']]) element(`#${id}`).onchange = event => {
-  if (!event.target.value.trim() || !event.target.validity.valid) { applyDisplaySettings(); return; }
-  editorPreferences[key] = Number(event.target.value); applyDisplaySettings(); persistEditor();
+const numericPreferenceFields: [string, 'cameraX' | 'viewDivisor'][] = [['camera-x', 'cameraX'], ['view-divisor', 'viewDivisor']];
+for (const [id, key] of numericPreferenceFields) element<HTMLInputElement>(`#${id}`).onchange = event => {
+  const input = event.target as HTMLInputElement;
+  if (!input.value.trim() || !input.validity.valid) { applyDisplaySettings(); return; }
+  editorPreferences[key] = Number(input.value); applyDisplaySettings(); persistEditor();
 };
-element('#toolbar-mode').onclick = () => {
-  const modes = ['compact', 'icons', 'wide'];
+element<HTMLButtonElement>('#toolbar-mode').onclick = () => {
+  const modes: ToolbarMode[] = ['compact', 'icons', 'wide'];
   const current = editorPreferences.toolbarMode ?? 'compact';
   editorPreferences.toolbarMode = modes[(modes.indexOf(current) + 1) % modes.length];
   applyDisplaySettings(); persistEditor();
@@ -1133,15 +1388,27 @@ listen('#copy', copySelection);
 listen('#cut', cutSelection);
 listen('#paste', () => pasteSelection());
 for (const [name, description] of BATCH_ACTIONS) {
-  const option = new Option(name, name); option.title = description; element('#batch-action').append(option);
+  const option = new Option(name, name); option.title = description; element<HTMLSelectElement>('#batch-action').append(option);
 }
-element('#batch-action').onchange = () => { element('#batch-run').title = BATCH_ACTIONS.find(([name]) => name === element('#batch-action').value)[1]; };
-element('#batch-action').onchange();
-listen('#batch-run', () => applyBatchAction(session, element('#batch-action').value, timeline.gridCount));
+element<HTMLSelectElement>('#batch-action').onchange = () => {
+  // The select is populated from `BATCH_ACTIONS` above, so a selected value always has a matching
+  // entry; the fallback keeps the title at its previous value for the impossible miss.
+  const selected = element<HTMLSelectElement>('#batch-action').value;
+  const action = BATCH_ACTIONS.find(([name]) => name === selected);
+  if (action) element<HTMLButtonElement>('#batch-run').title = action[1];
+};
+const batchActionOnChange = element<HTMLSelectElement>('#batch-action').onchange;
+if (batchActionOnChange) batchActionOnChange.call(element<HTMLSelectElement>('#batch-action'), new Event('change'));
+listen('#batch-run', () => applyBatchAction(session, element<HTMLSelectElement>('#batch-action').value, timeline.gridCount));
 listen('#delete', deleteSelection);
 listen('#mirror', () => {
   if (session.focus === 'events') transformEvents(session, '镜像 X / 旋转事件', (event, type) => ['moveXEvents', 'rotateEvents'].includes(type) ? { ...event, start: -event.start, end: -event.end } : event);
-  else session.transformSelection('镜像音符', note => ({ ...note, positionX: -note.positionX }));
+  // `transformSelection` types the callback's note as optional because the same signature serves the
+  // multi-line path; the single-selection path only ever passes a note the selection holds, which is
+  // what makes the original's unconditional `-note.positionX` correct. `timeline.ts` narrows the same
+  // way (`note => (note ? … : undefined)!`), so `!` records the established invariant rather than
+  // adding a branch that could change what is written back.
+  else session.transformSelection('镜像音符', note => ({ ...note!, positionX: -note!.positionX }));
 });
 listen('#metadata', () => { activatePane('metadata'); renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); }); });
 listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); }); });
@@ -1150,7 +1417,9 @@ function renderHistoryPanel() {
   const host = element('#history-results'); if (!host) return;
   host.replaceChildren();
   const history = session.history; const current = history.undoStack.length;
-  const entries = [{ label: '当前可回退的起点', index: 0 }, ...history.undoStack.map((command, index) => ({ label: command.label, index: index + 1 })), ...history.redoStack.toReversed().map((command, index) => ({ label: command.label, index: current + index + 1 }))];
+  // `redoStack` is walked newest-first, which `toReversed` expressed; `[...stack].reverse()` produces
+  // the same new array (the library target is ES2022, which has no `toReversed`).
+  const entries: HistoryEntry[] = [{ label: '当前可回退的起点', index: 0 }, ...history.undoStack.map((command, index) => ({ label: command.label, index: index + 1 })), ...[...history.redoStack].reverse().map((command, index) => ({ label: command.label, index: current + index + 1 }))];
   for (const entry of entries) {
     const button = document.createElement('button'); button.type = 'button'; button.className = entry.index === current ? 'active' : ''; button.textContent = `${entry.index === current ? '● ' : ''}${entry.index} · ${entry.label}`;
     button.onclick = () => { const direction = entry.index < current ? 'undo' : 'redo'; for (let count = 0; count < Math.abs(entry.index - current); count++) travel(direction, true); renderHistoryPanel(); notify(`已定位到编辑历史第 ${entry.index} 步`, 'success', 1800); };
@@ -1173,28 +1442,52 @@ function toggleClipboardPanel() {
 listen('#clipboard-history', toggleClipboardPanel);
 listen('#clear-clipboard-history', () => clipboardHistory.clearUnpinned());
 let clipboardSave = Promise.resolve();
+/**
+ * The two extra fields `ClipboardHistory.changed` hangs off its `change` event.
+ *
+ * `clipboard-history.ts` declares the same local shape; `addEventListener` hands the handler a bare
+ * `Event`, so the fields are read through this view. Both are optional because the class also
+ * dispatches a plain `Event('change')` with neither property set, which the `?? false` fallbacks
+ * below treat exactly as the original `undefined` reads did.
+ */
+const clipboardChange = (event: Event) => event as Event & { persist?: boolean; reason?: string };
 clipboardHistory.addEventListener('change', event => {
-  if (activePaneName === 'clipboard' && event.reason !== 'rename') renderClipboardPanel();
+  const change = clipboardChange(event);
+  if (activePaneName === 'clipboard' && change.reason !== 'rename') renderClipboardPanel();
   invalidate();
-  if (!event.persist) return;
+  if (!change.persist) return;
   const entries = structuredClone(clipboardHistory.entries);
-  clipboardSave = clipboardSave.then(() => storeClipboardHistory(entries)).catch(error => status(`剪贴板历史保存失败：${error.message}`));
+  clipboardSave = clipboardSave.then(() => storeClipboardHistory(entries)).then(() => undefined).catch(failure => status(`剪贴板历史保存失败：${failureMessage(failure)}`));
 });
-readClipboardHistory().then(entries => clipboardHistory.restore(entries)).catch(error => status(`剪贴板历史读取失败：${error.message}`));
-function deleteDiagnosticIssue(issue) {
+readClipboardHistory().then(entries => clipboardHistory.restore(entries)).catch(failure => status(`剪贴板历史读取失败：${failureMessage(failure)}`));
+function deleteDiagnosticIssue(issue: DiagnosticIssue) {
   if (issue.path.startsWith('paintEvents[')) {
+    // A `paintEvents[…]` issue always carries both; the guards below are the same `undefined` tests
+    // the original's untyped index expressions performed implicitly, and change nothing when the
+    // fields are present, which is every path that reaches here.
+    if (issue.line === undefined || issue.index === undefined) return;
     session.commit('删除着色器检查项', replaceShaderEvents(session.chart, issue.line, shaderEvents(session.chart, issue.line).filter((event, index) => index !== issue.index)));
     notify('已删除检查项对应对象', 'success'); return;
   }
   const chart = structuredClone(session.chart);
-  if (issue.path.startsWith('notes[') && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].notes.splice(issue.index, 1);
-  else if (issue.path === 'father' && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].father = -1;
-  else if (issue.path.startsWith('BPMList[')) chart.BPMList.splice(issue.index, 1);
+  if (issue.path.startsWith('notes[') && issue.line !== undefined && issue.index !== undefined && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].notes.splice(issue.index, 1);
+  else if (issue.path === 'father' && issue.line !== undefined && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].father = -1;
+  else if (issue.path.startsWith('BPMList[') && issue.index !== undefined) chart.BPMList.splice(issue.index, 1);
   else if (issue.line != null && issue.path.match(/^\w+Events\[/)) {
+    if (issue.index === undefined) return;
     const type = issue.path.slice(0, issue.path.indexOf('[')); const line = chart.judgeLineList?.[issue.line];
-    const layer = issue.extended ? line?.extended : line?.eventLayers?.[issue.layer];
-    if (!layer?.[type]) return;
-    layer[type].splice(issue.index, 1);
+    // An `extended` issue carries no layer (its events live on the line's `extended` bag); a base
+    // layer issue always names one, which is what the original's untyped index assumed. A missing
+    // layer on a non-extended issue is not an index the original could use either, so it falls
+    // through to the same `return` the `!layer?.[type]` test below would have taken.
+    if (!issue.extended && issue.layer === undefined) return;
+    // The two bags are keyed by track name, so the lookup is widened the same way the original's
+    // untyped read was; `isEventType` is the guard that accepts exactly the track names.
+    if (!isEventType(type)) return;
+    const bag: Partial<Record<AnyEventType, ChartEvent[]>> | undefined = issue.extended ? line?.extended : line?.eventLayers?.[issue.layer!];
+    const events = bag?.[type];
+    if (!events) return;
+    events.splice(issue.index, 1);
   }
   else return;
   session.commit('删除检查项', chart); notify('已删除检查项对应对象', 'success');
@@ -1202,7 +1495,7 @@ function deleteDiagnosticIssue(issue) {
 function renderDiagnostics() {
   const host = element('#diagnose-results'); if (!host) return;
   host.replaceChildren();
-  const issues = diagnose(session.chart); const visible = element('#diagnose-show-low')?.checked !== false;
+  const issues = diagnose(session.chart); const visible = element<HTMLInputElement>('#diagnose-show-low')?.checked !== false;
   const signature = issues.map(issue => `${issue.severity}:${issue.path}:${issue.message}`).sort().join('|');
   if (lastDiagnosticSignature !== null && signature !== lastDiagnosticSignature) {
     const previous = new Set(lastDiagnosticSignature.split('|').filter(Boolean));
@@ -1211,7 +1504,7 @@ function renderDiagnostics() {
     else if (added.some(issue => issue.severity === 'warning')) notify(`谱面检查新增 ${added.filter(issue => issue.severity === 'warning').length} 个警告`, 'warning', 3600);
   }
   lastDiagnosticSignature = signature;
-  const category = issue => {
+  const category = (issue: DiagnosticIssue) => {
     const top = issue.path.startsWith('notes[') ? '音符' : issue.path.match(/Events\[/) ? '事件' : '其他';
     const sub = issue.message.includes('超出') ? '超界' : issue.message.includes('重叠') ? '重叠' : issue.message.includes('时长') ? '时长' : issue.message.includes('父线') ? '父线' : '其他';
     return [top, sub];
@@ -1244,18 +1537,27 @@ function renderDiagnostics() {
   if (!issues.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = '未发现当前检查规则覆盖的问题。'; host.append(empty); }
 }
 listen('#diagnose', () => { activatePane('diagnose'); renderDiagnostics(); });
-element('#diagnose-show-low').addEventListener('change', renderDiagnostics);
-element('#diagnose-close').addEventListener('click', () => activatePane('chart'));
-element('#history-close').addEventListener('click', () => activatePane('chart'));
+element<HTMLInputElement>('#diagnose-show-low').addEventListener('change', renderDiagnostics);
+element<HTMLButtonElement>('#diagnose-close').addEventListener('click', () => activatePane('chart'));
+element<HTMLButtonElement>('#history-close').addEventListener('click', () => activatePane('chart'));
 
-function curveField(id, label, value, type = 'text', options = []) {
+function curveField(id: string, label: string, value: string | number, type = 'text', options: [string, string][] = []) {
   const row = document.createElement('label'); row.className = 'field'; row.append(label);
-  const input = type === 'select' ? document.createElement('select') : document.createElement('input');
+  // The two arms are built separately so each keeps its own element type: `type`/`step` only exist
+  // on the input, and `value` is a string property on both. The original ternary produced the same
+  // two elements.
+  if (type === 'select') {
+    const select = document.createElement('select');
+    select.id = id;
+    select.replaceChildren(...options.map(([optionValue, optionLabel]) => new Option(optionLabel, optionValue)));
+    select.value = String(value); row.append(select);
+    return row;
+  }
+  const input = document.createElement('input');
   input.id = id;
-  if (type === 'select') input.replaceChildren(...options.map(([optionValue, optionLabel]) => new Option(optionLabel, optionValue)));
-  else { input.type = type; input.step = 'any'; }
-  input.value = value; row.append(input);
-  if (type === 'number') numericWheel(input, id === 'curve-density' ? 0.25 : 1, direction => { input.value = Number(input.value) + direction * (id === 'curve-density' ? 0.25 : 1); input.dispatchEvent(new Event('input', { bubbles: true })); });
+  input.type = type; input.step = 'any';
+  input.value = String(value); row.append(input);
+  if (type === 'number') numericWheel(input, id === 'curve-density' ? 0.25 : 1, direction => { input.value = String(Number(input.value) + direction * (id === 'curve-density' ? 0.25 : 1)); input.dispatchEvent(new Event('input', { bubbles: true })); });
   return row;
 }
 function generatedCurveCount() {
@@ -1271,30 +1573,30 @@ function updateCurvePanel() {
       curveField('curve-density', '密度', curveValues.density, 'number'), curveField('curve-type', '类型', curveValues.type, 'select', [['1', 'Tap'], ['3', 'Flick'], ['4', 'Drag']]), curveField('curve-easing', '缓动编号（1–29）', curveValues.easingType, 'number'));
     root.addEventListener('input', () => {
       try {
-        curveValues = { startTime: parseBeat(element('#curve-start-time').value), endTime: parseBeat(element('#curve-end-time').value), startX: Number(element('#curve-start-x').value), endX: Number(element('#curve-end-x').value), density: Number(element('#curve-density').value), type: Number(element('#curve-type').value), easingType: Number(element('#curve-easing').value) };
+        curveValues = { startTime: parseBeat(element<HTMLInputElement>('#curve-start-time').value), endTime: parseBeat(element<HTMLInputElement>('#curve-end-time').value), startX: Number(element<HTMLInputElement>('#curve-start-x').value), endX: Number(element<HTMLInputElement>('#curve-end-x').value), density: Number(element<HTMLInputElement>('#curve-density').value), type: Number(element<HTMLSelectElement>('#curve-type').value) as NoteType, easingType: Number(element<HTMLInputElement>('#curve-easing').value) };
         element('#curve-summary').textContent = `${generatedCurveCount()} 个中间音符 · 端点不重复添加`;
-        curveEasingPicker.select(curveValues.easingType);
+        curveEasingPicker?.select(curveValues.easingType);
         invalidate();
-      } catch (error) { element('#curve-summary').textContent = error.message; }
+      } catch (error) { element('#curve-summary').textContent = failureMessage(error); }
     });
     const summary = document.createElement('p'); summary.id = 'curve-summary'; summary.className = 'hint'; root.append(summary);
     curveEasingPicker = createEasingPicker(curveValues.easingType, value => { curveValues.easingType = value; updateCurvePanel(); });
     root.append(curveEasingPicker.element);
   }
-  const values = [['#curve-start-time', formatBeat(curveValues.startTime)], ['#curve-end-time', formatBeat(curveValues.endTime)], ['#curve-start-x', curveValues.startX], ['#curve-end-x', curveValues.endX], ['#curve-density', curveValues.density], ['#curve-type', curveValues.type], ['#curve-easing', curveValues.easingType]];
-  for (const [selector, value] of values) if (document.activeElement !== element(selector)) element(selector).value = value;
+  const values: [string, string | number][] = [['#curve-start-time', formatBeat(curveValues.startTime)], ['#curve-end-time', formatBeat(curveValues.endTime)], ['#curve-start-x', curveValues.startX], ['#curve-end-x', curveValues.endX], ['#curve-density', curveValues.density], ['#curve-type', curveValues.type], ['#curve-easing', curveValues.easingType]];
+  for (const [selector, value] of values) { const control = element<HTMLInputElement | HTMLSelectElement>(selector); if (document.activeElement !== control) control.value = String(value); }
   element('#curve-summary').textContent = `${generatedCurveCount()} 个中间音符 · 端点不重复添加`;
-  curveEasingPicker.select(curveValues.easingType);
+  curveEasingPicker?.select(curveValues.easingType);
   invalidate();
 }
 function openCurvePanel() {
   curveEditorOpen = true; curveStart = null; curveEnd = null; curveAnchorMode = null;
-  element('#curve-start')?.classList.remove('active'); element('#curve-end')?.classList.remove('active');
+  element<HTMLButtonElement>('#curve-start')?.classList.remove('active'); element<HTMLButtonElement>('#curve-end')?.classList.remove('active');
   activatePane('curve'); updateCurvePanel(); status('曲线编辑：请选择起点音符');
 }
 function closeCurvePanel() {
   curveEditorOpen = false; curveStart = null; curveEnd = null; curveAnchorMode = null;
-  element('#curve-start')?.classList.remove('active'); element('#curve-end')?.classList.remove('active');
+  element<HTMLButtonElement>('#curve-start')?.classList.remove('active'); element<HTMLButtonElement>('#curve-end')?.classList.remove('active');
   activatePane('chart'); invalidate();
 }
 listen('#curve-generate', () => {
@@ -1309,7 +1611,7 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || event.key !== 'Tab' || dialogOpen() || isTypingText(event.target)) return;
+  if (atHome || !hasDocument || event.key !== 'Tab' || dialogOpen() || isTypingText(event.target as ShortcutTargetArg)) return;
   event.preventDefault();
   if (event.repeat) return;
   lineInfoVisible = !lineInfoVisible;
@@ -1332,17 +1634,24 @@ window.addEventListener('keyup', event => {
 }, true);
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
 window.addEventListener('keydown', async event => {
-  const target = event.target;
+  // `keyboard.ts` types its parameter as a structural `ShortcutTarget` and probes every member before
+  // using it (see `closest`); `isPlaybackSpace` in that same module casts `event.target` the same way.
+  // The cast only names the members the three helpers below inspect.
+  const target = event.target as ShortcutTargetArg;
   if (atHome || !hasDocument || dialogOpen() || isTypingText(target)) return;
   if (isTextEntry(target) && event.key.toLowerCase() === 'v' && (event.ctrlKey || event.metaKey)) return;
   if (batchControls.active) { event.preventDefault(); return; }
   const area = timeline.hoverArea ?? session.focus;
-  const action = shortcutAction(event, preferences, area);
-  if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
-  if (pasteGesture.pending && action !== 'Paste') pasteGesture.cancel();
-    if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
+  const matchedAction = shortcutAction(event, preferences, area);
+  if (matchedAction || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
+  if (pasteGesture.pending && matchedAction !== 'Paste') pasteGesture.cancel();
+    if (matchedAction === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
     pasteGesture.down(event, { session, chart: session.chart, lineIndex: session.lineIndex, targetLineIndex: clipboardTargetLine(), layer: timeline.layer, beat: clipboardBeat(timeline) }); return;
   }
+  // A key that matches no shortcut yields `undefined`; the original's `else if (action === '…')` chain
+  // never matched such a key either, so returning here is a no-op for every value it could receive.
+  if (!matchedAction) return;
+  const action = matchedAction;
   let handled = true;
   try {
     if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD', 'ToggleMultiLine', 'SwitchMultiLineMode'].includes(action)) { event.preventDefault(); return; }
@@ -1363,11 +1672,17 @@ window.addEventListener('keydown', async event => {
     else if (action === 'Copy') copySelection();
     else if (action === 'Shear') cutSelection();
     else if (action === 'ClipboardHistory') toggleClipboardPanel();
-    else if (!preview.visible && ['NumberMirror', 'NumberFill'].includes(action)) applyNumberShortcut(session, action);
+    // `applyNumberShortcut` declares its own `NumberShortcutSession` view, whose `transformSelection`
+    // requires a `Note` where `EditorSession`'s accepts `Note | undefined` (the same variance the
+    // timeline declares for its own view). The session is the live editor session either way; the
+    // shortcut only ever reaches it with a note the selection holds.
+    else if (!preview.visible && ['NumberMirror', 'NumberFill'].includes(action)) applyNumberShortcut(session as unknown as NumberShortcutSession, action);
     else if (['Paste', 'PasteMirror', 'KeepTimePaste', 'KeepTimePasteMirror'].includes(action)) pasteSelection(action.endsWith('Mirror'), action.startsWith('KeepTime'));
     else if (action === 'Pause') { event.preventDefault(); await togglePlayback(); }
     else if (['StartView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD'].includes(action)) {
-      if (action.endsWith('_HOLD')) heldPreview = { action, code: event.code };
+      // Only the two `_HOLD` names are stored, both of which are hotkey names; the explicit test names
+      // them for the type, and is a no-op for the other two actions this branch accepts.
+      if (action === 'StartView_HOLD' || action === 'JumpView_HOLD') heldPreview = { action, code: event.code };
       togglePreview(true, false, action === 'ReplayView');
     }
     else if (action === 'EndView') togglePreview(false);
@@ -1383,7 +1698,13 @@ window.addEventListener('keydown', async event => {
     else if (action === 'CurveBegin' || action === 'CurveEnd') captureCurve(action === 'CurveEnd');
     else if (preview.visible && ['AddTap', 'AddDrag', 'AddFlick', 'AddHold', 'AddEvent'].includes(action)) handled = false;
     else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place(undefined, undefined, undefined, action === 'AddTap');
-    else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) handled = timeline.addAtCursor({ AddTap: 1, AddDrag: 4, AddFlick: 3, AddHold: 2 }[action]);
+    else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) {
+      // The record is typed by its key set, so the lookup returns the note type for exactly those four
+      // names the test above accepts. A miss falls back to the tap type, which nobody reaches.
+      const addTypes: Record<'AddTap' | 'AddDrag' | 'AddFlick' | 'AddHold', NoteType> = { AddTap: 1, AddDrag: 4, AddFlick: 3, AddHold: 2 };
+      const noteType: NoteType = addTypes[action as keyof typeof addTypes] ?? 1;
+      handled = timeline.addAtCursor(noteType);
+    }
     else if (action === 'Delete') deleteSelection();
     else if (action === 'QuickDelete' && session.selection.size + session.eventSelection.size + [...(session.multiLineSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) + [...(session.multiEventSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) > 1) deleteSelection();
     else if (action === 'QuickDelete' && session.focus === 'events' && timeline.eventCursor) {
@@ -1393,7 +1714,10 @@ window.addEventListener('keydown', async event => {
       const hit = timeline.hit(timeline.cursor);
       if (hit) { if (session.multiLineActive && session.multiLineMode === 'notes') session.multiLineSelection.set(hit.lineIndex, new Set([hit.index])); session.selection = new Set([hit.index]); deleteSelection(); }
     } else if (['LastBeat', 'NextBeat'].includes(action)) seekBeat(Math.max(0, currentBeat() + (action === 'LastBeat' ? -1 : 1) / timeline.division));
-    else if (action === 'Esc') { session.clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); session.multiLineSelection?.clear(); session.multiEventSelection?.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
+    // `clipboardVisible` is created by the clipboard-history feature rather than declared on
+    // `EditorSession`; the test suite views the session through the same intersection
+    // (`EditorSession & ClipboardHistorySession`), so the field is written through that view here.
+    else if (action === 'Esc') { (session as EditorClipboardSession).clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); session.multiLineSelection?.clear(); session.multiEventSelection?.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
     else handled = false;
     if (handled) { event.preventDefault(); event.stopPropagation(); }
   } catch (error) { event.preventDefault(); reportError(error); }
@@ -1409,7 +1733,7 @@ window.addEventListener('blur', () => { if (heldPreview) { togglePreview(false);
 
 window.addEventListener('beforeunload', event => { if (session.history.dirty || assetDirty) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('resize', invalidate);
-element('#modal').addEventListener('close', () => { if (atHome) home.refresh().catch(reportError); });
+element<HTMLDialogElement>('#modal').addEventListener('close', () => { if (atHome) home.refresh().catch(reportError); });
 const markerResizeObserver = new ResizeObserver(() => { renderTimelineMarkers(); invalidate(); });
 markerResizeObserver.observe(element('.stage'));
 markerResizeObserver.observe(element('.scrubber-wrap'));
@@ -1420,7 +1744,7 @@ let frameSampleStart = 0;
 let frameSampleCount = 0;
 let measuredFps = 0;
 let lastTick = 0;
-function frame(timestamp) {
+function frame(timestamp: number) {
   const elapsed = lastTick ? (timestamp - lastTick) / 1000 : 0; lastTick = timestamp;
   audio.update();
   batchControls.sync();
@@ -1430,12 +1754,14 @@ function frame(timestamp) {
   if (timestamp - frameSampleStart >= 500) { measuredFps = frameSampleCount * 1000 / (timestamp - frameSampleStart); frameSampleStart = timestamp; frameSampleCount = 0; }
   advanceEditClock(timestamp);
   if (hasDocument && !atHome && timestamp - lastInfoTick > 500) {
-    const info = element('#chart-info dd');
+    const info = element<HTMLElement>('#chart-info dd');
     if (info && !element('#chart-info').hidden) info.textContent = info.textContent.replace(/Time: .*$/, `Time: ${formatEditTime(editTimeSeconds)}  FPS: ${measuredFps.toFixed(1)}`);
     lastInfoTick = timestamp;
   }
-  if (hasDocument && !atHome && !document.hidden) autoSave.tick(timestamp, editorPreferences.autoSave ?? preferences.settings.autoSave,
-    editorPreferences.autoSaveSeconds ?? preferences.settings.autoSaveSeconds, session.history.dirty && session.chart !== lastDraftDocument);
+  // `autoSave` is a preference flag that reaches this narrow index-signature read as a union; the
+  // `Boolean` coercion is the value the original passed to the same truthiness test.
+  if (hasDocument && !atHome && !document.hidden) autoSave.tick(timestamp, Boolean(editorPreferences.autoSave ?? preferences.settings.autoSave),
+    Number(editorPreferences.autoSaveSeconds ?? preferences.settings.autoSaveSeconds), session.history.dirty && session.chart !== lastDraftDocument);
   if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
@@ -1462,13 +1788,19 @@ function frame(timestamp) {
     element('#play').dataset.playing = String(audio.playing);
     element('#play').title = audio.playing ? '暂停' : '播放';
     element('#clock').textContent = `${chartSeconds().toFixed(3)} s`;
-    element('#scrubber').value = audio.time;
+    element<HTMLInputElement>('#scrubber').value = String(audio.time);
     const tempoPoint = tempo.points[Math.max(0, upperBound(tempo.points, beat, point => point.beat) - 1)];
     element('#bpm-display').textContent = `${(60 / tempoPoint.secondsPerBeat).toFixed(2)} BPM`;
-    const draggedLineIndex = Number.isInteger(timeline.drag?.lineIndex) ? timeline.drag.lineIndex : session.lineIndex;
-    const draggedSource = session.chart.judgeLineList?.[draggedLineIndex]?.notes?.[timeline.drag?.anchor];
-    const draggedNote = ['move', 'startTime', 'endTime'].includes(timeline.drag?.kind) ? timeline.movedNote(draggedSource) : null;
-    const positionInput = element('#properties input[aria-label="X 坐标"]');
+    // `TimelineDrag` carries an index signature, so every member reads as `unknown`; the members this
+    // readout needs are declared on the exported `MoveDrag` view, which `timeline.ts` itself uses for
+    // the same purpose. The drag members are only meaningful while a note drag is in flight, which the
+    // `Number.isInteger` / kind tests below establish.
+    const drag: MoveDrag | null = timeline.drag;
+    const draggedLineIndex = Number.isInteger(drag?.lineIndex) ? drag!.lineIndex! : session.lineIndex;
+    // `movedNote` is declared to take a `Note`; a move drag is always anchored to one, which is what
+    // the original's unconditional index expression assumed. `draggedNote` is tested before use below.
+    const draggedNote = drag && ['move', 'startTime', 'endTime'].includes(drag.kind ?? '') ? timeline.movedNote(draggedAnchorNote(session.chart, draggedLineIndex, drag.anchor)!) : null;
+    const positionInput = element<HTMLInputElement>('#properties input[aria-label="X 坐标"]');
     if (draggedNote && positionInput && document.activeElement !== positionInput) positionInput.value = Number(draggedNote.positionX).toFixed(2);
     element('#cursor-position').textContent = draggedNote ? `X ${draggedNote.positionX.toFixed(2)} · ${beatValue(draggedNote.startTime).toFixed(3)} 拍` : timeline.cursor ? `X ${timeline.positionAt(timeline.cursor.x).toFixed(2)} · ${timeline.snappedBeat(timeline.cursor.y).toFixed(3)} 拍` : '';
     if (timestamp - lastPaint > 400) {
@@ -1483,33 +1815,33 @@ applyPreferences(preferences);
 setHome(true);
 requestAnimationFrame(frame);
 
-function applyPreferences(next) {
+function applyPreferences(next: MigratedPreferences) {
   next = { ...next, hotkeys: { ...DEFAULT_HOTKEYS, ...next.hotkeys } };
   preferences = next;
-  audio.setVolume(editorPreferences.volume ?? next.settings.volume);
-  element('#volume').value = audio.volume;
-  hitSounds.setVolume(editorPreferences.hitVolume ?? next.settings.hitVolume);
-  element('#hit-volume').value = hitSounds.volume;
+  audio.setVolume(Number(editorPreferences.volume ?? next.settings.volume));
+  element<HTMLInputElement>('#volume').value = String(audio.volume);
+  hitSounds.setVolume(Number(editorPreferences.hitVolume ?? next.settings.hitVolume));
+  element<HTMLInputElement>('#hit-volume').value = String(hitSounds.volume);
   preview.noteSize = realtimePreview.noteSize = next.settings.noteSize;
   preview.lineScale = next.settings.lineScale;
   preview.backgroundAlpha = realtimePreview.backgroundAlpha = next.settings.backgroundAlpha;
   timeline.noteScale = next.settings.noteSize / 175;
-  timeline.gridCount = editorPreferences.gridCount ?? next.settings.gridCount;
-  timeline.scale = editorPreferences.scale ?? 500;
-  timeline.division = editorPreferences.division ?? 4;
-  timeline.snapX = editorPreferences.snapX ?? true;
-  timeline.multiLineWidth = editorPreferences.multiLineWidth ?? 0;
-  timeline.multiLineEventWidth = editorPreferences.multiLineEventWidth ?? 0;
+  timeline.gridCount = Number(editorPreferences.gridCount ?? next.settings.gridCount);
+  timeline.scale = Number(editorPreferences.scale ?? 500);
+  timeline.division = Number(editorPreferences.division ?? 4);
+  timeline.snapX = Boolean(editorPreferences.snapX ?? true);
+  timeline.multiLineWidth = Number(editorPreferences.multiLineWidth ?? 0);
+  timeline.multiLineEventWidth = Number(editorPreferences.multiLineEventWidth ?? 0);
   timeline.multiLineWidthExplicit = Number.isFinite(editorPreferences.multiLineWidth);
   timeline.multiLineEventWidthExplicit = Number.isFinite(editorPreferences.multiLineEventWidth);
-  element('#grid-count').value = timeline.gridCount; element('#division').value = timeline.division; element('#y-scale').value = timeline.scale; element('#snap-x').checked = timeline.snapX;
-  element('#y-scale-slider').value = timeline.scale;
-  realtimePreview.visible = editorPreferences.realtime ?? true;
-  element('#realtime-enabled').checked = realtimePreview.visible; element('#realtime-preview').hidden = !realtimePreview.visible;
-  element('#realtime-alpha').value = editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha;
-  realtimePreview.opacity = Number(element('#realtime-alpha').value);
-  hitSounds.enabled = editorPreferences.hitEnabled ?? true; element('#hit-enabled').checked = hitSounds.enabled;
-  preview.allLines = realtimePreview.allLines = editorPreferences.allLines ?? true; element('#preview-mode').value = preview.allLines ? 'all' : 'current';
+  element<HTMLInputElement>('#grid-count').value = String(timeline.gridCount); element<HTMLInputElement>('#division').value = String(timeline.division); element<HTMLInputElement>('#y-scale').value = String(timeline.scale); element<HTMLInputElement>('#snap-x').checked = timeline.snapX;
+  element<HTMLInputElement>('#y-scale-slider').value = String(timeline.scale);
+  realtimePreview.visible = Boolean(editorPreferences.realtime ?? true);
+  element<HTMLInputElement>('#realtime-enabled').checked = realtimePreview.visible; element<HTMLCanvasElement>('#realtime-preview').hidden = !realtimePreview.visible;
+  element<HTMLInputElement>('#realtime-alpha').value = String(editorPreferences.realtimeAlpha ?? next.settings.realtimeAlpha);
+  realtimePreview.opacity = Number(element<HTMLInputElement>('#realtime-alpha').value);
+  hitSounds.enabled = Boolean(editorPreferences.hitEnabled ?? true); element<HTMLInputElement>('#hit-enabled').checked = hitSounds.enabled;
+  preview.allLines = realtimePreview.allLines = Boolean(editorPreferences.allLines ?? true); element<HTMLSelectElement>('#preview-mode').value = preview.allLines ? 'all' : 'current';
   timeline.scrollSpeed = next.settings.scrollSpeed / 5;
   session.history.limit = next.settings.historyLimit;
   element('#hotkey-help').hidden = !next.settings.showHotkey;
@@ -1518,7 +1850,7 @@ function applyPreferences(next) {
   renderSession();
 }
 
-function applyMigratedPreferences(next) {
+function applyMigratedPreferences(next: MigratedPreferences) {
   editorPreferences = { ...editorPreferences, volume: next.settings.volume, hitVolume: next.settings.hitVolume, gridCount: next.settings.gridCount, realtimeAlpha: next.settings.realtimeAlpha,
     ratioWidth: next.settings.ratioWidth, ratioHeight: next.settings.ratioHeight, barWidth: next.settings.barWidth, barAlpha: next.settings.barAlpha,
     autoSave: next.settings.autoSave, autoSaveSeconds: next.settings.autoSaveSeconds, autoSaveLimit: next.settings.autoSaveLimit, autoplayView: next.settings.autoplayView, highlight: next.settings.highlight, showGameUI: next.settings.showGameUI };
@@ -1527,30 +1859,36 @@ function applyMigratedPreferences(next) {
 
 listen('#migrate', async () => {
   const content = showDialog('选择原 RPE 主文件夹', '请选择包含 Resources、Hotkey.txt、Settings.json 的目录。读取后会先展示项目清单，再由你选择迁移内容。');
-  if (window.showDirectoryPicker) {
+  // `showDirectoryPicker` is a File System Access API member that this project's DOM lib predates,
+  // so it is declared as an optional field on the global view the feature-detection and the call
+  // below both read. The browser check is the original's and behaves identically.
+  const pickerWindow: Window & { showDirectoryPicker?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle> } = window;
+  if (pickerWindow.showDirectoryPicker) {
     const select = document.createElement('button'); select.type = 'button'; select.className = 'primary'; select.textContent = '只读选择文件夹';
     select.onclick = async () => {
       try {
-        const directory = await window.showDirectoryPicker({ mode: 'read' });
+        const directory = await pickerWindow.showDirectoryPicker!({ mode: 'read' });
         status('正在扫描旧 RPE 目录…');
         const entries = await directoryEntries(directory);
         migrationDialog(await scanMigration(entries, directory.name), applyMigratedPreferences);
-      } catch (error) { if (error.name !== 'AbortError') reportError(error); }
+      } catch (failure) { if (!(failure instanceof Error) || failure.name !== 'AbortError') reportError(failure); }
     };
     content.append(select);
   }
   const fallback = document.createElement('button'); fallback.type = 'button'; fallback.textContent = '兼容方式选择文件夹';
-  fallback.onclick = () => element('#directory-input').click(); content.append(fallback);
+  fallback.onclick = () => element<HTMLInputElement>('#directory-input').click(); content.append(fallback);
 });
-element('#directory-input').addEventListener('change', async event => {
+element<HTMLInputElement>('#directory-input').addEventListener('change', async event => {
+  const input = event.target as HTMLInputElement;
   try {
-    if (!event.target.files.length) return;
+    const files = input.files;
+    if (!files?.length) return;
     status('正在扫描旧 RPE 目录…');
-    const entries = uploadedEntries(event.target.files);
-    const name = event.target.files[0].webkitRelativePath.split('/')[0];
+    const entries = uploadedEntries(files);
+    const name = files[0].webkitRelativePath.split('/')[0];
     migrationDialog(await scanMigration(entries, name), applyMigratedPreferences);
-  } catch (error) { reportError(error); }
-  finally { event.target.value = ''; }
+  } catch (failure) { reportError(failure); }
+  finally { input.value = ''; }
 });
 listen('#library', () => {
   if (atHome) return;
@@ -1581,46 +1919,71 @@ listen('#advanced-preferences', () => {
   exportButton.onclick = () => download(new Blob([JSON.stringify(preferences, null, 2)], { type: 'application/json' }), 'rpe-next-preferences.json');
   content.append(edit, exportButton);
 });
+/**
+ * Whether a value read back from storage is a usable migration record.
+ *
+ * `readPreferences` returns `Promise<unknown>` — the store holds whatever an earlier version wrote —
+ * so the record is checked for the four fields the editor reads before being handed on. The original
+ * read them off the value unguarded; a value failing this test is one whose `originalSettings` would
+ * have thrown on `JSON.stringify` or whose `originalHotkeys` would have thrown on `Object.entries`,
+ * so skipping it leaves the outcome for every real record unchanged.
+ */
+function isMigratedPreferences(value: unknown): value is MigratedPreferences {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as { originalSettings?: unknown; originalHotkeys?: unknown; originalUI?: unknown };
+  return candidate.originalSettings !== undefined && candidate.originalHotkeys !== null && typeof candidate.originalHotkeys === 'object' && typeof candidate.originalUI === 'string';
+}
 readPreferences().then(saved => {
-  if (saved) applyPreferences(migratePreferences(JSON.stringify(saved.originalSettings), Object.entries(saved.originalHotkeys).map(([key, value]) => `${key} ${value}`).join('\n'), saved.originalUI));
-}).catch(error => status(`无法读取偏好设置：${error.message}`));
+  if (isMigratedPreferences(saved)) applyPreferences(migratePreferences(JSON.stringify(saved.originalSettings), Object.entries(saved.originalHotkeys).map(([key, value]) => `${key} ${value}`).join('\n'), saved.originalUI));
+}).catch(failure => status(`无法读取偏好设置：${failureMessage(failure)}`));
 
 function applyDisplaySettings() {
+  // Seven of the `displayFields` keys are editor-only and absent from the migrated legacy settings, so
+  // the settings-side fallback is read through a widened view; a missing key yields `undefined` and the
+  // tuple's own default applies, which is the value the original's untyped lookup produced.
+  // `MigratedSettings` is a closed interface, so the widened view is taken by intersection — the same
+  // object, read by key, with no copy.
+  const legacy: Record<string, unknown> = preferences.settings as MigratedSettings & Record<string, unknown>;
   for (const [id, key, fallback] of displayFields) {
-    const control = element(`#${id}`); const value = editorPreferences[key] ?? preferences.settings[key] ?? fallback;
-    if (control.type === 'checkbox') control.checked = value; else control.value = value;
+    const control = element<HTMLInputElement>(`#${id}`);
+    const value = editorPreferences[key] ?? legacy[key] ?? fallback;
+    if (control.type === 'checkbox') control.checked = Boolean(value); else control.value = String(value);
   }
-  const ratioWidth = editorPreferences.ratioWidth ?? preferences.settings.ratioWidth;
-  const ratioHeight = editorPreferences.ratioHeight ?? preferences.settings.ratioHeight;
-  setRatioOptions(element('#preview-ratio'), ratioWidth, ratioHeight);
+  const ratioWidth = Number(editorPreferences.ratioWidth ?? preferences.settings.ratioWidth);
+  const ratioHeight = Number(editorPreferences.ratioHeight ?? preferences.settings.ratioHeight);
+  setRatioOptions(element<HTMLInputElement>('#preview-ratio'), ratioWidth, ratioHeight);
   preview.aspectRatio = realtimePreview.aspectRatio = ratioWidth / ratioHeight;
   applyViewControls({ ...editorPreferences, showGameUI: editorPreferences.showGameUI ?? preferences.settings.showGameUI }, timeline, [preview, realtimePreview]);
-  for (const renderer of [preview, realtimePreview]) for (const key of ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines']) renderer[key] = editorPreferences[key] ?? true;
+  const displayKeys: ('lineNumbers' | 'lineArrows' | 'lineTint' | 'mergeLineNumbers' | 'pickPreviewLines')[] = ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines'];
+  for (const renderer of [preview, realtimePreview]) for (const key of displayKeys) renderer[key] = Boolean(editorPreferences[key] ?? true);
   const toolbarMode = editorPreferences.toolbarMode ?? 'icons';
   element('.editor-toolbar').classList.remove('mode-compact', 'mode-icons', 'mode-wide');
   element('.editor-toolbar').classList.add(`mode-${toolbarMode}`);
-  element('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;
-  timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value);
-  timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventValueThreshold = Number(element('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element('#event-curve-threshold').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
-  timeline.seamlessEvents = element('#seamless-events').checked;
-  session.cutDensity = Number(element('#event-cut-density').value);
-  clipboardHistory.enabled = element('#clipboard-history-enabled').checked;
-  lineSwitcher.enabled = element('#line-switcher-enabled').checked;
+  element<HTMLButtonElement>('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;
+  timeline.barWidth = Number(element<HTMLInputElement>('#bar-width').value); timeline.barAlpha = Number(element<HTMLInputElement>('#bar-alpha').value);
+  timeline.eventValueFontSize = Number(element<HTMLInputElement>('#event-value-size').value); timeline.eventValueThreshold = Number(element<HTMLInputElement>('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element<HTMLInputElement>('#event-curve-threshold').value); timeline.eventOpacity = Number(element<HTMLInputElement>('#event-opacity').value); timeline.eventBarWidth = Number(element<HTMLInputElement>('#event-bar-width').value);
+  timeline.seamlessEvents = element<HTMLInputElement>('#seamless-events').checked;
+  session.cutDensity = Number(element<HTMLInputElement>('#event-cut-density').value);
+  clipboardHistory.enabled = element<HTMLInputElement>('#clipboard-history-enabled').checked;
+  lineSwitcher.enabled = element<HTMLInputElement>('#line-switcher-enabled').checked;
   if (!lineSwitcher.enabled) lineSwitcher.hide();
   if (!clipboardHistory.enabled) pasteGesture.cancel();
   element('#clipboard-history').hidden = !clipboardHistory.enabled;
   if (!clipboardHistory.enabled && activePaneName === 'clipboard') activatePane('chart');
-  preview.backgroundBlur = realtimePreview.backgroundBlur = Number(element('#background-blur').value);
-  timeline.highlight = preview.highlight = realtimePreview.highlight = element('#highlight-notes').checked;
-  audio.setPreservePitch(element('#preserve-pitch').checked);
+  preview.backgroundBlur = realtimePreview.backgroundBlur = Number(element<HTMLInputElement>('#background-blur').value);
+  timeline.highlight = preview.highlight = realtimePreview.highlight = element<HTMLInputElement>('#highlight-notes').checked;
+  audio.setPreservePitch(element<HTMLInputElement>('#preserve-pitch').checked);
   rotateTip();
   invalidate();
 }
-for (const [id, key] of displayFields) element(`#${id}`).addEventListener(element(`#${id}`).type === 'number' ? 'change' : 'input', event => {
-  const control = event.target;
-  if (control.type === 'checkbox') editorPreferences[key] = control.checked;
-  else if (control.value.trim() && control.validity.valid && Number.isFinite(Number(control.value))) editorPreferences[key] = Number(control.value);
-  else return;
-  applyDisplaySettings(); persistEditor();
-});
+for (const [id, key] of displayFields) {
+  const control = element<HTMLInputElement>(`#${id}`);
+  control.addEventListener(control.type === 'number' ? 'change' : 'input', (event: Event) => {
+    const target = event.target as HTMLInputElement;
+    if (target.type === 'checkbox') editorPreferences[key] = target.checked;
+    else if (target.value.trim() && target.validity.valid && Number.isFinite(Number(target.value))) editorPreferences[key] = Number(target.value);
+    else return;
+    applyDisplaySettings(); persistEditor();
+  });
+}
 timeline.eventPlacementType = timeline.eventTypes[0];
