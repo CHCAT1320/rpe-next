@@ -7,6 +7,18 @@ import { defineConfig } from 'vite';
 const PAGES_BASE = '/rpe-next/';
 const base = (mode) => (mode === 'pages' ? PAGES_BASE : '/');
 
+// package.json is the single source of truth for the app version. This plugin substitutes the
+// %APP_VERSION% token in index.html during both `vite` and `vite build`, and exposes the same
+// value to application code as the `__APP_VERSION__` constant.
+function appVersion(root) {
+  const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+  return {
+    name: 'rpe-app-version',
+    config: () => ({ define: { __APP_VERSION__: JSON.stringify(version) } }),
+    transformIndexHtml: html => html.replaceAll('%APP_VERSION%', version),
+  };
+}
+
 // Vite only copies publicDir into the build, so the licence files that must travel with every
 // distributed copy, and the marker that stops GitHub Pages from running Jekyll, are emitted here.
 // Keeping a single source of truth for LICENSE and NOTICE at the repository root.
@@ -32,7 +44,7 @@ export default defineConfig(({ mode }) => ({
   // The editor is a single document with no client-side routing, so unknown paths must 404
   // instead of falling back to index.html — that keeps the smoke test's asset checks meaningful.
   appType: 'mpa',
-  plugins: [distributionExtras(import.meta.dirname)],
+  plugins: [distributionExtras(import.meta.dirname), appVersion(import.meta.dirname)],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
