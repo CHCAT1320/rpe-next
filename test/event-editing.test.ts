@@ -60,6 +60,18 @@ function gainOf(sounds: HitSounds): GainNodeLike {
   return gain;
 }
 
+/** The gain node the scheduler connects voices into; `tick` only ever calls `connect`. */
+function gainStub(): GainNode {
+  // `HitSounds.gain` is declared as a real DOM `GainNode`; these tests never reach the audio thread,
+  // so the double supplies the one member the scheduler reads through and is converted here.
+  return { gain: { value: 1 }, connect() { return undefined; } } as unknown as GainNode;
+}
+
+/** A decoded-buffer stand-in: `prepare` and `tick` only ever test for its presence. */
+function bufferStub(): AudioBuffer {
+  return { duration: 0 } as unknown as AudioBuffer;
+}
+
 /** `AudioTransport.gain` is created by `ensureContext`; the callers below always run it first. */
 function audioGain(audio: AudioTransport): GainNodeLike {
   const gain = audio.gain;
@@ -67,18 +79,36 @@ function audioGain(audio: AudioTransport): GainNodeLike {
   return gain;
 }
 
+/**
+ * Reads one numeric sample from a track.
+ *
+ * `EventTrack.value` returns the union of number/colour/text because the same evaluator serves
+ * colour and text tracks. The split below only ever builds numeric events, so a non-number would be
+ * a real bug and is rejected rather than coerced.
+ */
+function numericSample(track: EventTrack, seconds: number): number {
+  const value: EventValue = track.value(seconds);
+  if (typeof value !== 'number') throw new Error('数值轨道返回了非数值');
+  return value;
+}
+
 test('音乐和打击音量分别即时应用，打击音默认 30%，迁移保留原音量', async () => {
-  const context = { destination: {}, createGain: () => ({ gain: { value: 1 }, connect() {} }) };
+  const context: AudioContextLike = { currentTime: 0, destination: {}, createGain: () => ({ gain: { value: 1 }, connect() { return undefined; } }),
+    createBufferSource: () => ({ buffer: null, playbackRate: { value: 1 }, connect() { return undefined; }, disconnect() {}, stop() {}, start() {} }),
+    decodeAudioData: async () => ({ duration: 0 }), resume: async () => undefined };
   const audio = new AudioTransport(() => context); audio.ensureContext();
-  const sounds = new HitSounds(audio);
-  for (const name of ['tap', 'drag', 'flick']) sounds.buffers.set(name, {});
+  // `HitSounds` is declared against its own structural transport, which names the real DOM audio
+  // nodes; `AudioTransport` satisfies it at runtime and is converted once here.
+  const sounds = new HitSounds(audio as unknown as ConstructorParameters<typeof HitSounds>[0]);
+  // `prepare` only checks for a buffer's presence; the decode itself is not exercised here.
+  for (const name of ['tap', 'drag', 'flick']) sounds.buffers.set(name, bufferStub());
   await sounds.prepare();
   assert.equal(sounds.volume, 0.3);
   assert.equal(migratePreferences().settings.hitVolume, 0.3);
   audio.setVolume(0.2); sounds.setVolume(0.6);
-  assert.equal(audio.gain.gain.value, 0.2); assert.equal(sounds.gain.gain.value, 0.6);
-  audio.setVolume(0); assert.equal(sounds.gain.gain.value, 0.6);
-  sounds.setVolume(0); assert.equal(audio.gain.gain.value, 0);
+  assert.equal(audioGain(audio).gain.value, 0.2); assert.equal(gainOf(sounds).gain.value, 0.6);
+  audio.setVolume(0); assert.equal(gainOf(sounds).gain.value, 0.6);
+  sounds.setVolume(0); assert.equal(audioGain(audio).gain.value, 0);
   assert.equal(migratePreferences('{"SEVolume":0.8}').settings.hitVolume, 0.8);
 });
 test('事件批改失败不产生部分提交，跨层镜像粘贴与撤销保持未知字段', () => {
@@ -109,7 +139,7 @@ test('事件拆分跨 BPM 与倍率保持原缓动采样，拒绝不支持的切
     const event = { ...createEvent(-20, 70, 1, 8), easingType: kind, easingLeft: 0.1, easingRight: 0.9 };
     const original = new EventTrack([event], tempo, 1.5);
     const divided = new EventTrack(splitEvent(event, 3, tempo, 1.5), tempo, 1.5);
-    for (let beat = 1; beat < 8; beat += 0.071) assert.ok(Math.abs(original.value(tempo.seconds(beat, 1.5)) - divided.value(tempo.seconds(beat, 1.5))) < 1e-7, `easing ${kind} beat ${beat}`);
+    for (let beat = 1; beat < 8; beat += 0.071) assert.ok(Math.abs(numericSample(original, tempo.seconds(beat, 1.5)) - numericSample(divided, tempo.seconds(beat, 1.5))) < 1e-7, `easing ${kind} beat ${beat}`);
   }
   assert.throws(() => splitEvent({ ...createEvent(0, 1), bezier: 1 }, 0.5, tempo));
   assert.throws(() => splitEvent(createEvent(0, 1), 1, tempo));
@@ -133,11 +163,11 @@ test('打击音时间遵循 offset、倍率、类型及假音符', () => {
 
 test('打击音不重复调度，seek 和暂停取消旧声音，倍速换算启动时间', () => {
   const chart = createChart(); chart.judgeLineList[0].notes = [createNote(1, 2, 0), createNote(1, 4, 0)];
-  const scheduled = [];
-  const transport = { playing: true, time: 0.95, rate: 2, playRevision: 1, context: { currentTime: 10, createBufferSource() {
-    const source = { connect() {}, disconnect() {}, start(at) { this.at = at; scheduled.push(this); }, stop() { this.stopped = true; } }; return source;
+  const scheduled: FakeSource[] = [];
+  const transport: FakeHitTransport = { playing: true, time: 0.95, rate: 2, playRevision: 1, context: { currentTime: 10, createBufferSource() {
+    const source: FakeSource = { connect() {}, disconnect() {}, start(at) { this.at = at; scheduled.push(this); }, stop() { this.stopped = true; } }; return source;
   } } };
-  const sounds = new HitSounds(transport); sounds.gain = {}; sounds.buffers.set('tap', {});
+  const sounds = hitSounds(transport); sounds.gain = gainStub(); sounds.buffers.set('tap', bufferStub());
   const tempo = new TempoMap(chart.BPMList);
   sounds.tick(chart, tempo); sounds.tick(chart, tempo);
   assert.equal(scheduled.length, 1); assert.equal(scheduled[0].at, 10.025);
@@ -150,11 +180,11 @@ test('打击音不重复调度，seek 和暂停取消旧声音，倍速换算启
 
 test('高密度打击音限制瞬时声部，避免集中调度拖垮音频线程', () => {
   const chart = createChart(); chart.judgeLineList[0].notes = Array.from({ length: 500 }, () => createNote(1, 2, 0));
-  const scheduled = [];
-  const transport = { playing: true, time: 0.95, rate: 1, playRevision: 1, context: { currentTime: 10, createBufferSource() {
-    const source = { connect() {}, disconnect() {}, start(at) { this.at = at; scheduled.push(this); }, stop() {} }; return source;
+  const scheduled: FakeSource[] = [];
+  const transport: FakeHitTransport = { playing: true, time: 0.95, rate: 1, playRevision: 1, context: { currentTime: 10, createBufferSource() {
+    const source: FakeSource = { connect() {}, disconnect() {}, start(at) { this.at = at; scheduled.push(this); }, stop() {} }; return source;
   } } };
-  const sounds = new HitSounds(transport); sounds.gain = {}; sounds.buffers.set('tap', {});
+  const sounds = hitSounds(transport); sounds.gain = gainStub(); sounds.buffers.set('tap', bufferStub());
   sounds.tick(chart, new TempoMap(chart.BPMList));
   assert.equal(scheduled.length, sounds.maxSameTime);
   assert.ok(scheduled.length <= sounds.maxBurst);

@@ -11,7 +11,10 @@ import { snapPosition, snapTime, verticalGrid, placementRange } from '../core/ed
 import { SPECIAL_TRACKS, eventChains, simultaneousNotes, strokeIntersects } from '../core/editor-display.ts';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.ts';
 import { lineDisplayLabel } from '../core/line-groups.ts';
-import type { Chart, ChartEvent, EventLayer, Note } from '../core/types.ts';
+import type { AnyEventType, Beat, Chart, ChartEvent, EventLayer, JudgeLine, Note } from '../core/types.ts';
+import type { IndexedInterval } from '../core/interval-index.ts';
+import type { EventChain } from '../core/editor-display.ts';
+import type { ShaderLanePlacement } from '../core/shader-events.ts';
 
 export const NOTE_COLORS: Record<number, string> = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
 const isHookedEvent = (event: ChartEvent | undefined): boolean => event?.inst === true || Number(event?.inst) === 1;
@@ -40,6 +43,21 @@ export interface TimelineSession {
   multiLineMode: 'notes' | 'events';
   multiLineIndices: number[];
   multiLineActive: boolean;
+  /** The lines the multi-line view is editing: the selected ones, or just `lineIndex`. */
+  targetLineIndices: number[];
+  /** Whether the note panels render as one merged panel. */
+  multiLineMerge: boolean;
+  /** Per-line note selections, and the event equivalent, both keyed by line index. */
+  multiLineSelection: Map<number, Set<number>>;
+  multiEventSelection: Map<number, Set<string>>;
+  /** Which area the in-flight multi-selection gesture started in. */
+  multiSelectionIntent: 'notes' | 'events' | null;
+  /** Redraws the editor; the timeline calls it after it mutates the selection. */
+  notify(): void;
+  /** Switches the active line, keeping the per-line selections the timeline maintains. */
+  selectLine(index: number): void;
+  insertNotesAt(lineIndex: number, notes: Note[], label?: string): boolean;
+  transformSelection(label: string, change: (note: Note | undefined, entry: import('../application/event-commands.ts').EventSelectionEntry | { lineIndex: number; index: number }) => Note): void;
   clipboardVisible?: boolean;
   shaderAutoAlign?: boolean;
   /** Set by the editor around programmatic edits so watchers can ignore their own writes. */
@@ -104,6 +122,22 @@ export interface NoteHit {
 }
 
 /**
+ * One drawn event bar, as pushed into {@link Timeline.eventRects}.
+ *
+ * `EventInteraction` hit-tests the rectangle and reads `type` / `index` / `lineIndex` back to map a
+ * click onto the event it came from, so the geometry and the address are declared together.
+ */
+export interface EventRectangle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  index: number;
+  type: AnyEventType;
+  lineIndex: number;
+}
+
+/**
  * Sizes a canvas to its CSS box at the current device pixel ratio and clears it.
  *
  * The context is rescaled on every call because setting `width`/`height` resets the transform; the
@@ -153,7 +187,8 @@ export class Timeline {
   pendingHold: unknown;
   tempo: TempoMap;
   curvePick: { start?: number; end?: number; [key: string]: unknown } | null;
-  eventRects: unknown[];
+  /** One drawn event bar; `EventInteraction` hit-tests these and reads `lineIndex` back. */
+  eventRects: EventRectangle[];
   eventInteraction: EventInteraction;
   noteScale: number;
   originalPanelWidth: number;
@@ -166,16 +201,22 @@ export class Timeline {
   multiLineScrollElement: HTMLInputElement | null;
   scrollSpeed: number;
   gridCount: number;
-  chains?: unknown[];
-  chainRanges?: unknown[];
+  /** Per-track event chains, and the index-to-chain lookup, both in `eventTypes` order. */
+  chains?: EventChain[][];
+  chainRanges?: Map<number, EventChain>[];
   clipboardPointer?: unknown;
   cursorLineIndex?: number;
-  eventIndexes?: TimelineIndex;
-  noteIndexes?: TimelineIndex;
+  /** Per-track event index in `eventTypes` order. */
+  eventIndexes?: IntervalIndex<ChartEvent>[];
+  /** Per-line note index; the `notes` array is kept beside it so a rebuilt document is noticed. */
+  noteIndexes?: Map<number, { notes: Note[]; index: IntervalIndex<Note> }>;
   highlightChart?: Chart;
   hoverArea?: string;
-  indexedLayer?: number;
-  shaderLanes?: unknown[];
+  /** The chart the event caches were built for; a different one invalidates them. */
+  indexedLayer?: Chart;
+  /** The `lineIndex:extended:layer` key the event caches were built for. */
+  eventIndexKey?: string;
+  shaderLanes?: Map<number, ShaderLanePlacement>;
   bulkPreview?: { session: TimelineSession } | null;
   /**
    * The hooks and extra display state the composition root installs after construction.
@@ -184,17 +225,44 @@ export class Timeline {
    * every member it carries and the editor cannot grow the type from a distance.
    */
   /** Placement type the next event edit uses; pushed by the event editing commands and layer buttons. */
-  eventPlacementType: string;
+  // The three below are installed by `app.ts` immediately after construction, exactly as before:
+  // they are still `undefined` until then, so `!` records the existing runtime behaviour instead of
+  // inventing an initial value that the old code never had.
+  eventPlacementType!: string;
   /** Which clipboard gesture the keyup handler is mirroring; `{}` when none is active. */
-  clipboardMode: { mirror?: boolean; keepTime?: boolean };
+  clipboardMode!: { mirror?: boolean; keepTime?: boolean };
   /** Notifies the user; the timeline calls it with no arguments. */
-  notify: (message?: string, level?: string) => void;
+  notify!: (message?: string, level?: string) => void;
   /** Callback that offers the note under the preview cursor; `false` means "not handled". */
   previewPick?: (event: PointerEvent) => boolean;
   /** Callback that supplies the curve editor's anchor ghost notes. */
   curveGhost?: () => Note[];
   /** The note texture skin, installed once the document is loaded. */
   skin?: unknown;
+  /**
+   * Display tuning installed by `app.ts`'s display-options wiring.
+   *
+   * Every one of these is read through `?? <fallback>`, so they stay optional and an unset value
+   * keeps behaving exactly as the old `undefined` did. `cameraX`/`notesOnly` also arrive through
+   * `view-controls.ts`'s declaration merge, which declares them non-optional; the modifiers have to
+   * match across a merge, so they are declared non-optional here too and initialised in the
+   * constructor to the same values that module writes.
+   */
+  barWidth?: number;
+  barAlpha?: number;
+  columnGap?: number;
+  cameraX: number;
+  notesOnly: boolean;
+  highlight?: boolean;
+  seamlessEvents?: boolean;
+  eventOpacity?: number;
+  eventBarWidth?: number;
+  eventCurveThreshold?: number;
+  eventValueThreshold?: number;
+  eventValueFontSize?: number;
+  /** The simultaneous-note set and the tempo it was computed for, cached across frames. */
+  highlightTempo?: TempoMap;
+  simultaneous?: Set<Note>;
 
   constructor(notesCanvas: HTMLCanvasElement, eventsCanvas: HTMLCanvasElement, getSession: () => TimelineSession,
     onEvent: (event: unknown, canvas: HTMLCanvasElement) => void, changed: () => void,
@@ -234,6 +302,11 @@ export class Timeline {
     this.multiLineScrollElement = null;
     this.scrollSpeed = 1;
     this.gridCount = 11;
+    // `view-controls.ts`'s declaration merge requires these two to be non-optional, and it writes
+    // the same defaults (`0` / `false`) whenever the stored preference is absent — which is what the
+    // old unset value effectively produced, since every read goes through a `typeof` guard.
+    this.cameraX = 0;
+    this.notesOnly = false;
     for (const canvas of [notesCanvas, eventsCanvas]) {
       canvas.addEventListener('wheel', event => {
         event.preventDefault();
@@ -254,27 +327,50 @@ export class Timeline {
     return { x: event.clientX - rectangle.left, y: event.clientY - rectangle.top };
   }
 
-  rectangleSelection() {
-    if (this.drag?.kind === 'rectangle') return { drag: this.drag, canvas: this.notesCanvas, area: 'notes' };
-    if (this.eventInteraction.drag?.kind === 'rectangle') return { drag: this.eventInteraction.drag, canvas: this.eventsCanvas, area: 'events' };
+  /**
+   * True once `SelectionOverlay` is installed, which takes over drawing the marquee.
+   *
+   * When it is set the timeline stops drawing the selection rectangle itself, so the two do not
+   * paint over each other.
+   */
+  marqueeOverlay?: boolean;
+
+  /**
+   * The in-flight rectangle gesture, whichever area started it.
+   *
+   * Both branches narrow on `kind === 'rectangle'` first. The event drag is handed over through a
+   * `RectangleDrag` view of the *same* object, not a copy: the callers below mutate `current` and
+   * `currentWorldX` on what they get back, so the identity has to be preserved.
+   */
+  rectangleSelection(): { drag: RectangleDrag; canvas: HTMLCanvasElement; area: 'notes' | 'events' } | null {
+    const drag = this.drag;
+    if (drag?.kind === 'rectangle') return { drag, canvas: this.notesCanvas, area: 'notes' };
+    const eventDrag = this.eventInteraction.drag;
+    if (eventDrag?.kind === 'rectangle') {
+      // `EventDrag.kind` is a plain `string`, so narrowing on the literal leaves the member too wide
+      // to satisfy `RectangleDrag`; the check above is what proves the literal, and the binding
+      // records the narrowed view without copying (the callers mutate through it).
+      const rectangle: RectangleDrag = eventDrag as RectangleDrag;
+      return { drag: rectangle, canvas: this.eventsCanvas, area: 'events' };
+    }
     return null;
   }
 
-  rectangleStart(drag) {
+  rectangleStart(drag: RectangleDrag): CanvasPoint {
     const scroll = drag.startWorldX === undefined ? 0 : this.multiLineViewportOffset((drag.area === 'events' ? this.eventsCanvas : this.notesCanvas).clientWidth, drag.area ?? 'notes');
     const height = (drag.area === 'events' ? this.eventsCanvas : this.notesCanvas).clientHeight;
     const factor = drag.startFactor ?? this.factor;
     return { x: drag.startWorldX === undefined ? drag.start.x : drag.startWorldX - scroll, y: drag.startSeconds === undefined ? drag.start.y : height - 42 - (drag.startSeconds - this.tempo.seconds(this.origin, factor)) * this.scale };
   }
 
-  rectangleTimes(drag) {
+  rectangleTimes(drag: RectangleDrag): [number, number] {
     const factor = drag.startFactor ?? this.factor;
     const start = drag.startSeconds ?? this.timeAt(drag.start.y);
     const current = drag.currentSeconds ?? (this.tempo.seconds(this.origin, factor) + (this.viewHeight() - 42 - drag.current.y) / this.scale);
     return [this.tempo.beat(Math.min(start, current), factor) - 1e-8, this.tempo.beat(Math.max(start, current), factor) + 1e-8];
   }
 
-  updateRectangle(event) {
+  updateRectangle(event: PointerEvent | MouseEvent): void {
     const selection = this.rectangleSelection(); if (!selection) return;
     selection.drag.current = this.point(event, selection.canvas);
     selection.drag.currentWorldX = selection.drag.current.x + this.multiLineViewportOffset(selection.canvas.clientWidth, selection.area);
@@ -282,7 +378,7 @@ export class Timeline {
     this.changed();
   }
 
-  finishRectangle(event) {
+  finishRectangle(event: MouseEvent | PointerEvent): boolean {
     const selection = this.rectangleSelection();
     if (!selection || ![0, 1, 2].includes(event.button)) return false;
     selection.drag.finished = true;
@@ -290,18 +386,26 @@ export class Timeline {
     return true;
   }
 
-  get eventTypes() { return this.extended ? SPECIAL_TRACKS.map(track => track.key) : EVENT_TYPES; }
+  /**
+   * The tracks drawn across the events canvas, in channel order.
+   *
+   * `SPECIAL_TRACKS` is a plain array literal, so its `key` widens to `string`; the callback return
+   * annotation narrows each one back to the event-track union it actually holds.
+   */
+  get eventTypes(): readonly AnyEventType[] {
+    return this.extended ? SPECIAL_TRACKS.map((track): AnyEventType => track.key as AnyEventType) : EVENT_TYPES;
+  }
 
-  eventColumnBounds(channel, width) {
+  eventColumnBounds(channel: number, width: number): { channelWidth: number; x: number; width: number } {
     const channelWidth = width / this.eventTypes.length;
     const barWidth = channelWidth * Math.max(0.35, Math.min(1, this.eventBarWidth ?? 0.82));
     return { channelWidth, x: channel * channelWidth + (channelWidth - barWidth) / 2, width: barWidth };
   }
 
-  get factor() { return this.getSession().line?.bpmfactor ?? 1; }
-  viewHeight() { return this.getSession().multiLineActive && this.getSession().multiLineMode === 'events' ? this.eventsCanvas.clientHeight : this.notesCanvas.clientHeight; }
+  get factor(): number { return this.getSession().line?.bpmfactor ?? 1; }
+  viewHeight(): number { return this.getSession().multiLineActive && this.getSession().multiLineMode === 'events' ? this.eventsCanvas.clientHeight : this.notesCanvas.clientHeight; }
   factorForLine(lineIndex: number): number { return this.getSession().chart.judgeLineList?.[lineIndex]?.bpmfactor ?? 1; }
-  verticalForLine(beat, lineIndex, height = this.viewHeight()) { const factor = this.factorForLine(lineIndex); return height - 42 - (this.tempo.seconds(beat, factor) - this.tempo.seconds(this.origin, factor)) * this.scale; }
+  verticalForLine(beat: number, lineIndex: number, height = this.viewHeight()): number { const factor = this.factorForLine(lineIndex); return height - 42 - (this.tempo.seconds(beat, factor) - this.tempo.seconds(this.origin, factor)) * this.scale; }
   beatRangeForLine(lineIndex, height = this.viewHeight()) {
     const factor = this.factorForLine(lineIndex);
     const bottom = this.tempo.beat(this.timeAt(height), factor);

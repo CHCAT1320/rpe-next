@@ -6,7 +6,7 @@ import { parseChart, serializeChart } from '../src/core/chart.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const source = process.argv[2] ?? resolve(root, '../build/Release.win32/VS2015/PhiEditer/Resources');
-const report = { source: 'Original Resources (read only)', tested: 0, passed: 0, versions: {}, notes: 0, failures: [], skipped: 0 };
+const report = { source: 'Original Resources (read only)', tested: 0, passed: 0, versions: {} as Record<string, number>, notes: 0, failures: [] as { file: string; error: string }[], skipped: 0 };
 for (const directory of await readdir(source, { withFileTypes: true })) {
   if (!directory.isDirectory()) continue;
   for (const name of await readdir(join(source, directory.name))) {
@@ -23,8 +23,8 @@ for (const directory of await readdir(source, { withFileTypes: true })) {
       report.passed++;
       const version = original.META?.RPEVersion ?? 'unknown';
       report.versions[version] = (report.versions[version] ?? 0) + 1;
-      report.notes += (original.judgeLineList ?? []).reduce((sum, line) => sum + (line.notes?.length ?? 0), 0);
-    } catch (error) { report.failures.push({ file: `${directory.name}/${name}`, error: error.message }); }
+      report.notes += (original.judgeLineList ?? []).reduce((sum: number, line: { notes?: unknown[] }) => sum + (line.notes?.length ?? 0), 0);
+    } catch (error) { report.failures.push({ file: `${directory.name}/${name}`, error: error instanceof Error ? error.message : String(error) }); }
   }
 }
 await writeFile(join(root, 'docs/compatibility-report.json'), JSON.stringify(report, null, 2));

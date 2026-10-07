@@ -2,11 +2,12 @@ import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanMigration } from '../src/platform/migration.ts';
+import type { MigrationEntry } from '../src/platform/migration.ts';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
 const root = process.argv[2] ?? resolve(project, '../build/Release.win32/VS2015/PhiEditer');
-const entries = [];
-async function collect(directory, prefix = '') {
+const entries: MigrationEntry[] = [];
+async function collect(directory: string, prefix = ''): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = prefix + entry.name;
     if (entry.isDirectory()) {
@@ -15,9 +16,12 @@ async function collect(directory, prefix = '') {
       entries.push({ path, getFile: async () => {
         const source = join(root, path);
         const info = await stat(source);
-        return { size: info.size, arrayBuffer: async () => {
+        // scanMigration only reads size and arrayBuffer from an entry's file; a full File is not
+        // available under Node, so the entry carries the minimal shape the scanner consumes.
+        const file = { size: info.size, arrayBuffer: async () => {
           const bytes = await readFile(source); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         } };
+        return file as unknown as File;
       } });
     }
   }

@@ -12,8 +12,18 @@ const notesOnly = process.argv.includes('--notes-only');
 const textureRoot = join(root, 'public', 'assets', 'rpe', 'Texture');
 const soundRoot = join(root, 'public', 'assets', 'rpe', 'SE');
 mkdirSync(textureRoot, { recursive: true });
-const clamp = value => Math.max(0, Math.min(1, value));
-const blend = (pixels, index, red, green, blue, alpha) => {
+
+/** An RGBA pixel buffer plus its dimensions, as produced by {@link canvas}. */
+interface Image { width: number; height: number; pixels: Buffer; }
+/** An RGB triple supplied to the drawing helpers. */
+type Color = [number, number, number];
+/** A flat RGBA byte buffer that the drawing helpers blend into in place. */
+type Pixels = Buffer;
+/** Draws into a freshly allocated pixel buffer. */
+type Draw = (pixels: Pixels, width: number, height: number) => void;
+
+const clamp = (value: number): number => Math.max(0, Math.min(1, value));
+const blend = (pixels: Pixels, index: number, red: number, green: number, blue: number, alpha: number): void => {
   const sourceAlpha = clamp(alpha); if (!sourceAlpha) return;
   const destinationAlpha = pixels[index + 3] / 255; const outputAlpha = sourceAlpha + destinationAlpha * (1 - sourceAlpha);
   if (!outputAlpha) return;
@@ -22,8 +32,8 @@ const blend = (pixels, index, red, green, blue, alpha) => {
   pixels[index + 2] = Math.round((blue * sourceAlpha + pixels[index + 2] * destinationAlpha * (1 - sourceAlpha)) / outputAlpha);
   pixels[index + 3] = Math.round(outputAlpha * 255);
 };
-const canvas = (width, height, draw) => { const pixels = Buffer.alloc(width * height * 4); draw(pixels, width, height); return { width, height, pixels }; };
-const rounded = (pixels, width, height, left, top, right, bottom, radius, color, alpha = 1) => {
+const canvas = (width: number, height: number, draw: Draw): Image => { const pixels = Buffer.alloc(width * height * 4); draw(pixels, width, height); return { width, height, pixels }; };
+const rounded = (pixels: Pixels, width: number, height: number, left: number, top: number, right: number, bottom: number, radius: number, color: Color, alpha = 1): void => {
   const centerX = (left + right) / 2; const centerY = (top + bottom) / 2; const halfX = Math.max(0, (right - left) / 2 - radius); const halfY = Math.max(0, (bottom - top) / 2 - radius);
   const startX = Math.max(0, Math.floor(left - 2)); const endX = Math.min(width, Math.ceil(right + 2)); const startY = Math.max(0, Math.floor(top - 2)); const endY = Math.min(height, Math.ceil(bottom + 2));
   for (let y = startY; y < endY; y++) for (let x = startX; x < endX; x++) {
@@ -31,19 +41,21 @@ const rounded = (pixels, width, height, left, top, right, bottom, radius, color,
     const coverage = clamp(0.5 - outside); if (coverage > 0) blend(pixels, (y * width + x) * 4, ...color, alpha * coverage);
   }
 };
-const diamond = (pixels, width, height, centerX, centerY, radius, color, alpha = 1) => {
+const diamond = (pixels: Pixels, width: number, height: number, centerX: number, centerY: number, radius: number, color: Color, alpha = 1): void => {
   const left = Math.max(0, Math.floor(centerX - radius)); const right = Math.min(width, Math.ceil(centerX + radius)); const top = Math.max(0, Math.floor(centerY - radius)); const bottom = Math.min(height, Math.ceil(centerY + radius));
   for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) { const coverage = clamp(1 - (Math.abs(x - centerX) + Math.abs(y - centerY)) / radius); if (coverage > 0) blend(pixels, (y * width + x) * 4, ...color, alpha * coverage); }
 };
-const writePng = (file, image) => {
+function writePng(file: string, image: Image): void {
   const crcTable = writePng.crcTable ??= Array.from({ length: 256 }, (unused, index) => { let value = index; for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1; return value >>> 0; });
-  const crc = data => { let value = 0xffffffff; for (const byte of data) value = crcTable[(value ^ byte) & 255] ^ (value >>> 8); return (value ^ 0xffffffff) >>> 0; };
-  const chunk = (type, data) => { const body = Buffer.concat([Buffer.from(type), data]); const result = Buffer.alloc(12 + data.length); result.writeUInt32BE(data.length, 0); body.copy(result, 4); result.writeUInt32BE(crc(body), data.length + 8); return result; };
+  const crc = (data: Buffer): number => { let value = 0xffffffff; for (const byte of data) value = crcTable[(value ^ byte) & 255] ^ (value >>> 8); return (value ^ 0xffffffff) >>> 0; };
+  const chunk = (type: string, data: Buffer): Buffer => { const body = Buffer.concat([Buffer.from(type), data]); const result = Buffer.alloc(12 + data.length); result.writeUInt32BE(data.length, 0); body.copy(result, 4); result.writeUInt32BE(crc(body), data.length + 8); return result; };
   const rows = Buffer.alloc((image.width * 4 + 1) * image.height); for (let y = 0; y < image.height; y++) { rows[(image.width * 4 + 1) * y] = 0; image.pixels.copy(rows, (image.width * 4 + 1) * y + 1, image.width * 4 * y, image.width * 4 * (y + 1)); }
   const header = Buffer.alloc(13); header.writeUInt32BE(image.width, 0); header.writeUInt32BE(image.height, 4); header[8] = 8; header[9] = 6;
   writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows, { level: 9 })), chunk('IEND', Buffer.alloc(0))]));
-};
-const head = (width, height, color, bodyHeight, highlight = false, hold = false) => canvas(width, height, (pixels, canvasWidth, canvasHeight) => {
+}
+// The lookup table is memoised across calls; Node's type stripper keeps this declaration erasable.
+writePng.crcTable = undefined as number[] | undefined;
+const head = (width: number, height: number, color: Color, bodyHeight: number, highlight = false, hold = false): Image => canvas(width, height, (pixels, canvasWidth, canvasHeight) => {
   const top = hold ? 0 : (canvasHeight - bodyHeight) / 2;
   const bottom = top + bodyHeight;
   const radius = hold ? 0 : bodyHeight * 0.3;
@@ -61,7 +73,7 @@ const head = (width, height, color, bodyHeight, highlight = false, hold = false)
   const inset = hold ? 7 : 9;
   rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.12, top + inset, canvasWidth * 0.88, bottom - inset, hold ? 0 : bodyHeight * 0.2, color, 1);
 });
-const holdBody = (width, height, color) => canvas(width, height, (pixels, canvasWidth, canvasHeight) => {
+const holdBody = (width: number, height: number, color: Color): Image => canvas(width, height, (pixels, canvasWidth, canvasHeight) => {
   rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.06, -1, canvasWidth * 0.94, canvasHeight + 1, 0, [255, 255, 255], 0.7);
   rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.12, -1, canvasWidth * 0.88, canvasHeight + 1, 0, color, 0.9);
 });
@@ -94,7 +106,7 @@ for (let frame = 1; !notesOnly && frame <= 31; frame++) {
   });
   writePng(join(textureRoot, `img-${frame}.png`), image);
 }
-const wav = (name, duration, tone) => { const sampleRate = 44100; const count = Math.round(sampleRate * duration); const samples = new Int16Array(count); for (let index = 0; index < count; index++) { const time = index / sampleRate; const value = tone(time, duration); samples[index] = Math.max(-32767, Math.min(32767, Math.round(value * 28000))); } const data = Buffer.alloc(44 + samples.byteLength); data.write('RIFF', 0); data.writeUInt32LE(36 + samples.byteLength, 4); data.write('WAVE', 8); data.write('fmt ', 12); data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(1, 22); data.writeUInt32LE(sampleRate, 24); data.writeUInt32LE(sampleRate * 2, 28); data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34); data.write('data', 36); data.writeUInt32LE(samples.byteLength, 40); for (let index = 0; index < samples.length; index++) data.writeInt16LE(samples[index], 44 + index * 2); const folder = mkdtempSync(join(tmpdir(), 'rpe-safe-')); const input = join(folder, `${name}.wav`); const output = join(soundRoot, `${name}.ogg`); writeFileSync(input, data); execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-i', input, '-c:a', 'libvorbis', '-q:a', '4', output]); };
+const wav = (name: string, duration: number, tone: (time: number, duration: number) => number): void => { const sampleRate = 44100; const count = Math.round(sampleRate * duration); const samples = new Int16Array(count); for (let index = 0; index < count; index++) { const time = index / sampleRate; const value = tone(time, duration); samples[index] = Math.max(-32767, Math.min(32767, Math.round(value * 28000))); } const data = Buffer.alloc(44 + samples.byteLength); data.write('RIFF', 0); data.writeUInt32LE(36 + samples.byteLength, 4); data.write('WAVE', 8); data.write('fmt ', 12); data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(1, 22); data.writeUInt32LE(sampleRate, 24); data.writeUInt32LE(sampleRate * 2, 28); data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34); data.write('data', 36); data.writeUInt32LE(samples.byteLength, 40); for (let index = 0; index < samples.length; index++) data.writeInt16LE(samples[index], 44 + index * 2); const folder = mkdtempSync(join(tmpdir(), 'rpe-safe-')); const input = join(folder, `${name}.wav`); const output = join(soundRoot, `${name}.ogg`); writeFileSync(input, data); execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-i', input, '-c:a', 'libvorbis', '-q:a', '4', output]); };
 wav('tap', 0.09, (time, duration) => Math.sin(2 * Math.PI * (920 - 280 * time / duration) * time) * Math.exp(-time * 34));
 wav('drag', 0.14, (time, duration) => (Math.sin(2 * Math.PI * (340 + 520 * time / duration) * time) * 0.7 + Math.sin(2 * Math.PI * 1170 * time) * 0.18) * Math.exp(-time * 17));
 wav('flick', 0.13, (time, duration) => (Math.sin(2 * Math.PI * (1250 - 650 * time / duration) * time) + Math.sin(2 * Math.PI * 2100 * time) * 0.22) * Math.exp(-time * 23));

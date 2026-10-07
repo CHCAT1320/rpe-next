@@ -12,7 +12,7 @@ await access(join(root, 'dist', 'index.html')).catch(() => { throw new Error('di
 const server = await preview({ root, logLevel: 'warn' });
 const origin = server.resolvedUrls?.local?.[0]?.replace(/\/$/, '');
 if (!origin) { await server.close(); throw new Error('无法确定预览服务器地址'); }
-const get = (path) => fetch(`${origin}${path}`);
+const get = (path: string): Promise<Response> => fetch(`${origin}${path}`);
 try {
   const html = await (await get('/')).text();
   const script = html.match(/src="([^"]+\.js)"/)?.[1];

@@ -35,7 +35,7 @@ interface SkinImage {
  * forward it back into `tintedSource`, and the test suite substitutes plain stand-ins, so only the
  * members that path reads are declared.
  */
-interface DrawableImage extends SkinImage {
+export interface DrawableImage extends SkinImage {
   readonly source?: SkinImage;
   /** Cleared by `platform/images.ts` when it releases a decoded record. */
   close?: () => void;

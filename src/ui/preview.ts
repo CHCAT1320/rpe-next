@@ -370,9 +370,13 @@ export class Preview {
     context.restore();
     let shaderRendered = false;
     if (shaderEffects.length) {
-      // `active` reports each effect's shader name and the source it was authored under; the
-      // callback is bound here so the pipeline's untyped parameter still has a declared shape.
-      shaderRendered = this.shaderPipeline.render(this.canvas, this.shaderCanvas, shaderEffects, seconds, (effect: ShaderPass) => this.shaderRuntime.source(effect.shader, effect.sourceName), viewport);
+      // `active` reports each effect's shader name and the source it was authored under; both are
+      // read here, so the callback is bound to the effect record rather than the pipeline's
+      // narrower `ShaderPass` view. The shader canvas is only null before the first layout, and
+      // `render` re-checks the target through `ensure`, so the original passed it straight through;
+      // the assertion is erased at runtime.
+      const shaderEffect = (effect: typeof shaderEffects[number]): string => this.shaderRuntime.source(effect.shader, effect.sourceName);
+      shaderRendered = this.shaderPipeline.render(this.canvas, this.shaderCanvas as HTMLCanvasElement, shaderEffects, seconds, shaderEffect, viewport);
       if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
     } else if (this.shaderCanvas) this.shaderCanvas.style.visibility = 'hidden';
     if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : String(clamp(this.opacity));

@@ -72,7 +72,9 @@ export function drawGameUi(context: CanvasRenderingContext2D, chart: Chart, stat
     context.globalAlpha = alpha; context.fillStyle = `rgb(${color.join(',')})`;
     if (item.key === 'pause') {
       const picture = skin?.tinted('Pause', color);
-      if (picture) context.drawImage(picture, 0, 0, item.width * baseScale, item.height * baseScale);
+      // Same boundary as `skin.ts`'s own `drawImage` call: the record is a decoded `<img>` or the
+      // offscreen canvas `tinted` painted, and only the drawing surface consumes it.
+      if (picture) context.drawImage(picture as unknown as CanvasImageSource, 0, 0, item.width * baseScale, item.height * baseScale);
     } else if (item.key === 'bar') {
       context.fillRect(0, -item.height * baseScale / 2, viewport.width / viewport.scale * baseScale * progress, item.height * baseScale);
     } else {

@@ -37,11 +37,16 @@ interface CanvasMetrics {
 /** A canvas the pipeline can also read its on-page rectangle from. */
 type MeasuredCanvas = ShaderCanvas & CanvasMetrics;
 
-/** One rendering pass: the shader to run and the parameters the chart supplied for it. */
+/**
+ * One rendering pass: the shader to run and the parameters the chart supplied for it.
+ *
+ * Deliberately not an index-signature bag: the effects this receives at runtime are
+ * `ActiveShaderEffect` records from `core/shader.ts`, and an interface without an index signature
+ * cannot satisfy one. `render` and `setUniforms` read only these two members.
+ */
 export interface ShaderPass {
   shader: string;
   values: Record<string, unknown>;
-  [key: string]: unknown;
 }
 
 /**
@@ -242,8 +247,15 @@ export class ShaderPipeline {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, inputTexture); this.setUniforms(result, values, seconds, width, height, rect, resolution); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  render(sourceCanvas: ShaderCanvas, targetCanvas: ShaderCanvas, passes: ShaderPass[], seconds: number,
-    sourceFor: (pass: ShaderPass) => string | undefined, viewport: PreviewViewport): boolean {
+  /**
+   * Runs the passes and composites the result into the target canvas.
+   *
+   * Generic over the pass type because the caller's records are richer than `ShaderPass` (they also
+   * carry the shader's source name, which `sourceFor` reads) and an interface without an index
+   * signature cannot satisfy a narrower structural view. Only `shader` and `values` are read here.
+   */
+  render<P extends ShaderPass>(sourceCanvas: ShaderCanvas, targetCanvas: ShaderCanvas, passes: P[], seconds: number,
+    sourceFor: (pass: P) => string | undefined, viewport: PreviewViewport): boolean {
     if (!passes.length || !this.ensure(targetCanvas)) return false;
     const gl = this.gl!; const width = sourceCanvas.width; const height = sourceCanvas.height;
     if (targetCanvas.width !== width || targetCanvas.height !== height || this.textureWidth !== width || this.textureHeight !== height) {

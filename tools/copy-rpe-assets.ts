@@ -19,8 +19,8 @@ const paths = [...textures.map(name => `Texture/${name}.png`), ...icons.map(name
   ...Array.from({ length: 31 }, (unused, index) => `Texture/img-${index + 1}.png`),
   ...shaderPaths, ...shaderPrPaths,
   'fonts/cmdysj.ttf', 'icons/rpelogo.png', 'SE/tap.ogg', 'SE/drag.ogg', 'SE/flick.ogg'];
-const manifest = { source: 'Original RPE Resources, reused with owner permission; originals are read only.', files: [] };
-const shaderFixes = {
+const manifest = { source: 'Original RPE Resources, reused with owner permission; originals are read only.', files: [] as { path: string; bytes: number; sha256: string }[] };
+const shaderFixes: Record<string, (text: string) => string> = {
   'shaders/oil_painting.glsl': text => text.replace('float m = -1; m <= 1;', 'float m = -1.0; m <= 1.0;').replace('float n = -1; n <= 1;', 'float n = -1.0; n <= 1.0;'),
   'shaders/lightning.glsl': text => text.replace('float i = 0; i < numBolts;', 'float i = 0.0; i < numBolts;'),
   'shaders/heat_distortion.glsl': text => text.replace(') * 2 - 1.0;', ') * 2.0 - 1.0;'),

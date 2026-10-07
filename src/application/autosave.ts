@@ -15,8 +15,13 @@ export class AutoSaveClock {
   last: number;
   /** True while a save is queued or in flight, so ticks cannot overlap. */
   pending: boolean;
-  /** Handle for the queued callback, or `null` when nothing is queued. */
-  timer: number | null;
+  /**
+   * Handle for the queued callback, or `null` when nothing is queued.
+   *
+   * The clock is whichever this runtime provides: a browser timer handle is a number, while Node's
+   * `setTimeout` returns a `Timeout` object, and the idle-callback path returns neither.
+   */
+  timer: number | ReturnType<typeof globalThis.setTimeout> | null;
 
   constructor(save: SaveHandler, reportError: SaveErrorHandler) {
     this.save = save;
