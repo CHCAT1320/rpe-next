@@ -8,35 +8,97 @@ import { drawGameUi } from '../src/ui/game-ui.ts';
 import { previewViewport } from '../src/core/editor-display.ts';
 import { Preview } from '../src/ui/preview.ts';
 import { Timeline } from '../src/ui/timeline.ts';
+import type { TimelineSession } from '../src/ui/timeline.ts';
 import { TempoMap } from '../src/core/tempo.ts';
 import { EditorSession } from '../src/application/session.ts';
 import { isPlaybackSpace } from '../src/ui/keyboard.ts';
 import { normalizeEditorPreferences } from '../src/platform/editor-preferences.ts';
 import { migratePreferences, shortcutAction } from '../src/core/preferences.ts';
 
-const curve = { startTime: [0, 0, 1], endTime: [4, 0, 1], startX: -400, endX: 400 };
-function canvas(context = {}) {
+/**
+ * The curve options the tests build from {@link curve} plus overrides.
+ *
+ * `startTime`/`endTime` are `Beat` triples, but an object literal widens them to `number[]`, which is
+ * not a `Beat`. Annotating the shared base once keeps every call site a plain object literal whose
+ * spreads stay assignable.
+ */
+type CurveOptions = Parameters<typeof generateCurveNotes>[0];
+
+const curve: Pick<CurveOptions, 'startTime' | 'endTime' | 'startX' | 'endX'> = { startTime: [0, 0, 1], endTime: [4, 0, 1], startX: -400, endX: 400 };
+
+/** One recorded fake-context call: the method, its arguments and the state read at call time. */
+interface RecordedCall {
+  method: string | symbol;
+  args: unknown[];
+  font: string | undefined;
+  alpha: number | undefined;
+  color: string | undefined;
+}
+
+/**
+ * The recording 2D-context double.
+ *
+ * Every method call is captured and any property read (`font`, `globalAlpha`, `fillStyle`) is
+ * echoed into the record, so assertions can check both the call and the state it was made in. Only
+ * the members the tests touch are declared; this is not a `CanvasRenderingContext2D`.
+ */
+interface RecordingContext {
+  calls: RecordedCall[];
+  font?: string;
+  globalAlpha?: number;
+  fillStyle?: string;
+  [key: string]: unknown;
+}
+
+function recordingContext(): RecordingContext {
+  const calls: RecordedCall[] = [];
+  const target = { calls, font: undefined as string | undefined, globalAlpha: undefined as number | undefined, fillStyle: undefined as string | undefined };
+  return new Proxy(target, { get(object, key) {
+    return key in object ? object[key as keyof typeof object] : (...args: unknown[]) => calls.push({ method: key, args, font: object.font, alpha: object.globalAlpha, color: object.fillStyle });
+  } });
+}
+
+/** A structural double for the canvases `Preview` and `Timeline` are built on. */
+interface CanvasDouble {
+  clientWidth: number;
+  clientHeight: number;
+  style: object;
+  addEventListener(): void;
+  getContext(): RecordingContext | object;
+  getBoundingClientRect(): { width: number; height: number };
+}
+
+function canvas(context: RecordingContext | object = {}): CanvasDouble {
   return { clientWidth: 600, clientHeight: 600, addEventListener() {}, getContext: () => context,
     getBoundingClientRect: () => ({ width: 600, height: 600 }) };
 }
-function recordingContext() {
-  const calls = [];
-  const context = new Proxy({ calls }, { get(target, key) {
-    return key in target ? target[key] : (...args) => calls.push({ method: key, args, font: target.font, alpha: target.globalAlpha, color: target.fillStyle });
-  } });
-  return context;
-}
+
+/**
+ * `Preview` and `Timeline` declare their canvas as the real `HTMLCanvasElement`, which the partial
+ * double above deliberately is not. This is the one place that view is taken.
+ */
+function canvasSurface(context: RecordingContext | object = {}): HTMLCanvasElement { return canvas(context) as unknown as HTMLCanvasElement; }
+
+/** `TimelineSession` is an open bag, so `EditorSession` is handed over through that view here. */
+function timelineSession(session: EditorSession): TimelineSession { return session as unknown as TimelineSession; }
 
 test('曲线按横线分格 × 密度生成，不含端点，29 种缓动均有效，可一次撤销', () => {
   for (let easingType = 1; easingType <= 29; easingType++) {
     const notes = generateCurveNotes({ ...curve, easingType });
     assert.equal(notes.length, 15);
-    assert.equal(beatValue(notes[0].startTime), 0.25);
-    assert.equal(beatValue(notes.at(-1).startTime), 3.75);
+    // `noUncheckedIndexedAccess` makes every index optional; the length is asserted just above, so
+    // these are the first and last of the 15 generated notes.
+    const first = notes[0]; const last = notes.at(-1);
+    assert.ok(first); assert.ok(last);
+    assert.equal(beatValue(first.startTime), 0.25);
+    assert.equal(beatValue(last.startTime), 3.75);
     assert.ok(notes.every(note => note.type === 4 && Number.isFinite(note.positionX) && note.above === 1 && note.speed === 1 && note.isFake === 0));
     assert.ok(notes.every(note => beatValue(note.startTime) === beatValue(note.endTime)));
   }
-  const notes = generateCurveNotes(curve); assert.equal(notes[7].positionX, 0);
+  const notes = generateCurveNotes(curve);
+  const middle = notes[7];
+  assert.ok(middle);
+  assert.equal(middle.positionX, 0);
   const session = new EditorSession(); const original = session.chart;
   session.insertNotes(notes, '生成曲线音符'); assert.equal(session.history.undoStack.length, 1);
   session.travel('undo'); assert.equal(session.chart, original);
@@ -46,11 +108,17 @@ test('曲线按横线分格 × 密度生成，不含端点，29 种缓动均有�
 
 test('曲线保留七分拍与分数起拍，同拍使用横向等距，非法输入不生成', () => {
   const notes = generateCurveNotes({ ...curve, division: 7, startTime: [0, 1, 3], endTime: [1, 1, 3] });
-  assert.equal(notes.length, 6); assert.deepEqual(notes[0].startTime, [0, 10, 21]); assert.deepEqual(notes.at(-1).startTime, [1, 4, 21]);
+  assert.equal(notes.length, 6);
+  const first = notes[0]; const last = notes.at(-1);
+  assert.ok(first); assert.ok(last);
+  assert.deepEqual(first.startTime, [0, 10, 21]); assert.deepEqual(last.startTime, [1, 4, 21]);
   const same = generateCurveNotes({ ...curve, endTime: curve.startTime, density: 3, easingType: 29 });
   assert.deepEqual(same.map(note => note.positionX), [-200, 0, 200]);
   assert.equal(generateCurveNotes({ ...curve, density: 0.5 }).length, 7);
-  for (const value of [{ density: 0 }, { density: Infinity }, { type: 2 }, { endTime: [-1, 0, 1] }, { endTime: [100, 0, 1], density: 1000 }]) assert.throws(() => generateCurveNotes({ ...curve, ...value }));
+  // Each entry overrides one option with the invalid value the generator must reject; the union is
+  // named so the spread stays assignable to `CurveNoteOptions`.
+  const invalid: Partial<CurveOptions>[] = [{ density: 0 }, { density: Infinity }, { type: 2 }, { endTime: [-1, 0, 1] }, { endTime: [100, 0, 1], density: 1000 }];
+  for (const value of invalid) assert.throws(() => generateCurveNotes({ ...curve, ...value }));
 });
 
 test('预览全局 Hold 层低于其他音符，绑定线隐藏本体但保留音符，缩放不漏远音符', () => {

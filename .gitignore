@@ -14,3 +14,8 @@ docs/
 Thumbs.db
 *.zip
 *.pez
+
+# Throwaway scripts and directories used to probe behaviour by hand; never part of the project.
+.probe*.ts
+.scratch-*/
+.tmp-*

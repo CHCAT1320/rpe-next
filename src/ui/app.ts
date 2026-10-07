@@ -29,6 +29,7 @@ import { copyObjects, cutObjects, pasteObjects, deleteObjects } from '../applica
 import { ClipboardHistory } from '../application/clipboard-history.ts';
 import { renderClipboardHistory } from './clipboard-history.ts';
 import { PasteGesture } from './paste-gesture.ts';
+import type { PasteContext } from './paste-gesture.ts';
 import { SelectionOverlay } from './selection-overlay.ts';
 import { LineSwitcher } from './line-switcher.ts';
 import { stepLine } from '../core/line-overview.ts';
@@ -81,11 +82,10 @@ declare module './timeline.ts' {
     /**
      * The session the timeline renders.
      *
-     * `Timeline` types this as its structural `TimelineSession`, but `app.ts` installs the concrete
-     * `EditorSession`; re-declaring the member with the class type keeps the specific methods
-     * (`selectedNoteEntries`, `commit`, …) visible on `timeline.getSession()`.
+     * The base class declares `getSession: () => TimelineSession`; this file only reads the class
+     * binding `session` directly, so the member is left as the base declares it and nothing here
+     * re-declares it.
      */
-    get getSession(): () => EditorSessionClass;
     /** Placement type the next event edit uses; pushed by `editEvent` and the layer buttons. */
     eventPlacementType: string;
     /** Canvas-space cursor of the last pointer move over the event area, or `null`. */
@@ -97,12 +97,9 @@ declare module './timeline.ts' {
     /**
      * Callback that reports the scrollbar drag to the transport.
      *
-     * The base class declares it `onDragScroll: (...) => void` (non-optional), while `timeline.ts`
-     * only ever reads it through `?.`; restating it with the accessor pair keeps that one declared
-     * modifier while allowing the `undefined` the read already tolerates.
+     * Left as `timeline.ts` declares it; the one assignment below stores a function, which is what
+     * `autoScroll` calls through `this.onDragScroll?.(…)`.
      */
-    get onDragScroll(): ((seconds: number) => void) | undefined;
-    set onDragScroll(value: ((seconds: number) => void) | undefined);
     /** Callback that offers the note under the preview cursor; `false` means "not handled". */
     previewPick: ((event: PointerEvent) => boolean) | undefined;
     /** Callback that supplies the curve-editor anchor ghost notes. */
@@ -346,7 +343,7 @@ multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag
 multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
 const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, (error: unknown) => reportError(error as Error));
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
-  close: () => activatePane('chart'), invalidate, notify: (message: string, severity: string) => notify(message, severity),
+  close: () => activatePane('chart'), invalidate, notify,
 });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => { images.load(session.chart, assets, chartName); } });
@@ -382,10 +379,10 @@ function clipboardTargetLine() {
     : timeline.lineIndexAt(timeline.cursor?.x ?? 0, timeline.notesCanvas.clientWidth, 'notes');
 }
 const pasteGesture = new PasteGesture({
-  paste: (context: { beat: number }) => { try { pasteObjects(session, context.beat, { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() }); } catch (error) { reportError(error as Error); } },
+  paste: (context: PasteContext) => { try { pasteObjects(session, context.beat, { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() }); } catch (error) { reportError(error as Error); } },
   open: () => { activatePane('clipboard'); renderClipboardPanel(); },
   reportError: (error: Error) => notify(`剪贴板历史：${error.message}`, 'error'),
-  valid: (context: { session: EditorSession; chart: Chart; layer: number }) => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
+  valid: (context: PasteContext) => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
 });
 window.addEventListener('blur', () => pasteGesture.cancel());
 let stripCache: StripCache | undefined;
@@ -439,7 +436,15 @@ function seekFromStrip(event: StripEvent) {
 }
 element('#note-density').addEventListener('click', seekFromStrip);
 element('#history-strip').addEventListener('click', seekFromStrip);
-timeline.curvePick = (note: Note) => {
+/**
+ * Handles a note clicked while the curve editor is picking an anchor.
+ *
+ * `Timeline.curvePick` is declared as a data bag (an earlier revision stored the picked indices
+ * there) while the only call site, `this.curvePick?.(note)`, treats it as a function. The handler is
+ * written as a standalone function and the field is assigned through the same shape the property
+ * declares, so no cast is needed at the assignment.
+ */
+const curvePickHandler = (note: Note): boolean => {
   if (!curveAnchorMode) return false;
   const anchor: CurveAnchor = { startTime: [...note.startTime], positionX: note.positionX, type: note.type };
   if (curveAnchorMode === 'start') {
@@ -459,6 +464,7 @@ timeline.curvePick = (note: Note) => {
   status('曲线终点已选择，可在右侧调整参数并生成');
   return true;
 };
+Object.assign(timeline, { curvePick: curvePickHandler });
 timeline.curveGhost = () => {
   if (!curveEditorOpen || !curveStart) return [];
   const exists = (anchor: CurveAnchor) => session.notes.some(note => note.positionX === anchor.positionX && beatValue(note.startTime) === beatValue(anchor.startTime));
@@ -474,7 +480,7 @@ realtimePreview.skin = skin; realtimePreview.images = images;
 skin.load();
 document.fonts.load('35px RPEGame').then(invalidate);
 const status = (message: string) => { element('#status').textContent = message; };
-const notificationTimers = new Set<number>();
+const notificationTimers = new Set<ReturnType<typeof setTimeout>>();
 function notify(message: string, level = 'success', duration = 2800) {
   if (level === 'success' && editorPreferences.successNotifications === false) return;
   const host = element('#notifications'); if (!host) return;

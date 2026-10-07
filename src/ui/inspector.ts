@@ -86,23 +86,30 @@ export function renderProperties(session: EditorSession, reportError: (error: un
       try {
         if (key === 'lineIndex') { session.moveSelectionToLine(Number(input.value)); return; }
         const value = kind === 'beat' ? parseBeat(input.value) : beatDuration ? beatValue(parseBeat(input.value)) : Number(input.value);
-        if (kind !== 'beat' && (input.value.trim() === '' || !Number.isFinite(value))) throw new Error('请输入有限数字');
-        if (key === 'size' && value <= 0) throw new Error('大小必须大于零');
+        // `value` is a beat triple for the two time fields and a number for every other field; the
+        // numeric view below is only read on the numeric branches, which `key` selects.
+        const numeric = Number.isFinite(value) ? Number(value) : beatValue(value);
+        if (kind !== 'beat' && (input.value.trim() === '' || !Number.isFinite(numeric))) throw new Error('请输入有限数字');
+        if (key === 'size' && numeric <= 0) throw new Error('大小必须大于零');
         applyNoteTransform(session, `修改${labelText}`, (editing, entry) => {
           const factor = session.chart.judgeLineList?.[entry?.lineIndex ?? selectedLineIndex]?.bpmfactor ?? selectedFactor;
           // `transformSelection` hands back the entry's own note, but its parameter is `Note |
           // undefined`; the seed keeps the spread total where that note is absent.
           const current = editing ?? note;
-          const next: Note = { ...current, [key]: duration ? beatDuration ? visibleSeconds(current, value, tempo, factor) : Math.max(0, value) : value };
+          const start = [...current.startTime] as Beat;
+          // `value` is a bare number for the numeric kinds; the two branches that write it into a beat
+          // field are the `beat`-kind ones, so they take it from `parseBeat` directly.
+          const beat = kind === 'beat' ? value as Beat : start;
+          const next: Note = { ...current, [key]: duration ? beatDuration ? visibleSeconds(current, numeric, tempo, factor) : Math.max(0, numeric) : value };
           if (key === 'startTime') {
-            next.endTime = current.type === 2 ? fromNumber(beatValue(current.endTime) + beatValue(value) - beatValue(current.startTime)) : value;
+            next.endTime = current.type === 2 ? fromNumber(beatValue(current.endTime) + numeric - beatValue(start)) : beat;
           }
-          if (key === 'above') next.above = value === 1 ? 1 : current.type === 2 ? 0 : 2;
+          if (key === 'above') next.above = numeric === 1 ? 1 : current.type === 2 ? 0 : 2;
           if (key === 'type') {
-            next.endTime = value === 2 ? fromNumber(Math.max(beatValue(current.endTime), beatValue(current.startTime) + 1)) : [...current.startTime];
-            next.above = noteIsAbove(current) ? 1 : value === 2 ? 0 : 2;
+            next.endTime = numeric === 2 ? fromNumber(Math.max(beatValue(current.endTime), beatValue(start) + 1)) : [...start];
+            next.above = noteIsAbove(current) ? 1 : numeric === 2 ? 0 : 2;
           }
-          if (key === 'endTime' && (current.type !== 2 || beatValue(value) < beatValue(current.startTime))) throw new Error('结束拍只能用于 Hold，且不能早于开始拍');
+          if (key === 'endTime' && (current.type !== 2 || numeric < beatValue(current.startTime))) throw new Error('结束拍只能用于 Hold，且不能早于开始拍');
           return next;
         });
       } catch (error) { reportError(error); input.value = key === 'lineIndex' ? String(selectedLineIndex) : kind === 'beat' ? formatBeat(note[key] as Beat) : String(note[key] ?? 0); }
@@ -118,7 +125,7 @@ export function renderProperties(session: EditorSession, reportError: (error: un
         if (!editing) return;
         const factor = session.chart.judgeLineList?.[selectedLineIndex]?.bpmfactor ?? selectedFactor;
         const beats = Number(editing.visibleTime) >= 999999 ? 0 : Math.max(0, visibleBeats(editing, tempo, factor) + direction / division);
-        input.value = beatDuration ? formatBeat(fromNumber(beats)) : String(Number(visibleSeconds(current, beats, session.tempo, factor).toFixed(8)));
+        input.value = beatDuration ? formatBeat(fromNumber(beats)) : String(Number(visibleSeconds(editing, beats, tempo, factor).toFixed(8)));
         apply();
       });
       const controls = document.createElement('span'); controls.className = 'duration-input';

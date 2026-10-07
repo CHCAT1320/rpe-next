@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { EditorSession } from '../src/application/session.ts';
 import { EditorPlayback } from '../src/application/playback.ts';
 import { Timeline } from '../src/ui/timeline.ts';
+import type { TimelineSession } from '../src/ui/timeline.ts';
 import { TempoMap } from '../src/core/tempo.ts';
 import { createChart, createEvent, createNote } from '../src/core/chart.ts';
+import type { ChartEvent } from '../src/core/types.ts';
 import { placedEvent } from '../src/application/event-commands.ts';
 import { beatValue } from '../src/core/beat.ts';
 import { snapPosition, snapTime, verticalGrid, wheelSeconds } from '../src/core/edit-grid.ts';
@@ -42,9 +44,26 @@ function canvas(): CanvasDouble {
  */
 function timelineSurface(): HTMLCanvasElement { return canvas() as unknown as HTMLCanvasElement; }
 
+/**
+ * The session as `Timeline` sees it: the real `EditorSession`, viewed through the interface
+ * `Timeline` declares.
+ *
+ * `TimelineSession` is an open bag (`[key: string]: unknown`), and a class type never carries an
+ * index signature, so `EditorSession` neither satisfies nor overlaps that type: TypeScript rejects a
+ * direct assertion because the two "do not sufficiently overlap". The session carries every named
+ * member the timeline reads, so the type is bridged through `unknown` in this one documented spot —
+ * `any` would hide a genuine mismatch, and re-declaring the session shape here would drift from the
+ * class it is standing in for.
+ */
+function timelineSession(session: EditorSession): TimelineSession {
+  const open: unknown = session;
+  return open as TimelineSession;
+}
+
 function editor() {
   const session = new EditorSession();
-  const timeline = new Timeline(timelineSurface(), timelineSurface(), () => session, () => {}, () => {});
+  const getSession = (): TimelineSession => timelineSession(session);
+  const timeline = new Timeline(timelineSurface(), timelineSurface(), getSession, () => {}, () => {});
   return { session, timeline };
 }
 
@@ -70,8 +89,8 @@ interface SoundsDouble {
   prepare(): Promise<void>;
 }
 
-/** The `{ scrollSpeed }` bag the wheel handler reads; the migrated settings carry more. */
-interface WheelSettingsDouble { scrollSpeed: number; scrollAcceleration?: number; }
+/** The `{ scrollSpeed, scrollAcceleration }` bag the wheel handler reads; both are required by `PlaybackWheelSettings`. */
+interface WheelSettingsDouble { scrollSpeed: number; scrollAcceleration: boolean; }
 
 /** A storage stub for the preference round-trip; `PreferenceStorage` is the module's own contract. */
 function storageDouble(): PreferenceStorage & { value: string | undefined } {
@@ -87,7 +106,7 @@ test('滚轮向上暂停并定位真实时间，继续从新位置播放；准�
   const audio: TransportDouble = { time: 10, duration: 120, rate: 1, playing: true, pause() { this.playing = false; }, seek(seconds: number) { this.time = seconds; }, async play() { this.playing = true; } };
   let visible = 0;
   const playback = new EditorPlayback(audio, sounds, () => { visible = audio.time; });
-  const settings: WheelSettingsDouble = { scrollSpeed: 5 };
+  const settings: WheelSettingsDouble = { scrollSpeed: 5, scrollAcceleration: false };
   playback.wheel({ deltaY: -100 }, settings, 0);
   assert.equal(audio.playing, false); assert.equal(visible, 10.06);
   const chart = createChart();
@@ -147,11 +166,12 @@ test('事件继承前一终值与缓动，拒绝冲突；两次定位不产生�
   const { session, timeline } = editor();
   // `EditorSession.line` is optional because a chart may lack a line at `lineIndex`; `createChart`
   // always builds one. `eventLayers` entries are `Partial<Record<AnyEventType, ChartEvent[]>>`, so
-  // the track is optional too and is bound once here.
+  // each track is optional as well. Placing an event replaces the document, so the track has to be
+  // re-read through the session every time rather than bound once to a stale array.
+  const moveXEvents = (): ChartEvent[] => session.line?.eventLayers[0].moveXEvents ?? [];
   const line = session.line;
   assert.ok(line);
-  const layers = line.eventLayers[0];
-  layers.moveXEvents = [{ ...createEvent(5, 42, 0, 2), easingType: 7 }];
+  line.eventLayers[0].moveXEvents = [{ ...createEvent(5, 42, 0, 2), easingType: 7 }];
   // The fifth parameter is the easing type; the omitted argument is `undefined`, so passing it
   // explicitly keeps the same call the original made.
   const candidate = placedEvent(session, 'moveXEvents', 4, 2, undefined);
@@ -159,10 +179,9 @@ test('事件继承前一终值与缓动，拒绝冲突；两次定位不产生�
   assert.equal(candidate.start, 42); assert.equal(candidate.end, 42); assert.equal(candidate.easingType, 7);
   assert.throws(() => placedEvent(session, 'moveXEvents', 1, 3, undefined));
   assert.equal(placedEvent(session, 'moveXEvents', 2, 2, undefined), null);
-  timeline.eventInteraction.place('moveXEvents', 2); assert.equal((layers.moveXEvents ?? []).length, 1);
-  timeline.eventInteraction.place('moveXEvents', 4, 3); assert.equal((layers.moveXEvents ?? []).length, 2);
-  const placed = layers.moveXEvents ?? [];
-  assert.equal(placed[1].easingType, 3);
+  timeline.eventInteraction.place('moveXEvents', 2); assert.equal(moveXEvents().length, 1);
+  timeline.eventInteraction.place('moveXEvents', 4, 3); assert.equal(moveXEvents().length, 2);
+  assert.equal(moveXEvents()[1].easingType, 3);
   const prefs = migratePreferences(); const key = { key: 'r' };
   assert.equal(shortcutAction(key, prefs, 'notes'), 'AddHold'); assert.equal(shortcutAction(key, prefs, 'events'), 'AddEvent');
 });

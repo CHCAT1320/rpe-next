@@ -7,8 +7,9 @@ import { NOTE_COLORS } from './timeline.ts';
 import { MultiEditParameters } from '../application/multi-edit-parameters.ts';
 import { runEventTool } from './event-tools.ts';
 import type { EditorSession } from '../application/session.ts';
+import type { SelectionEditResult } from '../application/batch-edit.ts';
 import type { BatchKind, BatchParameters, BatchChannelParameters } from '../application/multi-edit-parameters.ts';
-import type { Chart, ChartEvent, Note } from '../core/types.ts';
+import type { AnyEventType, Chart, ChartEvent, Note } from '../core/types.ts';
 import type { MultiEditOptions, CloneOptions, MultiEditResult, BatchChange, DistributionOptions } from '../application/multi-edit.ts';
 import type { Timeline } from './timeline.ts';
 
@@ -66,10 +67,19 @@ export interface MultiEditRead {
   operation: string;
   eventApplicationMode: string;
   noteType: number;
-  eventType: string;
+  /**
+   * The selected event track, or `'all'`. Typed as the union the viewer understands rather than
+   * `string`: the `<select>` is populated from `EVENT_BATCH_TYPES`, so it only ever holds these.
+   */
+  eventType: AnyEventType | 'all';
   condition: string;
   script: string;
   seed: number;
+  /**
+   * The raw 目标线号序列 text from the control, which `sequence()` splits itself. `CloneOptions`
+   * declares `targets?: string[]` because its other callers pass parsed sequences, but both the
+   * panel and the tests hand over the raw string, which is what this field carries.
+   */
   targets: string;
   increment: string;
   retainSource: boolean;
@@ -217,7 +227,8 @@ export class MultiEditPanel {
     // The two option lists come from const-typed module tables, so they are narrowed to the
     // `[value, label]` pairs `controlSelect` builds `<option>`s from.
     const noteKinds: ControlOption[] = [[0, '全部'], [1, 'Tap'], [2, 'Hold'], [3, 'Flick'], [4, 'Drag']];
-    const filter = controlSelect(common, kind === 'notes' ? '音符种类' : '事件种类', kind === 'notes' ? '0' : 'all', kind === 'notes' ? noteKinds : EVENT_BATCH_TYPES);
+    const eventKinds: ControlOption[] = EVENT_BATCH_TYPES;
+    const filter = controlSelect(common, kind === 'notes' ? '音符种类' : '事件种类', kind === 'notes' ? '0' : 'all', kind === 'notes' ? noteKinds : eventKinds);
 
     const condition = controlInput(common, '筛选条件', ''); condition.placeholder = kind === 'notes' ? '例如 x < 0 && t1 >= 4' : '例如 start != end';
     const form = document.createElement('div'); root.append(form);
@@ -334,7 +345,12 @@ export class MultiEditPanel {
     this.result = null;
     try {
       const snapshot = captureSelection(this.getSession()); const options = this.read();
-      this.result = options.mode === 'clone' ? previewEventClones(snapshot, options) : previewMultiEdit(snapshot, this.kind, options);
+      // `CloneOptions` declares `targets?: string[]`, but the clone callers — this panel and
+      // `test/multi-edit.test.ts` — pass the raw 目标线号序列 text and `sequence()` splits it
+      // itself. The clone options are therefore built from the same read with that one field
+      // re-viewed as the string it actually is at runtime.
+      const cloneOptions: CloneOptions = { ...options, targets: options.targets as unknown as string[] };
+      this.result = options.mode === 'clone' ? previewEventClones(snapshot, cloneOptions) : previewMultiEdit(snapshot, this.kind, options);
       this.summary.textContent = `${this.result.changes.length} 个结果 · ${new Set(this.result.changes.map(change => change.lineIndex)).size} 条判定线 · 应用后可一次撤销`;
       this.summary.classList.remove('batch-error');
     } catch (error) { this.summary.textContent = error instanceof Error ? error.message : String(error); this.summary.classList.add('batch-error'); }

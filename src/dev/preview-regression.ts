@@ -3,28 +3,36 @@ import { SHADER_NAMES } from '../core/shader.ts';
 import { previewViewport } from '../core/editor-display.ts';
 import { assetUrl } from '../core/asset-url.ts';
 
-const results = document.querySelector('#results');
-const source = document.querySelector('#source');
-const output = document.querySelector('#output');
+const results = document.querySelector<HTMLElement>('#results')!;
+// The harness owns these elements in preview-regression.html, so they are non-null by construction.
+const source = document.querySelector<HTMLCanvasElement>('#source')!;
+const output = document.querySelector<HTMLCanvasElement>('#output')!;
 const pipeline = new ShaderPipeline();
-const context = source.getContext('2d');
-source.getBoundingClientRect = () => ({ width: 600, height: 400 });
-const messages = [];
+const context = source.getContext('2d')!;
+// The harness renders a fixed 600x400 image regardless of how the page is laid out, so the canvas'
+// measured box is overridden. Only `width`/`height` are read downstream, but the assignment must
+// still produce a DOMRect, so the remaining members are filled in from the real rect.
+source.getBoundingClientRect = () => {
+  const rect = DOMRect.fromRect({ width: 600, height: 400 });
+  return rect;
+};
+const messages: string[] = [];
 let failures = 0;
-const check = (condition, description) => { messages.push(`${condition ? 'PASS' : 'FAIL'} ${description}`); if (!condition) failures++; };
+const check = (condition: unknown, description: string): void => { messages.push(`${condition ? 'PASS' : 'FAIL'} ${description}`); if (!condition) failures++; };
 try {
   if (!pipeline.ensure(output)) throw new Error('WebGL 不可用');
-  const sources = new Map();
+  const sources = new Map<string, string>();
   const names = [...SHADER_NAMES, ...SHADER_NAMES.slice(20).map(name => `pr/${name}_pr`)];
   for (const name of names) {
     const response = await fetch(assetUrl(`rpe/shaders/${name}.glsl`));
     if (!response.ok) throw new Error(`缺少素材 ${name}`);
     sources.set(name, await response.text());
-    const compiled = pipeline.compile(name, sources.get(name));
+    const compiled = pipeline.compile(name, sources.get(name)!);
     check(Boolean(compiled), `编译 ${name}${compiled ? '' : ': ' + pipeline.lastError}`);
   }
-  const gl = pipeline.gl;
-  const pixel = (horizontal, vertical) => {
+  // `ensure` returned true above, so a context exists; the harness fails fast otherwise.
+  const gl = pipeline.gl!;
+  const pixel = (horizontal: number, vertical: number): number[] => {
     const bytes = new Uint8Array(4);
     gl.readPixels(Math.floor(horizontal), 399 - Math.floor(vertical), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
     return [...bytes];
@@ -65,8 +73,10 @@ try {
       const color = pixel(300 - view.width / 4, 200);
       check(color[0] > 100, `组合 ${count} ${color}`);
       if (count === 3 && ratio === 1.5) {
-        const program = pipeline.compile('chromatic', sources.get('chromatic'));
-        check(gl.getUniform(program.program, program.uniforms.get('sampleCount')) === 3, '原版色差默认采样数 3');
+        // The shader was compiled earlier in this run, so both lookups are populated; the check
+        // reports a failure rather than throwing if that ever stops holding.
+        const program = pipeline.compile('chromatic', sources.get('chromatic')!);
+        check(program !== null && gl.getUniform(program.program, program.uniforms.get('sampleCount')!) === 3, '原版色差默认采样数 3');
         pipeline.render(source, output, [chain[2]], 37.93, pass => sources.get(pass.shader), view);
         check(pixel(150, 200)[0] > 100, '单独色差效果不会因缺失采样数黑屏');
       }
@@ -77,6 +87,6 @@ try {
       check(center[0] > 100, `比例 ${ratio.toFixed(3)} 原谱三种效果叠加 帧 ${frame}: ${center}`);
     }
   }
-} catch (error) { failures++; messages.push(`FAIL ${error.stack}`); }
+} catch (error) { failures++; messages.push(`FAIL ${error instanceof Error ? error.stack : String(error)}`); }
 results.textContent = `${failures ? '失败' : '全部通过'}：${messages.length} 项，${failures} 项失败\n${messages.join('\n')}`;
 document.title = `预览回归：${failures ? '失败' : '通过'}`;

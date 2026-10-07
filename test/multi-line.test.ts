@@ -7,13 +7,38 @@ import { copyObjects, pasteObjects, deleteObjects, projectClipboard } from '../s
 import { parseLineExpression, formatLineExpression } from '../src/application/multi-line-edit.ts';
 import { lineFeatureLabels } from '../src/core/line-groups.ts';
 import { Timeline } from '../src/ui/timeline.ts';
+import type { Note } from '../src/core/types.ts';
+import type { ChartEvent } from '../src/core/types.ts';
 
 function sessionWithLines(count = 3) {
   const chart = createChart(); chart.judgeLineList = Array.from({ length: count }, (_, index) => createLine(`Line ${index + 1}`));
   return new EditorSession(chart);
 }
 
-function canvas() { return { clientWidth: 500, clientHeight: 600, style: {}, addEventListener() {}, focus() {}, setPointerCapture() {}, getBoundingClientRect() { return { left: 0, top: 0, width: 500, height: 600 }; }, getContext() { return { }; } }; }
+/**
+ * The slice of canvas `Timeline` actually touches in these tests.
+ *
+ * A real `HTMLCanvasElement` is far wider than the double below (which has no DOM backing at all),
+ * so the double is described by what it provides and handed over through one narrow conversion at
+ * the call site, rather than by widening `Timeline`'s constructor to a structural type.
+ */
+interface CanvasDouble {
+  clientWidth: number;
+  clientHeight: number;
+  style: Record<string, never>;
+  addEventListener(): void;
+  focus(): void;
+  setPointerCapture(): void;
+  getBoundingClientRect(): { left: number; top: number; width: number; height: number };
+  getContext(): Record<string, never>;
+}
+
+function canvas(): CanvasDouble { return { clientWidth: 500, clientHeight: 600, style: {}, addEventListener() {}, focus() {}, setPointerCapture() {}, getBoundingClientRect() { return { left: 0, top: 0, width: 500, height: 600 }; }, getContext() { return { }; } }; }
+
+/** The double only ever needs `clientWidth`/`height` from these paths; no DOM method is called. */
+function asCanvas(double: CanvasDouble): HTMLCanvasElement {
+  return double as unknown as HTMLCanvasElement;
+}
 
 test('多线模式保持去重排序并在关闭时保留集合', () => {
   const session = sessionWithLines();
@@ -31,8 +56,10 @@ test('多线表达式支持分组名并在完整分组时优先显示分组名',
 });
 
 test('判定线列表标出非默认父线、绑定 UI、zOrder 和贴图', () => {
-  assert.deepEqual(lineFeatureLabels({ father: 0, attachUI: 'name', zOrder: 2, Texture: 'custom.png' }), ['父线=0', 'UI=name', 'Z=2', '贴图=custom.png']);
-  assert.deepEqual(lineFeatureLabels({ father: -1, zOrder: 0, Texture: 'line.png' }), []);
+  // `lineFeatureLabels` takes a whole `JudgeLine`; only these few fields drive the labels, so the
+  // rest come from the same factory the editor uses and the ones under test are overridden.
+  assert.deepEqual(lineFeatureLabels({ ...createLine(), father: 0, attachUI: 'name', zOrder: 2, Texture: 'custom.png' }), ['父线=0', 'UI=name', 'Z=2', '贴图=custom.png']);
+  assert.deepEqual(lineFeatureLabels({ ...createLine(), father: -1, zOrder: 0, Texture: 'line.png' }), []);
 });
 
 test('多线边界按钮按循环线组添加，音符可迁移到指定线', () => {
@@ -47,7 +74,11 @@ test('多线音符并列显示并按所属线编辑', () => {
   const session = sessionWithLines(); session.setMultiLineEnabled(true); session.addMultiLine(1); session.addMultiLine(2);
   session.insertNotes([createNote(1, 2, 10)]);
   assert.deepEqual(session.chart.judgeLineList.map(line => line.notes.length), [1, 0, 0]);
-  session.transformSelection('镜像', note => ({ ...note, positionX: -note.positionX }));
+  session.transformSelection('镜像', (note: Note | undefined): Note => {
+    // The selection always resolves to a real note; a miss would be a fixture bug.
+    if (!note) throw new Error('选中索引没有对应音符');
+    return { ...note, positionX: -note.positionX };
+  });
   assert.equal(session.chart.judgeLineList[0].notes[0].positionX, -10);
   session.selectLine(1); session.insertNotes([createNote(1, 2, 20)]);
   assert.deepEqual(session.chart.judgeLineList.map(line => line.notes.length), [1, 1, 0]);
@@ -64,22 +95,45 @@ test('多线音符编辑按所属线处理，不依赖当前线', () => {
   session.multiLineIndices = [0, 1];
   session.multiLineSelection = new Map([[1, new Set([0])]]);
   session.selection.clear();
-  session.transformSelection('镜像非当前线音符', note => ({ ...note, positionX: -note.positionX }));
+  session.transformSelection('镜像非当前线音符', (note: Note | undefined): Note => {
+    if (!note) throw new Error('选中索引没有对应音符');
+    return { ...note, positionX: -note.positionX };
+  });
   assert.equal(session.chart.judgeLineList[0].notes.length, 0);
   assert.equal(session.chart.judgeLineList[1].notes[0].positionX, -10);
   session.deleteSelection();
   assert.equal(session.chart.judgeLineList[1].notes.length, 0);
 });
 
+/** Reads a per-line selection the test just assigned; an absent entry would be a fixture bug. */
+function selectionFor<T>(selections: Map<number, Set<T>>, lineIndex: number): Set<T> {
+  const selection = selections.get(lineIndex);
+  if (!selection) throw new Error(`第 ${lineIndex} 条线没有选区`);
+  return selection;
+}
+
+/** `placedEvent` reports `null` for a range too short to be an event; the spans below are all real. */
+function requireEvent(event: ChartEvent | null): ChartEvent {
+  if (!event) throw new Error('放置事件失败');
+  return event;
+}
+
 test('多线事件放置和批量变换保留每条线独立数组', () => {
   const session = sessionWithLines(); session.setMultiLineEnabled(true, 'events'); session.addMultiLine(1);
-  const event = placedEvent(session, 'moveXEvents', 2, 3); insertEvent(session, 'moveXEvents', event);
+  // `easingType` is explicit as `undefined`: the call used to omit the argument and let the
+  // untyped callee default it, so the same value is passed in to keep the produced event identical.
+  const event = requireEvent(placedEvent(session, 'moveXEvents', 2, 3, undefined)); insertEvent(session, 'moveXEvents', event);
   assert.equal(eventListAt(session, 0, 'moveXEvents').length, 2);
   assert.equal(eventListAt(session, 1, 'moveXEvents').length, 1);
   session.selectLine(1);
-  const second = placedEvent(session, 'moveXEvents', 4, 5); insertEvent(session, 'moveXEvents', second);
+  const second = requireEvent(placedEvent(session, 'moveXEvents', 4, 5, undefined)); insertEvent(session, 'moveXEvents', second);
   session.eventSelection = new Set(['moveXEvents:1']);
-  transformEvents(session, '调整', current => ({ ...current, start: current.start + 5, end: current.end + 5 }));
+  transformEvents(session, '调整', current => {
+    // Numeric track: the shift is applied to the endpoints the fixture created as numbers.
+    const start = typeof current.start === 'number' ? current.start : 0;
+    const end = typeof current.end === 'number' ? current.end : 0;
+    return { ...current, start: start + 5, end: end + 5 };
+  });
   assert.equal(eventListAt(session, 0, 'moveXEvents')[0].start, 0);
   assert.equal(eventListAt(session, 1, 'moveXEvents')[0].start, 0);
   assert.equal(eventListAt(session, 1, 'moveXEvents')[1].start, 5);
@@ -87,15 +141,15 @@ test('多线事件放置和批量变换保留每条线独立数组', () => {
 
 test('多线事件删除撤销恢复选择不丢失谱面引用', () => {
   const session = sessionWithLines(2); session.setMultiLineEnabled(true, 'events'); session.addMultiLine(1);
-  insertEvent(session, 'moveXEvents', placedEvent(session, 'moveXEvents', 2, 3));
-  session.selectLine(1); insertEvent(session, 'moveXEvents', placedEvent(session, 'moveXEvents', 4, 5));
+  insertEvent(session, 'moveXEvents', requireEvent(placedEvent(session, 'moveXEvents', 2, 3, undefined)));
+  session.selectLine(1); insertEvent(session, 'moveXEvents', requireEvent(placedEvent(session, 'moveXEvents', 4, 5, undefined)));
   session.multiEventSelection = new Map([[1, new Set(['moveXEvents:0'])]]);
   session.eventSelection = new Set(['moveXEvents:0']);
   const before = eventListAt(session, 1, 'moveXEvents').length;
   deleteObjects(session); assert.equal(eventListAt(session, 1, 'moveXEvents').length, before - 1);
   session.travel('undo');
   assert.equal(eventListAt(session, 1, 'moveXEvents').length, before);
-  assert.deepEqual([...session.multiEventSelection.get(1)], ['moveXEvents:0']);
+  assert.deepEqual([...selectionFor(session.multiEventSelection, 1)], ['moveXEvents:0']);
 });
 
 test('多线剪贴板复制粘贴和删除一次提交', () => {
@@ -118,8 +172,8 @@ test('多线剪贴板保留来源线并按目标面板映射相对线号', () =>
   pasteObjects(session, 4, { targetLineIndex: 0 });
   assert.equal(session.chart.judgeLineList[0].notes.length, 1);
   assert.equal(session.chart.judgeLineList[1].notes.length, 2);
-  assert.deepEqual([...session.multiLineSelection.get(0)], [0]);
-  assert.deepEqual([...session.multiLineSelection.get(1)], [1]);
+  assert.deepEqual([...selectionFor(session.multiLineSelection, 0)], [0]);
+  assert.deepEqual([...selectionFor(session.multiLineSelection, 1)], [1]);
 });
 
 test('多线线号表达式支持空格和闭区间并拒绝反向范围', () => {
@@ -131,7 +185,7 @@ test('多线线号表达式支持空格和闭区间并拒绝反向范围', () =>
 
 test('多线事件和音符共享单线宽度，仍可保留事件显式覆盖', () => {
   const session = sessionWithLines(2); session.setMultiLineEnabled(true, 'events'); session.addMultiLine(1);
-  const timeline = new Timeline(canvas(), canvas(), () => session, () => {}, () => {}); timeline.multiLineWidth = 320;
+  const timeline = new Timeline(asCanvas(canvas()), asCanvas(canvas()), () => session, () => {}, () => {}); timeline.multiLineWidth = 320;
   assert.equal(timeline.panelWidth(500, 'notes'), 320);
   assert.equal(timeline.panelWidth(500, 'events'), 320);
   timeline.multiLineEventWidth = 180; assert.equal(timeline.panelWidth(500, 'events'), 320);

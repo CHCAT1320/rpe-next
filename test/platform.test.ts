@@ -25,6 +25,20 @@ function entryAt(entries: Map<string, Uint8Array>, path: string): Uint8Array {
   return bytes;
 }
 
+/** Pops the next parked resolver; every call site below follows a matching pending operation. */
+function take<T>(queue: T[], label: string): T {
+  const item = queue.shift();
+  if (!item) throw new Error(`${label} 队列为空`);
+  return item;
+}
+
+/** Pops the most recently parked resolver, for the "latest load wins" cases. */
+function takeLast<T>(queue: T[], label: string): T {
+  const item = queue.pop();
+  if (!item) throw new Error(`${label} 队列为空`);
+  return item;
+}
+
 test('转换导出只更新所属 info，保留原谱及同名文件', () => {
   const chart = createChart(); chart.rpeNextLegacySource = { text: 'original' };
   const assets = new Map([
@@ -57,7 +71,11 @@ test('官方 v3 转换遵循原版拍数、倍率和类型，保留原文档', (
   assert.equal(converted.notes[0].speed, 1);
   assert.equal(converted.notes[0].positionX, 150);
   assert.equal(converted.notes[1].type, 4);
-  assert.equal(converted.eventLayers[0].speedEvents[0].start, 9);
+  // `EventLayer` is a `Partial<Record<...>>`, so each track is optional; the converter always emits
+  // `speedEvents`, and an absent one should fail the test loudly rather than pass vacuously.
+  const speedEvents = converted.eventLayers[0].speedEvents;
+  if (!speedEvents) throw new Error('转换结果缺少 speedEvents');
+  assert.equal(speedEvents[0].start, 9);
   assert.deepEqual(chart.rpeNextLegacySource?.['document'], original);
 });
 
@@ -100,14 +118,7 @@ test('异步音频解码及播放不越过切谱、暂停和末尾定位', async
     resume: () => new Promise<unknown>(resolve => resumes.push(resolve as ResumeRecord)),
     createBufferSource: () => ({ buffer: null, playbackRate: { value: 1 }, connect() { return undefined; }, stop() {}, disconnect() {}, start: (...args: number[]) => { starts.push(args); } }),
   };
-  /** Pops the next parked resolver; every call site below follows a matching pending operation. */
-function take<T>(queue: T[], label: string): T {
-  const item = queue.shift();
-  if (!item) throw new Error(`${label} 队列为空`);
-  return item;
-}
-
-const audio = new AudioTransport(() => context);
+  const audio = new AudioTransport(() => context);
   const oldLoad = audio.load(new ArrayBuffer(0));
   audio.clear();
   take(decoders, '解码')({ duration: 12 });
@@ -115,7 +126,7 @@ const audio = new AudioTransport(() => context);
   assert.equal(audio.buffer, null);
   const first = audio.load(new ArrayBuffer(0));
   const second = audio.load(new ArrayBuffer(0));
-  take(decoders.slice(-1), '解码')({ duration: 20 });
+  takeLast(decoders, '解码')({ duration: 20 });
   assert.equal(await second, true);
   take(decoders, '解码')({ duration: 10 });
   assert.equal(await first, false);
