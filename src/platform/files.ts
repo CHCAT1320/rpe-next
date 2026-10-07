@@ -1,29 +1,62 @@
 import { serializeChart } from '../core/chart.ts';
 import { parseDocument } from '../core/formats.ts';
 import { readZip, writeZip } from './archive.ts';
+import type { ArchiveEntries } from './archive.ts';
 import { decodeLegacy, parseInfo } from './legacy-text.ts';
 import { serializeShaderEvent } from '../core/shader-events.ts';
+import type { Chart } from '../core/types.ts';
 
-export async function openFiles(fileList) {
+/** A parsed chart together with the archive path it was found at. */
+export interface ChartCandidate {
+  name: string;
+  chart: Chart;
+}
+
+/** The result of reading a user's file selection. */
+export interface OpenedFiles {
+  candidates: ChartCandidate[];
+  assets: ArchiveEntries;
+}
+
+/** A chart's resolved song and background, as they should be looked up in the asset map. */
+export interface ResourceReferences {
+  song: string;
+  background: string;
+}
+
+/**
+ * Reads a user's file picker selection into charts plus the raw asset map around them.
+ *
+ * A single `.pez`/`.zip` is unpacked; otherwise each selected file becomes one entry keyed by its
+ * own name, which is how a chart JSON plus its music and illustration are opened together.
+ */
+export async function openFiles(fileList: ArrayLike<File> & Iterable<File>): Promise<OpenedFiles | null> {
   const files = [...fileList];
   if (!files.length) return null;
-  let assets = new Map();
+  let assets: ArchiveEntries = new Map();
   if (files.length === 1 && /\.(pez|zip)$/i.test(files[0].name)) assets = await readZip(await files[0].arrayBuffer());
   else for (const file of files) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));
-  const candidates = [];
-  const errors = [];
+  const candidates: ChartCandidate[] = [];
+  const errors: string[] = [];
   for (const [name, bytes] of assets) {
     if (!/\.(json|pec)$/i.test(name)) continue;
     try { candidates.push({ name, chart: parseDocument(decodeLegacy(bytes)) }); }
-    catch (error) { errors.push(`${name}: ${error.message}`); }
+    catch (error) { errors.push(`${name}: ${(error as Error).message}`); }
   }
   if (!candidates.length) throw new Error(errors.join('\n') || '找不到 RPE JSON 谱面');
   attachExternalEffects(candidates, assets);
   return { candidates, assets };
 }
 
-export function attachExternalEffects(candidates, assets) {
-  const extras = [...assets.entries()].filter(([name]) => name.replaceAll('\\', '/').split('/').at(-1).toLowerCase() === 'extra.json');
+/**
+ * Merges a sibling `extra.json` into each chart that does not already carry effects.
+ *
+ * Shader effects live beside the chart rather than inside it. The file is matched to the chart by
+ * directory; when exactly one chart and one `extra.json` were selected, they are paired regardless
+ * of directory, because that is what a user dragging two files together means.
+ */
+export function attachExternalEffects(candidates: ChartCandidate[], assets: ArchiveEntries): void {
+  const extras = [...assets.entries()].filter(([name]) => name.replaceAll('\\', '/').split('/').at(-1)!.toLowerCase() === 'extra.json');
   for (const candidate of candidates) {
     if (Array.isArray(candidate.chart.effects)) continue;
     const chartDirectory = candidate.name.replaceAll('\\', '/').split('/').slice(0, -1).join('/').toLowerCase();
@@ -31,14 +64,22 @@ export function attachExternalEffects(candidates, assets) {
     const fallback = matches.length ? matches : candidates.length === 1 && extras.length === 1 ? extras : [];
     for (const [, bytes] of fallback) {
       try {
-        const extra = JSON.parse(decodeLegacy(bytes));
+        const extra = JSON.parse(decodeLegacy(bytes)) as { effects?: unknown };
         if (Array.isArray(extra.effects)) { candidate.chart.effects = extra.effects; break; }
       } catch { /* extra.json is optional and may belong to another RPE project. */ }
     }
   }
 }
 
-export function assetBytes(assets, name, chartName = '') {
+/**
+ * Finds an asset by the name a chart refers to it by.
+ *
+ * Charts store references relative to themselves, but an archive may nest them differently, so the
+ * lookup degrades in steps: exact path, then a normalized path, then a unique basename match. The
+ * basename step deliberately requires uniqueness — guessing between two `music.ogg` files would
+ * silently attach the wrong audio.
+ */
+export function assetBytes(assets: ArchiveEntries, name: string, chartName = ''): Uint8Array | null {
   if (!name) return null;
   const chartPath = chartName.replaceAll('\\', '/');
   const directory = chartPath.includes('/') ? chartPath.slice(0, chartPath.lastIndexOf('/') + 1) : '';
@@ -53,7 +94,8 @@ export function assetBytes(assets, name, chartName = '') {
   return matches.length === 1 ? matches[0][1] : null;
 }
 
-export function download(blob, name) {
+/** Saves a blob to disk through a temporary anchor, revoking the object URL once it is claimed. */
+export function download(blob: Blob, name: string): void {
   const link = document.createElement('a');
   const url = URL.createObjectURL(blob);
   link.href = url;
@@ -61,15 +103,17 @@ export function download(blob, name) {
   document.body.append(link);
   link.click();
   link.remove();
+  // Revoking immediately can cancel the download in some browsers, so the URL is held briefly.
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
-export function exportChart(chart, name) {
+export function exportChart(chart: Chart, name: string): void {
   download(new Blob([serializeChart(chart)], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
 }
 
-function normalizePath(path) {
-  const parts = [];
+/** Resolves `.`/`..` segments and case, so paths from different archives compare equal. */
+function normalizePath(path: string): string {
+  const parts: string[] = [];
   for (const part of path.replaceAll('\\', '/').split('/')) {
     if (part === '..') parts.pop();
     else if (part && part !== '.') parts.push(part);
@@ -77,45 +121,59 @@ function normalizePath(path) {
   return parts.join('/').toLowerCase();
 }
 
-function matchingInfo(assets, chartName) {
+/** The `info.txt` entries that name the given chart. */
+function matchingInfo(assets: ArchiveEntries, chartName: string): [string, Uint8Array][] {
   return [...assets].filter(([name, bytes]) => {
-    name = name.replaceAll('\\', '/');
-    if (name.split('/').at(-1).toLowerCase() !== 'info.txt') return false;
+    const normalizedName = name.replaceAll('\\', '/');
+    if (normalizedName.split('/').at(-1)!.toLowerCase() !== 'info.txt') return false;
     const reference = parseInfo(decodeLegacy(bytes)).Chart;
-    const directory = name.slice(0, name.lastIndexOf('/') + 1);
-    return reference && normalizePath(directory + reference) === normalizePath(chartName);
+    const directory = normalizedName.slice(0, normalizedName.lastIndexOf('/') + 1);
+    return Boolean(reference) && normalizePath(directory + reference) === normalizePath(chartName);
   });
 }
 
-export function resourceReferences(chart, assets, chartName, fallback = {}) {
+/**
+ * Determines which archive entries a chart uses for its song and illustration.
+ *
+ * Preference order is the chart's own metadata, then the sibling `info.txt`, then inference from
+ * the files sitting next to the chart. Inference only accepts an unambiguous candidate.
+ */
+export function resourceReferences(chart: Chart, assets: ArchiveEntries, chartName: string, fallback: Record<string, string> = {}): ResourceReferences {
   const matches = matchingInfo(assets, chartName);
   const info = matches.length === 1 ? parseInfo(decodeLegacy(matches[0][1])) : fallback;
   const normalizedChart = normalizePath(chartName);
   const directory = normalizedChart.split('/').slice(0, -1).join('/');
-  const stem = normalizedChart.split('/').at(-1).replace(/\.[^.]+$/, '');
-  const infoReference = key => {
+  const stem = normalizedChart.split('/').at(-1)!.replace(/\.[^.]+$/, '');
+  const infoReference = (key: string): string => {
     const value = info[key];
     if (!value || matches.length !== 1) return value;
     const infoDirectory = matches[0][0].replaceAll('\\', '/').split('/').slice(0, -1).join('/');
     return normalizePath(infoDirectory) === directory ? value : (infoDirectory ? infoDirectory + '/' : '') + value;
   };
-  const infer = extensions => {
+  const infer = (extensions: RegExp): string => {
     const candidates = [...assets.keys()].filter(name => extensions.test(name) && normalizePath(name).split('/').slice(0, -1).join('/') === directory);
-    const sameStem = candidates.filter(name => normalizePath(name).split('/').at(-1).replace(/\.[^.]+$/, '') === stem);
+    const sameStem = candidates.filter(name => normalizePath(name).split('/').at(-1)!.replace(/\.[^.]+$/, '') === stem);
     return sameStem.length === 1 ? sameStem[0] : candidates.length === 1 ? candidates[0] : '';
   };
-  const resolve = (names, extensions) => names.find(name => name && assetBytes(assets, name, chartName)) || infer(extensions) || names.find(Boolean) || '';
+  const resolve = (names: (string | undefined)[], extensions: RegExp): string => names.find(name => name && assetBytes(assets, name, chartName)) || infer(extensions) || names.find(Boolean) || '';
   return { song: resolve([chart.META.song, infoReference('Song')], /\.(mp3|ogg|wav|flac|m4a|aac|opus|webm)$/i),
     background: resolve([chart.META.background, infoReference('Picture')], /\.(png|jpe?g|webp|gif|bmp|avif)$/i) };
 }
 
-export function mediaType(name) {
-  const extension = name.split('.').at(-1).toLowerCase();
-  return ({ mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac', opus: 'audio/ogg', webm: 'audio/webm', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp', avif: 'image/avif' })[extension] ?? 'application/octet-stream';
+/** The MIME type for a media file name, defaulting to a generic binary type. */
+export function mediaType(name: string): string {
+  const extension = name.split('.').at(-1)!.toLowerCase();
+  return ({ mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac', opus: 'audio/ogg', webm: 'audio/webm', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp', avif: 'image/avif' } as Record<string, string>)[extension] ?? 'application/octet-stream';
 }
 
-export function packageEntries(chart, assets, chartName) {
-  const output = new Map(assets);
+/**
+ * Builds the entry map for an exported PEZ.
+ *
+ * A chart converted from another format is written beside its original rather than over it, so the
+ * source document survives the round trip; the sibling `info.txt` is repointed at the new name.
+ */
+export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: string): ArchiveEntries {
+  const output: ArchiveEntries = new Map(assets);
   let outputName = chartName;
   if (chart.rpeNextLegacySource) {
     const stem = chartName.replace(/\.(json|pec)$/i, '');
@@ -130,7 +188,7 @@ export function packageEntries(chart, assets, chartName) {
     const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
     const path = directory ? `${directory}/extra.json` : 'extra.json';
     const existing = [...output.keys()].find(name => normalizePath(name) === normalizePath(path));
-    const extra = existing ? JSON.parse(decodeLegacy(output.get(existing))) : {};
+    const extra = existing ? JSON.parse(decodeLegacy(output.get(existing)!)) as Record<string, unknown> : {};
     output.set(existing ?? path, new TextEncoder().encode(JSON.stringify({ ...extra, effects }, null, 2)));
   }
   if (outputName !== chartName) {
@@ -138,12 +196,12 @@ export function packageEntries(chart, assets, chartName) {
       const directory = name.slice(0, name.lastIndexOf('/') + 1);
       const reference = outputName.slice(directory.length);
       const info = decodeLegacy(bytes);
-      output.set(name, new TextEncoder().encode(info.replace(/^(Chart:[ \t]*)[^\r\n]*/m, (match, prefix) => prefix + reference)));
+      output.set(name, new TextEncoder().encode(info.replace(/^(Chart:[ \t]*)[^\r\n]*/m, (match, prefix: string) => prefix + reference)));
     }
   }
   return output;
 }
 
-export function exportPackage(chart, assets, chartName) {
+export function exportPackage(chart: Chart, assets: ArchiveEntries, chartName: string): void {
   download(writeZip(packageEntries(chart, assets, chartName)), 'RPE-export.pez');
 }
