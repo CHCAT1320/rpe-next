@@ -4,7 +4,7 @@ import { EVENT_TYPES } from '../core/chart.ts';
 import { snapTime } from '../core/edit-grid.ts';
 import { eventList, eventKey, selectedEvents, commitEventLists } from './event-commands.ts';
 import type { EventEditSession } from './event-commands.ts';
-import type { ChartEvent } from '../core/types.ts';
+import type { ChartEvent, Color, EventValue } from '../core/types.ts';
 
 /** The tracks the cut tool understands: every base track plus the numeric extended ones. */
 const cutTypes = new Set<string>([...EVENT_TYPES, 'scaleXEvents', 'scaleYEvents', 'colorEvents']);
@@ -15,12 +15,23 @@ interface CutTempo {
   beat(seconds: number, factor?: number): number;
 }
 
+/**
+ * The tempo map `snapTime` measures with.
+ *
+ * `snapTime` is declared against `core/tempo.ts`'s `TempoMap`, whose accessors additionally accept a
+ * beat triple. {@link CutTempo} stays the narrower view this module documents, because the cuts it
+ * computes always work on beat numbers; the two accessors the cut path uses are the only ones the
+ * object has to provide, so the intersection below keeps `CutOptions.tempo` assignable to both
+ * without widening the runtime contract or restating `TempoMap` here.
+ */
+type SnapTempo = CutTempo & Parameters<typeof snapTime>[2];
+
 /** Options for {@link cutEventParts}; `tempo` is omitted at call sites that work in raw beats. */
 export interface CutOptions {
   division?: number;
   density?: number;
   beat?: number;
-  tempo?: CutTempo;
+  tempo?: SnapTempo;
   factor?: number;
 }
 
@@ -59,8 +70,16 @@ export function cutEventParts(type: string, event: ChartEvent, { division = 4, d
     const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1);
     if (Array.isArray(event.start)) {
       const from = event.start as number[]; const to = event.end as number[];
-      // Channel-wise sample of a colour event; `cutTypes` only admits three-channel tracks here.
-      return from.map((value, index) => Math.trunc(value + (to[index] - value) * amount)) as Color;
+      // Channel-wise sample of a colour event; `cutTypes` only admits three-channel tracks here, so
+      // the three channels are written out rather than mapped. `Array.map` erases the tuple to
+      // `number[]`, which is not assignable to `Color`; spelling the triple out keeps the result
+      // exactly what the mapped form produced, with `Math.trunc` applied per channel.
+      const blended: Color = [
+        Math.trunc(from[0] + (to[0] - from[0]) * amount),
+        Math.trunc(from[1] + (to[1] - from[1]) * amount),
+        Math.trunc(from[2] + (to[2] - from[2]) * amount),
+      ];
+      return blended;
     }
     const value = (event.start as number) + ((event.end as number) - (event.start as number)) * amount;
     return type === 'alphaEvents' ? Math.trunc(value) : value;

@@ -43,7 +43,7 @@ test('官方 v3 转换遵循原版拍数、倍率和类型，保留原文档', (
   assert.equal(converted.notes[0].positionX, 150);
   assert.equal(converted.notes[1].type, 4);
   assert.equal(converted.eventLayers[0].speedEvents[0].start, 9);
-  assert.deepEqual(chart.rpeNextLegacySource.document, original);
+  assert.deepEqual(chart.rpeNextLegacySource?.['document'], original);
 });
 
 test('DEFLATE 读取验证内容和 CRC，拒绝损坏数据', async () => {

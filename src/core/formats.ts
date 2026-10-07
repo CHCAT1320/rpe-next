@@ -1,9 +1,10 @@
+import type { Chart } from './types.ts';
 import { parseChart } from './chart.ts';
 import { parseLegacyChart } from './legacy-chart.ts';
 import { parsePecChart } from './pec-chart.ts';
 import { parseOfficialChart } from './official-chart.ts';
 
-export function parseDocument(text) {
+export function parseDocument(text: string): Chart {
   const trimmed = text.replace(/^\uFEFF/, '').trimStart();
   if (trimmed.startsWith('{')) {
     const candidate = JSON.parse(trimmed);

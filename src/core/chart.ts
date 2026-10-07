@@ -1,12 +1,86 @@
 import { beatValue, fromNumber } from './beat.ts';
 import { TempoMap } from './tempo.ts';
-import type { Chart, ChartEvent, ControlPoint, EventLayer, EventType, ExtendedType, JudgeLine, Note, NoteType } from './types.ts';
+import type { AnyEventType, Beat, Chart, ChartEvent, ChartMeta, ControlPoint, EventLayer, EventType, EventValue, ExtendedType, JudgeLine, Note, NoteType } from './types.ts';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'] as const satisfies readonly EventType[];
 export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'] as const satisfies readonly ExtendedType[];
 export const NOTE_NAMES: Record<number, string> = { 1: 'Tap', 2: 'Hold', 3: 'Flick', 4: 'Drag' };
 
-export function createEvent(start = 0, end = start, startBeat = 0, endBeat = startBeat + 1): ChartEvent {
+/** Severity buckets the diagnostics panel renders as separate groups. */
+export type IssueSeverity = 'error' | 'warning' | 'info';
+
+/**
+ * One finding from {@link diagnose}.
+ *
+ * Indexed, so the reporter helpers may attach optional locators (`layer`, `extended`, `line`) only
+ * for the findings that have them rather than every finding carrying every field.
+ */
+export interface DiagnosticIssue {
+  severity: IssueSeverity;
+  message: string;
+  path: string;
+  beat: number;
+  index?: number;
+  line?: number;
+  layer?: number;
+  extended?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * An event as it arrives from a parsed document.
+ *
+ * Fields stay optional because {@link assertChart} reads them before validating them; `start`/`end`
+ * hold the loosely typed payload ({@link EventValue}) so colour and text tracks can be checked.
+ */
+interface RawEvent {
+  startTime?: unknown;
+  endTime?: unknown;
+  start?: EventValue;
+  end?: EventValue;
+  bezier?: unknown;
+  bezierPoints?: unknown;
+  easingLeft?: number;
+  easingRight?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * A note as it arrives from a parsed document; every field is validated by {@link assertChart}, so
+ * all of them stay optional here even though {@link Note} requires some.
+ */
+interface RawNote {
+  type?: number;
+  startTime?: unknown;
+  endTime?: unknown;
+  positionX?: number;
+  speed?: number;
+  size?: number;
+  alpha?: number;
+  yOffset?: number;
+  visibleTime?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * A judge line as it arrives from a parsed document.
+ *
+ * `eventLayers` admits null entries because real charts carry them (the round-trip test in
+ * `test/core.test.ts` pushes one), and `notes` reuse the validation-only shape above.
+ */
+interface RawLine {
+  notes?: RawNote[];
+  eventLayers?: (EventLayer | null | undefined)[];
+  extended?: EventLayer | null;
+  bpmfactor?: number;
+  father?: number;
+  [key: string]: unknown;
+}
+
+/** The control-curve arrays {@link assertChart} checks, paired with the property each point carries. */
+const CONTROL_CURVES: Record<string, string> = { alphaControl: 'alpha', posControl: 'pos', sizeControl: 'size', skewControl: 'skew', yControl: 'y' };
+
+export function createEvent(start: EventValue = 0, end: EventValue = start, startBeat = 0, endBeat = startBeat + 1): ChartEvent {
   return { startTime: fromNumber(startBeat), endTime: fromNumber(endBeat), start, end, easingType: 1,
     easingLeft: 0, easingRight: 1, bezier: 0, bezierPoints: [0, 0, 1, 1], linkgroup: 0 };
 }
@@ -28,89 +102,108 @@ export function createNote(type: NoteType, beat: number, positionX: number, endB
 }
 
 export function parseChart(text: string): Chart {
-  let chart;
+  // `JSON.parse` can produce anything, so the document stays `unknown` until `assertChart` proves
+  // it; a wrong `JSON.parse` argument type is still a caller bug and stays a type error.
+  let chart: unknown;
   try { chart = JSON.parse(text.replace(/^\uFEFF/, '')); }
   catch { throw new Error('无效的 RPE JSON 文档'); }
   assertChart(chart);
   return chart;
 }
 
-export function noteIsAbove(note) {
+export function noteIsAbove(note: Note): boolean {
   return Number(note.above ?? 1) === 1;
 }
 
-export function serializeChart(chart) {
+export function serializeChart(chart: Chart): string {
   assertChart(chart);
   return stringifyPreservingNumbers(chart) + '\n';
 }
 
-export function stringifyPreservingNumbers(value) {
+export function stringifyPreservingNumbers(value: unknown): string {
   const ordinary = JSON.stringify(value, null, 2);
   let marker = '\u0000rpe-negative-zero\u0000';
   while (ordinary.includes(JSON.stringify(marker))) marker += '#';
   return JSON.stringify(value, (key, entry) => Object.is(entry, -0) ? marker : entry, 2).replaceAll(JSON.stringify(marker), '-0');
 }
 
-export function assertChart(chart) {
-  if (!chart || typeof chart !== 'object' || !chart.META || typeof chart.META !== 'object' || Array.isArray(chart.META)) throw new Error('缺少 META：不是 RPE 谱面');
-  if (chart.judgeLineList != null && !Array.isArray(chart.judgeLineList)) throw new Error('judgeLineList 必须为数组');
-  new TempoMap(chart.BPMList);
-  if (chart.META.offset !== undefined && !Number.isFinite(chart.META.offset)) throw new Error('META.offset 必须为毫秒数');
-  (chart.judgeLineList ?? []).forEach((line, lineIndex) => {
+export function assertChart(chart: unknown): asserts chart is Chart {
+  // The document is untrusted JSON, so no branch below can be proved statically and the object is
+  // never asserted into a shape before it has been checked. The accessors narrow one member at a
+  // time; `RawLine`/`RawNote`/`RawEvent` are the validation-only views of the shared domain types.
+  if (!chart || typeof chart !== 'object') throw new Error('缺少 META：不是 RPE 谱面');
+  // An unvalidated view of the document: member lookups stay `unknown` until each is checked, so
+  // nothing below can accidentally assume a shape that has not been verified yet.
+  const document = chart as Record<string, unknown>;
+  const meta = document.META;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw new Error('缺少 META：不是 RPE 谱面');
+  const metaInfo = meta as ChartMeta;
+  const lines: unknown = document.judgeLineList;
+  if (lines != null && !Array.isArray(lines)) throw new Error('judgeLineList 必须为数组');
+  new TempoMap(document.BPMList as Chart['BPMList']);
+  if (metaInfo.offset !== undefined && !Number.isFinite(metaInfo.offset)) throw new Error('META.offset 必须为毫秒数');
+  (lines ?? []).forEach((line, lineIndex) => {
     const path = `judgeLineList[${lineIndex}]`;
     if (!line || typeof line !== 'object') throw new Error(`${path}: 无效判定线`);
-    if (line.bpmfactor !== undefined && (!Number.isFinite(line.bpmfactor) || line.bpmfactor <= 0)) throw new Error(`${path}.bpmfactor 必须大于零`);
-    if (line.notes != null && !Array.isArray(line.notes)) throw new Error(`${path}.notes 必须为数组`);
-    for (const [index, note] of (line.notes ?? []).entries()) {
+    const record = line as Record<string, unknown>;
+    const bpmfactor = record.bpmfactor;
+    if (bpmfactor !== undefined && (typeof bpmfactor !== 'number' || !Number.isFinite(bpmfactor) || bpmfactor <= 0)) throw new Error(`${path}.bpmfactor 必须大于零`);
+    const notes: unknown = record.notes;
+    if (notes != null && !Array.isArray(notes)) throw new Error(`${path}.notes 必须为数组`);
+    for (const [index, note] of (notes ?? []).entries()) {
       if (!note || typeof note !== 'object') throw new Error(`${path}.notes[${index}]: 无效音符`);
       beatValue(note.startTime, `${path}.notes[${index}].startTime`);
       beatValue(note.endTime, `${path}.notes[${index}].endTime`);
       if (!NOTE_NAMES[note.type] || !Number.isFinite(note.positionX)) throw new Error(`${path}.notes[${index}]: 非法类型或坐标`);
-      for (const property of ['speed', 'size', 'alpha', 'yOffset', 'visibleTime']) {
+      for (const property of ['speed', 'size', 'alpha', 'yOffset', 'visibleTime'] as const) {
         if (note[property] !== undefined && !Number.isFinite(note[property])) throw new Error(`${path}.notes[${index}].${property} 必须为有限数字`);
       }
     }
-    if (line.eventLayers != null && !Array.isArray(line.eventLayers)) throw new Error(`${path}.eventLayers 必须为数组`);
-    for (const layer of [...(line.eventLayers ?? []), line.extended]) {
+    const eventLayers: unknown = record.eventLayers;
+    if (eventLayers != null && !Array.isArray(eventLayers)) throw new Error(`${path}.eventLayers 必须为数组`);
+    const extended = record.extended;
+    for (const layer of [...(eventLayers ?? []), extended]) {
       if (!layer) continue;
       for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {
-        if (layer[type] != null && !Array.isArray(layer[type])) throw new Error(`${path}.${type} 必须为数组`);
-        for (const [index, event] of (layer[type] ?? []).entries()) {
+        const track = layer[type];
+        if (track != null && !Array.isArray(track)) throw new Error(`${path}.${type} 必须为数组`);
+        for (const [index, event] of (track ?? []).entries()) {
           beatValue(event?.startTime, `${path}.${type}[${index}].startTime`);
           beatValue(event?.endTime, `${path}.${type}[${index}].endTime`);
-          const validValue = value => type === 'textEvents' ? typeof value === 'string' : type === 'colorEvents' ? Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) : Number.isFinite(value);
+          const validValue = (value: unknown): boolean => type === 'textEvents' ? typeof value === 'string' : type === 'colorEvents' ? Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) : Number.isFinite(value);
           if (type !== 'paintEvents' && (!validValue(event.start) || !validValue(event.end))) throw new Error(`${path}.${type}[${index}]: 无效事件起始/结束值`);
-          for (const property of ['easingLeft', 'easingRight']) {
+          for (const property of ['easingLeft', 'easingRight'] as const) {
             if (event[property] !== undefined && !Number.isFinite(event[property])) throw new Error(`${path}.${type}[${index}].${property} 必须为有限数字`);
           }
           if (event.bezier && (!Array.isArray(event.bezierPoints) || event.bezierPoints.length !== 4 || !event.bezierPoints.every(Number.isFinite))) throw new Error(`${path}.${type}[${index}].bezierPoints 必须为四个有限数字`);
         }
       }
     }
-    for (const [name, property] of Object.entries({ alphaControl: 'alpha', posControl: 'pos', sizeControl: 'size', skewControl: 'skew', yControl: 'y' })) {
-      if (line[name] == null) continue;
-      if (!Array.isArray(line[name])) throw new Error(`${path}.${name} 必须为数组`);
-      for (const [index, point] of line[name].entries()) {
+    for (const [name, property] of Object.entries(CONTROL_CURVES)) {
+      const control = (line as Record<string, unknown>)[name];
+      if (control == null) continue;
+      if (!Array.isArray(control)) throw new Error(`${path}.${name} 必须为数组`);
+      for (const [index, point] of (control as ControlPoint[]).entries()) {
         if (!Number.isFinite(point?.x) || !Number.isFinite(point?.[property])) throw new Error(`${path}.${name}[${index}]: 无效控制点`);
       }
     }
   });
 }
 
-export function diagnose(chart) {
-  const issues = [];
-  const addIssue = (issue, severity = 'warning') => issues.push({ severity, ...issue });
-  const bpmBeats = new Set();
+export function diagnose(chart: Chart): DiagnosticIssue[] {
+  const issues: DiagnosticIssue[] = [];
+  const addIssue = (issue: { line: number; beat: number; path: string; message: string; index?: number; layer?: number; extended?: boolean }, severity: IssueSeverity = 'warning'): void => { issues.push({ severity, ...issue }); };
+  const bpmBeats = new Set<number>();
   for (const [index, entry] of chart.BPMList.entries()) {
     const beat = beatValue(entry.startTime);
     if (bpmBeats.has(beat)) addIssue({ line: 0, beat, index, path: `BPMList[${index}]`, message: '同拍重复 BPM，运行时采用文件中最后一项；原数据保留' }, 'info');
     bpmBeats.add(beat);
   }
   for (const [lineIndex, line] of (chart.judgeLineList ?? []).entries()) {
-    const seen = new Set();
+    const seen = new Set<string>();
     for (const [index, note] of (line.notes ?? []).entries()) {
       const beat = beatValue(note.startTime);
-      const report = (message, severity = 'error') => addIssue({ line: lineIndex, beat, index, path: `notes[${index}]`, message }, severity);
+      const report = (message: string, severity: IssueSeverity = 'error'): void => addIssue({ line: lineIndex, beat, index, path: `notes[${index}]`, message }, severity);
       if (beatValue(note.endTime) < beat) report('结束拍早于开始拍');
       if (note.type === 2 && beatValue(note.endTime) === beat) report('Hold 时长为零');
       if (Math.abs(note.positionX) > 675) report('音符超出标准横向范围', 'warning');
@@ -118,7 +211,7 @@ export function diagnose(chart) {
       if (seen.has(key)) report('同位置同时音符重叠', 'warning');
       seen.add(key);
     }
-    const inspectEvents = (layer, layerIndex, extended) => {
+    const inspectEvents = (layer: EventLayer | null | undefined, layerIndex: number, extended: boolean): void => {
       for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {
         if (type === 'paintEvents') continue;
         const events = layer?.[type] ?? [];
@@ -134,8 +227,8 @@ export function diagnose(chart) {
     };
     for (const [layerIndex, layer] of (line.eventLayers ?? []).entries()) inspectEvents(layer, layerIndex, false);
     inspectEvents(line.extended, -1, true);
-    const visited = new Set([lineIndex]);
-    let parent = line.father ?? -1;
+    const visited = new Set<number>([lineIndex]);
+    let parent: number = line.father ?? -1;
     while (parent !== -1) {
       if (!Number.isInteger(parent) || !chart.judgeLineList[parent] || visited.has(parent)) {
         addIssue({ line: lineIndex, beat: 0, path: 'father', message: '父线无效或循环引用' }, 'error');
@@ -148,8 +241,8 @@ export function diagnose(chart) {
   return issues;
 }
 
-export function previewLimitations(chart) {
-  const features = new Set();
+export function previewLimitations(chart: Chart): string[] {
+  const features = new Set<string>();
   if ((chart.META.RPEVersion ?? 0) < 100) features.add('旧版事件语义');
   for (const line of chart.judgeLineList ?? []) {
     if (line.Texture && line.Texture !== 'line.png') features.add('纹理颜色混合');
@@ -161,3 +254,6 @@ export function previewLimitations(chart) {
   }
   return [...features];
 }
+
+/** Kept for readers of the validation shapes above: the index signature `Chart` relies on. */
+export type { AnyEventType, Beat, ChartEvent, ControlPoint, EventLayer, JudgeLine, Note };

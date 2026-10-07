@@ -79,7 +79,7 @@ test('旧 RPE 三元文本转换，精确保留音符字段和原文', () => {
   assert.equal(chart.judgeLineList[0].notes[0].speed, 1.5);
   assert.equal(chart.judgeLineList[0].notes[0].yOffset, 5);
   assert.equal(chart.judgeLineList[0].extended.textEvents[0].start, 'Hello world');
-  assert.equal(chart.rpeNextLegacySource.text, text);
+  assert.equal(chart.rpeNextLegacySource?.['text'], text);
 });
 
 test('PEC 按原 SavePec 反向转换 offset、坐标、速度和类型', () => {

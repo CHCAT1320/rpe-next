@@ -58,7 +58,8 @@ export class EventTrack {
     if (Array.isArray(event.start) && Array.isArray(event.end)) {
       const from = event.start as Color;
       const to = event.end as Color;
-      return from.map((value, index) => value + (to[index] - value) * amount);
+      const blended: Color = [from[0] + (to[0] - from[0]) * amount, from[1] + (to[1] - from[1]) * amount, from[2] + (to[2] - from[2]) * amount];
+      return blended;
     }
     if (typeof event.start === 'string' && typeof event.end === 'string') {
       if (seconds < entry.start) return '';

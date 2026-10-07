@@ -144,8 +144,14 @@ export interface Chart {
   BPMList: BpmEntry[];
   judgeLineGroup: string[];
   judgeLineList: JudgeLine[];
-  /** Present when the document was imported from another format, so re-export can preserve it. */
-  rpeNextLegacySource?: { text: string; [key: string]: unknown };
+  /**
+   * Present when the document was imported from another format, so re-export can preserve it.
+   *
+   * Nothing is required beyond the open-ended bag: the JSON-derived formats keep their original
+   * bytes in `text`, while the official v3 converter stores the parsed document in `document`, and
+   * consumers only test for presence. Requiring `text` here would misdescribe those documents.
+   */
+  rpeNextLegacySource?: { [key: string]: unknown };
   [key: string]: unknown;
 }
 

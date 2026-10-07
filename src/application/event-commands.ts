@@ -1,6 +1,7 @@
 import { EVENT_TYPES, assertChart, createEvent } from '../core/chart.ts';
 import { beatValue, fromNumber } from '../core/beat.ts';
 import { EventTrack } from '../core/events.ts';
+import type { ResolvedEvent } from '../core/events.ts';
 import { shaderEvents, replaceShaderEvents, alignShaderParameters } from '../core/shader-events.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, EventLayer, EventType } from '../core/types.ts';
 
@@ -213,9 +214,16 @@ export function pasteEvents(session: EventEditSession, beat: number, keepTime = 
  * `EventTrack` is a plain JavaScript class in `core/events.ts` whose `value` is untyped, so the
  * sample is narrowed to a number here; both callers below have already rejected non-numeric
  * endpoints, which is the only case the evaluator can return something else.
+ *
+ * The track is built from an already-resolved entry because `EventTrack`'s constructor only accepts
+ * a concrete `TempoMap`, while callers here are typed against the narrower {@link EventTempo}; the
+ * `{ start, event, end }` shape below is exactly what that constructor derives, in the same order.
  */
 function sampleValue(event: ChartEvent, tempo: EventTempo, seconds: number, factor: number): number {
-  return new EventTrack([event], tempo, factor).value(seconds) as number;
+  const entry: ResolvedEvent = { event, start: tempo.seconds(event.startTime, factor), end: tempo.seconds(event.endTime, factor) };
+  const track = Object.create(EventTrack.prototype) as EventTrack;
+  track.events = [entry]; track.fallback = 0;
+  return track.value(seconds) as number;
 }
 
 /** Splits one numeric event in two at `beat`, keeping the sampled value exact. */

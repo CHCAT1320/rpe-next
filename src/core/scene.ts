@@ -3,18 +3,78 @@ import { IntervalIndex } from './interval-index.ts';
 import { easing } from './easing.ts';
 import { upperBound } from './beat.ts';
 import { noteIsAbove } from './chart.ts';
+import type { TempoMap } from './tempo.ts';
+import type { IndexedInterval } from './interval-index.ts';
+import type { HitEntry } from './hit-effects.ts';
+import type { Chart, ChartEvent, Color, JudgeLine, Note } from './types.ts';
 
+/** The control curves a judge line can carry, keyed by the name the chart stores them under. */
+export interface LineControls {
+  alpha: ControlCurve;
+  pos: ControlCurve;
+  size: ControlCurve;
+  skew: ControlCurve;
+  y: ControlCurve;
+}
+
+/**
+ * A judge line's event tracks, keyed by the four base track names.
+ *
+ * Each entry is the stack of layers the chart stores for that track, so a sample sums over all of
+ * them; the runtime counterpart of {@link LineRuntime.tracks}.
+ */
+export interface LineTracks {
+  moveXEvents: EventTrack[];
+  moveYEvents: EventTrack[];
+  rotateEvents: EventTrack[];
+  alphaEvents: EventTrack[];
+}
+
+/** A judge line's tracks under `extended`, keyed by the extended track names. */
+export interface ExtendedTracks {
+  scaleXEvents: EventTrack;
+  scaleYEvents: EventTrack;
+  colorEvents: EventTrack;
+  textEvents: EventTrack;
+  inclineEvents: EventTrack;
+}
+
+/** The event track names the constructor builds {@link LineTracks} from. */
+const TRACK_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents'] as const;
+
+/** The control curves the constructor builds {@link LineControls} from, with their chart fields. */
+const CONTROL_FIELDS = { alpha: 'alphaControl', pos: 'posControl', size: 'sizeControl', skew: 'skewControl', y: 'yControl' } as const;
+
+/** A point of a control curve, as the chart stores it. */
+interface CurvePoint {
+  x: number;
+  [property: string]: number;
+}
+
+/** The keys `LineControls` is indexed by; `ControlCurve` receives the same string. */
+type ControlProperty = keyof LineControls;
+
+/** The keys `LineTracks` is indexed by, i.e. the base track names. */
+type TrackType = keyof LineTracks;
+
+/** The seed of each extended track, mapping a track name to the value it falls back to. */
+const EXTENDED_DEFAULTS = { scaleXEvents: 1, scaleYEvents: 1, colorEvents: [241, 216, 148] as Color, textEvents: '', inclineEvents: 0 };
+
+/** One control-point curve, sampled by the covered distance. */
 export class ControlCurve {
-  constructor(points, property) {
+  property: ControlProperty;
+  points: CurvePoint[];
+
+  constructor(points: CurvePoint[] | null | undefined, property: ControlProperty) {
     this.property = property;
     this.points = [...(points ?? [])].sort((left, right) => left.x - right.x);
   }
 
-  value(distance) {
+  value(distance: number): number {
     if (this.points.length <= 1) return this.property === 'skew' ? 0 : 1;
     const index = upperBound(this.points, distance, point => point.x);
     if (index === 0) return this.points[0][this.property];
-    if (index >= this.points.length) return this.points.at(-1)[this.property];
+    if (index >= this.points.length) return (this.points.at(-1) as CurvePoint)[this.property];
     const start = this.points[index - 1];
     const end = this.points[index];
     const amount = easing((distance - start.x) / (end.x - start.x), end.easing ?? 1);
@@ -22,18 +82,35 @@ export class ControlCurve {
   }
 }
 
+/** One judge line compiled to runtime form: tracks, the speed integral, and per-note positions. */
 export class LineRuntime {
-  constructor(line, tempo) {
+  line: JudgeLine;
+  tracks: LineTracks;
+  speeds: SpeedIntegral[];
+  extended: ExtendedTracks;
+  controls: LineControls;
+  notes: HitEntry[];
+  minSpeed: number;
+  hitTimes: HitEntry[];
+  holdIndex: IntervalIndex<HitEntry>;
+  staticNotes: HitEntry[];
+  index: IntervalIndex<HitEntry>;
+  hasYControl: boolean;
+
+  constructor(line: JudgeLine, tempo: TempoMap) {
     this.line = line;
     const factor = line.bpmfactor ?? 1;
-    this.tracks = Object.fromEntries(['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents'].map(type =>
+    const tracks = Object.fromEntries(TRACK_TYPES.map(type =>
       [type, (line.eventLayers ?? []).map(layer => new EventTrack(layer?.[type], tempo, factor))]));
+    this.tracks = tracks as unknown as LineTracks;
     this.speeds = (line.eventLayers ?? []).map(layer => new SpeedIntegral(layer?.speedEvents, tempo, factor));
-    const defaultColor = line.attachUI || line.extended?.textEvents?.length || line.Texture && line.Texture !== 'line.png' ? [255, 255, 255] : [241, 216, 148];
-    const defaults = { scaleXEvents: 1, scaleYEvents: 1, colorEvents: defaultColor, textEvents: '', inclineEvents: 0 };
-    this.extended = Object.fromEntries(Object.entries(defaults).map(([type, fallback]) => [type, new EventTrack(line.extended?.[type], tempo, factor, fallback)]));
-    this.controls = Object.fromEntries(Object.entries({ alpha: 'alphaControl', pos: 'posControl', size: 'sizeControl', skew: 'skewControl', y: 'yControl' })
-      .map(([property, name]) => [property, new ControlCurve(line[name], property)]));
+    const defaultColor: Color = line.attachUI || line.extended?.textEvents?.length || line.Texture && line.Texture !== 'line.png' ? [255, 255, 255] : [241, 216, 148];
+    const defaults = { ...EXTENDED_DEFAULTS, colorEvents: defaultColor };
+    const extended = Object.fromEntries(Object.entries(defaults).map(([type, fallback]) => [type, new EventTrack(line.extended?.[type as keyof ExtendedTracks], tempo, factor, fallback)]));
+    this.extended = extended as unknown as ExtendedTracks;
+    const controls = Object.fromEntries(Object.entries(CONTROL_FIELDS)
+      .map(([property, name]) => [property, new ControlCurve(line[name] as CurvePoint[] | undefined, property as ControlProperty)]));
+    this.controls = controls as unknown as LineControls;
     this.notes = (line.notes ?? []).map(note => {
       const start = tempo.seconds(note.startTime, factor);
       const end = tempo.seconds(note.endTime, factor);
@@ -44,24 +121,24 @@ export class LineRuntime {
     this.holdIndex = new IntervalIndex(this.notes.filter(entry => entry.note.type === 2), entry => entry.start, entry => entry.end);
     this.staticNotes = this.notes.filter(entry => (entry.note.speed ?? 1) === 0);
     this.index = new IntervalIndex(this.notes.filter(entry => (entry.note.speed ?? 1) !== 0), entry => Math.min(entry.floor, entry.tail), entry => Math.max(entry.floor, entry.tail));
-    this.hasYControl = line.yControl?.length > 1 && line.yControl.some(point => point.y !== 1);
+    this.hasYControl = (line.yControl?.length ?? 0) > 1 && (line.yControl ?? []).some(point => point.y !== 1);
   }
 
-  floor(seconds) { return this.speeds.reduce((sum, speed) => sum + speed.distance(seconds), 0); }
-  value(type, seconds) { return this.tracks[type].reduce((sum, track) => sum + Number(track.value(seconds)), 0); }
+  floor(seconds: number): number { return this.speeds.reduce((sum, speed) => sum + speed.distance(seconds), 0); }
+  value(type: TrackType, seconds: number): number { return this.tracks[type].reduce((sum, track) => sum + Number(track.value(seconds)), 0); }
 
-  state(seconds) {
+  state(seconds: number): LineState {
     return { x: this.value('moveXEvents', seconds), y: this.value('moveYEvents', seconds),
       rotation: this.value('rotateEvents', seconds), alpha: this.value('alphaEvents', seconds),
-      scaleX: this.extended.scaleXEvents.value(seconds), scaleY: this.extended.scaleYEvents.value(seconds),
-      color: this.extended.colorEvents.value(seconds), text: this.extended.textEvents.value(seconds),
-      incline: this.extended.inclineEvents.value(seconds), floor: this.floor(seconds) };
+      scaleX: Number(this.extended.scaleXEvents.value(seconds)), scaleY: Number(this.extended.scaleYEvents.value(seconds)),
+      color: this.extended.colorEvents.value(seconds) as Color, text: this.extended.textEvents.value(seconds) as string,
+      incline: Number(this.extended.inclineEvents.value(seconds)), floor: this.floor(seconds) };
   }
 
-  visibleNotes(seconds, state, radius = 1600) {
+  visibleNotes(seconds: number, state: LineState, radius = 1600): HitEntry[] {
     if (state.alpha < 0) return [];
     const range = radius / this.minSpeed;
-    const entries = this.hasYControl ? this.notes : [...this.index.query(state.floor - range, state.floor + range).map(entry => entry.item), ...this.staticNotes];
+    const entries = this.hasYControl ? this.notes : [...(this.index.query(state.floor - range, state.floor + range) as IndexedInterval<HitEntry>[]).map(entry => entry.item), ...this.staticNotes];
     return entries.filter(entry => {
       if (entry.end < seconds || entry.start - seconds > (entry.note.visibleTime ?? 999999)) return false;
       if (this.line.isCover === 1 && (entry.note.type === 2 ? entry.tail : entry.floor) < state.floor) return false;
@@ -69,7 +146,7 @@ export class LineRuntime {
     });
   }
 
-  noteState(entry, state, seconds) {
+  noteState(entry: HitEntry, state: LineState, seconds: number): NoteState {
     const note = entry.note;
     const activeHold = note.type === 2 && entry.start < seconds;
     const distance = activeHold ? note.yOffset ?? 0 : entry.floor - state.floor;
@@ -86,48 +163,100 @@ export class LineRuntime {
   }
 }
 
-export class SceneRuntime {
-  constructor() { this.cache = new WeakMap(); }
+/** A line's runtime state at one instant, as {@link LineRuntime.state} reports it. */
+export interface LineState {
+  x: number;
+  y: number;
+  rotation: number;
+  alpha: number;
+  scaleX: number;
+  scaleY: number;
+  color: Color;
+  text: string;
+  incline: number;
+  floor: number;
+}
 
-  compile(chart, tempo) {
+/**
+ * Where one note sits on screen, as {@link LineRuntime.noteState} reports it.
+ *
+ * `x`/`y` are the note's own offsets from the line; `tail` is the hold's far end; `alpha` is already
+ * normalised to 0-1 while the line's own alpha stays in 0-255.
+ */
+export interface NoteState {
+  x: number;
+  y: number;
+  tail: number;
+  size: number;
+  alpha: number;
+  skew: number;
+  showHead: boolean;
+}
+
+/**
+ * Samples a line at a fixed instant, already resolving parent-line inheritance on demand.
+ *
+ * The result is `undefined` for an index outside `lines`, which is what the renderer relies on when
+ * a pass refers to a line the current chart no longer has.
+ */
+export type SceneSampler = (index: number) => LineState | undefined;
+
+/** Every judge line of one document compiled once, so a frame reuses the same runtime objects. */
+export class SceneRuntime {
+  cache: WeakMap<JudgeLine, LineRuntime>;
+  chart: Chart | null;
+  tempo: TempoMap | null;
+  lines: LineRuntime[];
+  order: number[];
+
+  constructor() {
+    this.cache = new WeakMap();
+    this.chart = null;
+    this.tempo = null;
+    this.lines = [];
+    this.order = [];
+  }
+
+  compile(chart: Chart, tempo: TempoMap): void {
     if (this.chart === chart && this.tempo === tempo) return;
     if (this.tempo !== tempo) { this.cache = new WeakMap(); this.tempo = tempo; }
     this.chart = chart;
     this.lines = (chart.judgeLineList ?? []).map(line => {
       if (!this.cache.has(line)) this.cache.set(line, new LineRuntime(line, tempo));
-      return this.cache.get(line);
+      return this.cache.get(line) as LineRuntime;
     });
     this.order = this.lines.map((line, index) => index).sort((left, right) => Number(this.lines[left].line.zOrder ?? 0) - Number(this.lines[right].line.zOrder ?? 0) || left - right);
   }
 
-  sampler(seconds) {
-    const states = [];
-    const done = new Set();
-    const resolving = new Set();
-    const resolve = index => {
+  sampler(seconds: number): SceneSampler {
+    const states: (LineState | undefined)[] = [];
+    const done = new Set<number>();
+    const resolving = new Set<number>();
+    const resolve = (index: number): boolean => {
       if (done.has(index)) return true;
       if (resolving.has(index)) return false;
       resolving.add(index);
       states[index] = this.lines[index].state(seconds);
       const line = this.lines[index].line;
-      const parent = line.father === null || line.father === undefined || line.father === '' ? -1 : (Number.isInteger(line.father) ? line.father : Number(line.father));
+      const father: unknown = line.father;
+      const parent = father === null || father === undefined || father === '' ? -1 : (Number.isInteger(father) ? Number(father) : Number(father));
       if (Number.isInteger(parent) && parent >= 0 && parent < this.lines.length) {
         if (!resolve(parent)) { resolving.delete(index); done.add(index); return false; }
-        const ancestor = states[parent];
-        const local = states[index];
+        const ancestor = states[parent] as LineState;
+        const local = states[index] as LineState;
         const angle = -ancestor.rotation * Math.PI / 180;
         states[index] = { ...local, x: ancestor.x + local.x * Math.cos(angle) - local.y * Math.sin(angle),
           y: ancestor.y + local.x * Math.sin(angle) + local.y * Math.cos(angle),
-          rotation: local.rotation + (line.rotateWithFather === undefined ? ((this.chart.META.RPEVersion ?? 0) >= 163 ? ancestor.rotation : 0) : (line.rotateWithFather ? ancestor.rotation : 0)) };
+          rotation: local.rotation + (line.rotateWithFather === undefined ? ((this.chart?.META.RPEVersion ?? 0) >= 163 ? ancestor.rotation : 0) : (line.rotateWithFather ? ancestor.rotation : 0)) };
       }
       resolving.delete(index);
       done.add(index);
       return true;
     };
-    return index => { if (!this.lines[index]) return undefined; resolve(index); return states[index]; };
+    return (index: number): LineState | undefined => { if (!this.lines[index]) return undefined; resolve(index); return states[index]; };
   }
 
-  sample(seconds) {
+  sample(seconds: number): (LineState | undefined)[] {
     const sample = this.sampler(seconds);
     return this.lines.map((runtime, index) => sample(index));
   }
