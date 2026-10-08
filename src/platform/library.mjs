@@ -16,7 +16,7 @@ function database() {
 async function access(stores, mode, action) {
   const connection = await database();
   return new Promise((resolve, reject) => {
-    const transaction = connection.transaction(stores, mode);
+    const transaction = connection.transaction(stores, mode, mode === 'readwrite' ? { durability: 'strict' } : undefined);
     let result;
     try { result = action(transaction); }
     catch (error) { transaction.abort(); connection.close(); reject(error); return; }
@@ -26,7 +26,30 @@ async function access(stores, mode, action) {
   });
 }
 
-export async function storeProject(project) {
+const projectWrites = new Map();
+
+export function storeProject(project) {
+  const previous = projectWrites.get(project.id) ?? Promise.resolve();
+  const operation = previous.catch(() => {}).then(() => writeProject(project));
+  projectWrites.set(project.id, operation);
+  const release = () => { if (projectWrites.get(project.id) === operation) projectWrites.delete(project.id); };
+  operation.then(release, release);
+  return operation;
+}
+
+async function writeProject(project) {
+  if (typeof Worker === 'undefined') return storeProjectDirect(project);
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./library-worker.mjs', import.meta.url), { type: 'module' });
+    worker.onmessage = ({ data }) => { worker.terminate(); data.ok ? resolve() : reject(new Error(data.message)); };
+    worker.onerror = event => { worker.terminate(); reject(new Error(event.message || '后台保存失败，请重试')); };
+    worker.onmessageerror = () => { worker.terminate(); reject(new Error('后台保存数据无法读取')); };
+    try { worker.postMessage(project); }
+    catch (error) { worker.terminate(); reject(error); }
+  });
+}
+
+export async function storeProjectDirect(project) {
   const thumbnail = await projectThumbnail(project);
   return access(['projects', 'summaries'], 'readwrite', transaction => {
     transaction.objectStore('projects').put(project);

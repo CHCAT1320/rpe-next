@@ -5,7 +5,8 @@ const { resolve, sep } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const origin = 'rpe://app';
-const smoke = process.argv.includes('--smoke-test');
+const smokeSettings = process.argv.includes('--smoke-settings');
+const smoke = process.argv.includes('--smoke-test') || smokeSettings;
 app.setName('RePhiEdit Next');
 app.setPath('userData', resolve(app.getPath('appData'), smoke ? 'rpe-next-desktop-smoke' : 'rpe-next-desktop'));
 mkdirSync(app.getPath('userData'), { recursive: true });
@@ -44,7 +45,7 @@ else {
       width: 1440, height: 960, minWidth: 1000, minHeight: 680,
       title: 'Re:PhiEdit Next', backgroundColor: '#171c25', show: false,
       autoHideMenuBar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false }
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false, backgroundThrottling: !smoke }
     });
     mainWindow.removeMenu();
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -73,6 +74,7 @@ else {
         const database = await new Promise((resolve, reject) => { const request = indexedDB.open('desktop-smoke'); request.onsuccess = () => { request.result.close(); resolve(true); }; request.onerror = () => reject(request.error); });
         return { title: document.title, secure: isSecureContext, libraryVisible: Boolean(document.querySelector('#home') && !document.querySelector('#home').hidden), directoryPicker: typeof showDirectoryPicker === 'function', webgl: Boolean(canvas.getContext('webgl2')), database, resources, forbidden: forbidden.status };
       })()`);
+      if (smokeSettings) result.settings = await mainWindow.webContents.executeJavaScript(await require('node:fs/promises').readFile(resolve(root, 'tools/smoke-settings-renderer.js'), 'utf8'));
       console.log(JSON.stringify({ ...result, errors }));
       const passed = result.secure && result.libraryVisible && result.webgl && result.database && result.resources.every(resource => resource.status === 200 && resource.bytes > 0) && result.forbidden === 404 && !errors.length;
       app.exit(passed ? 0 : 1);

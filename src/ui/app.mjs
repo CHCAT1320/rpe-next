@@ -42,10 +42,12 @@ import { EditorPlayback } from '../application/playback.mjs';
 import { readEditorPreferences, writeEditorPreferences } from '../platform/editor-preferences.mjs';
 import { ProjectHome } from './home.mjs';
 import { createSettingsPanel } from './settings.mjs';
+import { showHotkeySettings } from './hotkey-settings.mjs';
 import { AutoSaveClock } from '../application/autosave.mjs';
+import { ManualSaveQueue } from '../application/manual-save.mjs';
 import { SPECIAL_TRACKS, MAX_BASE_LAYERS } from '../core/editor-display.mjs';
 import { lineGroupName, isDefaultLineGroup, lineDisplayLabel } from '../core/line-groups.mjs';
-import { isPlaybackSpace, isTextEntry, isTypingText, releaseShortcutFocus } from './keyboard.mjs';
+import { isTextEntry, isTypingText, releaseShortcutFocus } from './keyboard.mjs';
 import { setRatioOptions, applyViewControls } from './view-controls.mjs';
 import { generateCurveNotes } from '../core/curve-notes.mjs';
 import { createEasingPicker } from './easing-picker.mjs';
@@ -61,6 +63,7 @@ const element = selector => document.querySelector(selector);
 const displayFields = [
   ['event-cut-density', 'cutDensity', 4],
   ['judgement-offset', 'judgementOffset', 92],
+  ['default-line-thickness', 'lineScale', 1.5],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
   ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
@@ -83,7 +86,7 @@ let dirtyFrame = true;
 let lastDraftDocument;
 let preferences = migratePreferences();
 let libraryProject = null;
-let saving = false;
+const manualSaves = new ManualSaveQueue(storeProject);
 let editorPreferences = readEditorPreferences();
 let atHome = true;
 let hasDocument = false;
@@ -859,17 +862,24 @@ async function togglePlayback() {
   invalidate();
 }
 
-async function save() {
-  if (saving) return;
-  saving = true;
-  const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
-  const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
-    chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
-  try {
-    await storeProject(project);
-    savingSession.history.markSaved(savingSession.chart);
-    if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
-  } finally { saving = false; }
+function save() {
+  const savingSession = session;
+  return manualSaves.save(savingSession, () => {
+    const document = session.chart; const snapshot = { ...document }; delete snapshot.chartTime;
+    const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
+      chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
+    status('正在后台保存，可继续编辑…');
+    return { document, project };
+  }, ({ document, project }) => {
+    savingSession.history.markSaved(document);
+    if (session !== savingSession) return;
+    libraryProject = project;
+    assetDirty = assets.size !== project.assets.length || project.assets.some(([name, bytes]) => assets.get(name) !== bytes)
+      || assetFolders.size !== project.assetFolders.length || project.assetFolders.some(folder => !assetFolders.has(folder));
+    renderSession();
+    const message = session.history.dirty || assetDirty ? '已保存开始保存时的版本；后续修改尚未保存' : '已保存到谱面库';
+    status(message); notify(message, 'success');
+  });
 }
 
 function validateCommit(label, next) { assertChart(next); session.commit(label, next); }
@@ -1296,25 +1306,21 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || event.key !== 'Tab' || dialogOpen() || isTypingText(event.target)) return;
+  if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || isTypingText(event.target)) return;
   event.preventDefault();
   if (event.repeat) return;
   lineInfoVisible = !lineInfoVisible;
   updateLineInfo();
 }, true);
-window.addEventListener('keyup', event => {
-  if (event.key !== 'Tab') return;
-  event.preventDefault();
-}, true);
 window.addEventListener('blur', () => { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); });
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || dialogOpen() || !isPlaybackSpace(event)) return;
+  if (atHome || !hasDocument || dialogOpen() || isTextEntry(event.target) || !shortcutMatches(event, preferences.hotkeys.Pause)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   playbackSpaceHeld = true;
   if (!event.repeat) togglePlayback().catch(reportError);
 }, true);
 window.addEventListener('keyup', event => {
-  if (event.key !== ' ' || !playbackSpaceHeld) return;
+  if (!shortcutReleased(event, preferences.hotkeys.Pause) || !playbackSpaceHeld) return;
   event.preventDefault(); event.stopImmediatePropagation(); playbackSpaceHeld = false;
 }, true);
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
@@ -1324,7 +1330,9 @@ window.addEventListener('keydown', async event => {
   if (isTextEntry(target) && event.key.toLowerCase() === 'v' && (event.ctrlKey || event.metaKey)) return;
   if (batchControls.active) { event.preventDefault(); return; }
   const area = timeline.hoverArea ?? session.focus;
-  const action = shortcutAction(event, preferences, area);
+  const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
+  const hasSelection = Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
+  const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
   if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
   if (pasteGesture.pending && action !== 'Paste') pasteGesture.cancel();
     if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
@@ -1333,8 +1341,7 @@ window.addEventListener('keydown', async event => {
   let handled = true;
   try {
     if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD', 'ToggleMultiLine', 'SwitchMultiLineMode'].includes(action)) { event.preventDefault(); return; }
-    const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
-    if (!preview.visible && !event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && (session.selection.size || session.eventSelection.size || hasMultiSelection)) nudgeSelection(session, event.key, timeline.division, timeline.gridCount);
+    if (!preview.visible && action?.startsWith('Page')) nudgeSelection(session, { PageLeft: 'ArrowLeft', PageRight: 'ArrowRight', PageUp: 'ArrowUp', PageDown: 'ArrowDown' }[action], timeline.division, timeline.gridCount);
     else if (timeline.eventInteraction.pending && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.altKey) timeline.eventInteraction.place(undefined, undefined, Number(event.key) || 10);
     else if (action === 'Save') { event.preventDefault(); await save(); }
     else if (action === 'Undo') travel('undo');
@@ -1486,7 +1493,7 @@ function applyPreferences(next) {
   hitSounds.setVolume(editorPreferences.hitVolume ?? next.settings.hitVolume);
   element('#hit-volume').value = hitSounds.volume;
   preview.noteSize = realtimePreview.noteSize = next.settings.noteSize;
-  preview.lineScale = next.settings.lineScale;
+  preview.lineScale = realtimePreview.lineScale = editorPreferences.lineScale ?? next.settings.lineScale;
   preview.backgroundAlpha = realtimePreview.backgroundAlpha = next.settings.backgroundAlpha;
   timeline.noteScale = next.settings.noteSize / 175;
   timeline.gridCount = editorPreferences.gridCount ?? next.settings.gridCount;
@@ -1519,6 +1526,7 @@ function applyPreferences(next) {
 
 function applyMigratedPreferences(next) {
   editorPreferences = { ...editorPreferences, volume: next.settings.volume, hitVolume: next.settings.hitVolume, gridCount: next.settings.gridCount, realtimeAlpha: next.settings.realtimeAlpha,
+    lineScale: next.settings.lineScale,
     ratioWidth: next.settings.ratioWidth, ratioHeight: next.settings.ratioHeight, barWidth: next.settings.barWidth, barAlpha: next.settings.barAlpha,
     autoSave: next.settings.autoSave, autoSaveSeconds: next.settings.autoSaveSeconds, autoSaveLimit: next.settings.autoSaveLimit, autoplayView: next.settings.autoplayView, highlight: next.settings.highlight, showGameUI: next.settings.showGameUI };
   applyPreferences(next); persistEditor();
@@ -1567,18 +1575,8 @@ listen('#library', () => {
 listen('#preferences', () => settingsDialog.showModal());
 listen('#advanced-preferences', () => {
   settingsDialog.close();
-  const content = showDialog('热键与设置', '已迁移热键会用于实际操作。未支持的项目保留在导出文件中；浏览器系统快捷键可能无法覆盖。');
-  const report = document.createElement('p');
-  report.textContent = `已应用热键：${preferences.report.appliedHotkeys.join('、') || '默认热键'}。仅保留设置：${preferences.report.retainedSettings.join('、') || '无'}。`;
-  content.append(report);
-  const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = '编辑热键 / 设置';
-  edit.onclick = () => editJson('编辑热键 / 设置', '修改 originalSettings 和 originalHotkeys，应用后生效。其他字段为迁移记录。', preferences, next => {
-    const nextPreferences = migratePreferences(JSON.stringify(next.originalSettings), Object.entries(next.originalHotkeys).map(([key, value]) => `${key} ${value}`).join('\n'), next.originalUI);
-    storePreferences(nextPreferences).then(() => applyMigratedPreferences(nextPreferences)).catch(reportError);
-  });
-  const exportButton = document.createElement('button'); exportButton.type = 'button'; exportButton.textContent = '导出全部迁移配置';
-  exportButton.onclick = () => download(new Blob([JSON.stringify(preferences, null, 2)], { type: 'application/json' }), 'rpe-next-preferences.json');
-  content.append(edit, exportButton);
+  pasteGesture.cancel();
+  showHotkeySettings(preferences, async next => { await storePreferences(next); applyPreferences(next); });
 });
 readPreferences().then(saved => {
   if (saved) applyPreferences(migratePreferences(JSON.stringify(saved.originalSettings), Object.entries(saved.originalHotkeys).map(([key, value]) => `${key} ${value}`).join('\n'), saved.originalUI));
@@ -1610,6 +1608,7 @@ function applyDisplaySettings() {
   element('#clipboard-history').hidden = !clipboardHistory.enabled;
   if (!clipboardHistory.enabled && activePaneName === 'clipboard') activatePane('chart');
   preview.backgroundBlur = realtimePreview.backgroundBlur = Number(element('#background-blur').value);
+  preview.lineScale = realtimePreview.lineScale = Number(element('#default-line-thickness').value);
   timeline.highlight = preview.highlight = realtimePreview.highlight = element('#highlight-notes').checked;
   audio.setPreservePitch(element('#preserve-pitch').checked);
   rotateTip();

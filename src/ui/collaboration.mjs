@@ -153,6 +153,7 @@ export class CollaborationPanel {
     }
   }
   handleChatKey(event) {
+    if (globalThis.document?.querySelector?.('dialog[open]')) return;
     if (!this.client.active || event.isComposing) return;
     if (event.key === 'Escape' && !this.chatBox.hidden) {
       event.preventDefault(); event.stopImmediatePropagation(); this.closeChat(); return;
