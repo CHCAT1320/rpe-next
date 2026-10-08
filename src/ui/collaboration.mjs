@@ -1,5 +1,7 @@
 import { CollaborationTransport } from '../platform/collaboration-transport.mjs';
 import { sendCollaborationAsset } from '../platform/collaboration-assets.mjs';
+import { digestBytes } from '../platform/collaboration-media.mjs';
+import { mediaErrorCode } from '../platform/media-diagnostics.mjs';
 import { CollaborationClient } from '../application/collaboration-client.mjs';
 import { parseInvitation, COLLAB_ID } from '../core/collaboration.mjs';
 import { eventListAt } from '../application/event-commands.mjs';
@@ -10,8 +12,7 @@ import { collaborationMarkerPosition, collaborationLabelBackground } from './col
 const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
 const button = (text, run) => { const element = node('button', text); element.type = 'button'; element.onclick = run; return element; };
 const input = (host, text, type = 'text', value = '') => { const label = node('label', text, 'field'); const field = node('input'); field.type = type; field.value = value; field.setAttribute('aria-label', text); label.append(field); host.append(label); return field; };
-const hex = bytes => [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
-const hash = async bytes => hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+const hash = digestBytes;
 
 export class CollaborationPanel {
   constructor(host, context, { receiveChart, receiveAsset, notify, activate, confirmJoin }) {
@@ -77,9 +78,9 @@ export class CollaborationPanel {
     this.leave = button('离开房间', () => this.client.leave());
     this.share = button('发送本谱面引用的音乐和图片', () => this.shareAssets());
     this.recovery = button('导出冲突前本地副本', () => { if (this.client.recoveryChart) download(new Blob([JSON.stringify(this.client.recoveryChart)], { type: 'application/json' }), 'collaboration-recovery.json'); });
-    this.diagnostics = button('导出联机诊断', () => download(new Blob([JSON.stringify({ format: 1, framed: true, entries: this.transport.diagnostics }, null, 2)], { type: 'text/plain' }), 'rpe-collaboration-diagnostics.log'));
+    this.diagnostics = button('导出联机诊断', () => download(new Blob([JSON.stringify({ format: 2, diagnosticBuild: 'media-local-route-v3', framed: true, mediaHttp: this.transport.mediaHttp === true, activeMedia: this.transport.media.diagnostics.snapshot(), entries: this.transport.diagnostics }, null, 2)], { type: 'text/plain' }), 'rpe-collaboration-diagnostics.log'));
     actions.append(this.create, this.join, this.copy, this.leave, this.share, this.recovery, this.diagnostics); this.host.append(actions);
-    this.host.append(node('p', '诊断仅记录连接阶段、数据大小和断线代码，不包含谱面内容、昵称、服务器地址或邀请凭据。', 'hint'));
+    this.host.append(node('p', '诊断包含校验、请求、上传确认各阶段的耗时、文件序号与大小，每 10 秒记录仍在等待的阶段；不包含文件名、哈希值、谱面内容、昵称、服务器地址或邀请凭据。卡住时可直接导出。', 'hint'));
     this.status = node('p', '', 'hint'); this.status.setAttribute('role', 'status'); this.host.append(this.status);
     this.assetStatus = node('p', '', 'hint'); this.assetStatus.setAttribute('role', 'status'); this.host.append(this.assetStatus);
     this.requests = node('div'); this.host.append(this.requests);
@@ -247,6 +248,7 @@ export class CollaborationPanel {
   async shareAssets() {
     if (this.sharing) return;
     this.sharing = true; this.renderState();
+    this.transport.trace?.('media-share-click', { channel: this.transport.mediaHttp ? 'http' : 'websocket' });
     try {
       const { sharedAssets } = this.context(); let count = 0;
       if (this.transport.mediaHttp) {
@@ -256,28 +258,35 @@ export class CollaborationPanel {
       }
       for (const [name, bytes] of sharedAssets()) {
         if (!/\.(png|jpe?g|webp|gif|ogg|mp3|wav|flac|m4a)$/i.test(name) || bytes.length > 128 * 1024 * 1024) continue;
-        this.assetStatus.textContent = `正在校验：${name}`;
-        const digest = await hash(bytes); const started = performance.now();
-        await sendCollaborationAsset(this.transport, name, bytes, digest, (sent, total) => {
+        this.assetStatus.textContent = `正在后台校验：${name}`;
+        const digest = await this.transport.media.hash(bytes, undefined, { direction: 'upload', fileIndex: count, kind: /\.(png|jpe?g|webp|gif)$/i.test(name) ? 'image' : 'audio' }); const started = performance.now();
+        this.assetStatus.textContent = `正在发送：${name} · 等待接收确认`;
+        const delivered = this.transport.media.diagnostics.start('legacy-delivery', { fileIndex: count, bytes: bytes.length });
+        try { await sendCollaborationAsset(this.transport, name, bytes, digest, (sent, total) => {
           const speed = sent / Math.max(0.1, (performance.now() - started) / 1000) / 1048576;
           this.assetStatus.textContent = `发送 ${name} · ${Math.floor(sent / total * 100)}% · ${speed.toFixed(2)} MiB/s`;
-        });
+        }); delivered(); } catch (error) { delivered('failed', { error: mediaErrorCode(error) }); throw error; }
         count++;
       }
       this.assetStatus.textContent = `已传输 ${count} 个引用素材，接收端会校验并载入`;
       this.notify(this.assetStatus.textContent, 'success');
-    } catch (error) { this.assetStatus.textContent = error.message; this.notify(error.message, 'warning'); }
+    } catch (error) { this.transport.trace?.('media-share-failed', { error: mediaErrorCode(error) }); this.assetStatus.textContent = error.message; this.notify(error.message, 'warning'); }
     finally { this.sharing = false; this.renderState(); }
   }
   mediaProgress(progress) {
     if (!this.assetStatus) return;
     if (progress.phase === 'hash') this.assetStatus.textContent = `正在校验：${progress.name}`;
-    else if (progress.phase === 'commit') this.assetStatus.textContent = '正在校验并发布整组素材…';
+    else if (progress.phase === 'prepare') this.assetStatus.textContent = '本地校验已完成，正在等待服务器准备上传…';
+    else if (progress.phase === 'upload-fallback') this.assetStatus.textContent = 'HTTP 上传无进展，已切换备用通道续传…';
+    else if (progress.phase === 'upload-transfer') this.assetStatus.textContent = `备用通道正在传输当前分片 · ${Math.floor(progress.sent / progress.total * 100)}% · 等待服务器保存`;
+    else if (progress.phase === 'upload' && !progress.bytes) this.assetStatus.textContent = progress.total ? '正在上传素材，等待首个分片确认…' : '服务器已有相同素材，准备发布…';
+    else if (progress.phase === 'commit') this.assetStatus.textContent = '正在服务器校验并发布整组素材…';
+    else if (progress.phase === 'verify') this.assetStatus.textContent = `正在校验 ${progress.name}…`;
     else if (progress.phase === 'published') this.assetStatus.textContent = `已发布 ${progress.count} 个素材 · 新成员可自动补收${progress.skippedBytes ? ' · 已复用相同文件' : ''}`;
     else if (progress.phase === 'received') this.assetStatus.textContent = `最近一组 ${progress.count} 个素材已就绪`;
     else {
       const speed = progress.bytes / Math.max(0.1, progress.seconds) / 1048576;
-      this.assetStatus.textContent = `${progress.phase === 'upload' ? '上传' : '下载'} ${progress.name} · ${Math.floor(progress.bytes / progress.total * 100)}% · ${speed.toFixed(2)} MiB/s · HTTP 4 路并发`;
+      this.assetStatus.textContent = `${progress.phase === 'upload-stream' ? '服务器接收中' : progress.phase === 'upload' ? '上传' : '下载'} ${progress.name} · ${Math.floor(progress.bytes / progress.total * 100)}% · ${speed.toFixed(2)} MiB/s · ${progress.channel === 'socket' ? '备用联机通道' : progress.channel === 'local' ? '本机直连' : 'HTTP 4 路并发'}`;
     }
   }
   async asset(message) {

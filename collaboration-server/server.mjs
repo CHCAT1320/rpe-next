@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { applyChanges, changeResources, cleanProfile, COLLAB_ID, COLLAB_PROTOCOL, validateData, validateIdentities, validateNewEventOverlaps } from '../src/core/collaboration.mjs';
@@ -15,14 +15,18 @@ const send = (socket, message) => {
 
 export async function startCollaborationServer({ port = 4182, host = '127.0.0.1', maxRooms = 20, maxMembers = 12, onStatus = () => {}, onDiagnostic = () => {}, creationKey = '' } = {}) {
   const rooms = new Map();
-  const assetStore = await CollaborationAssetStore.create();
+  const localMediaProof = randomBytes(32);
+  const assetStore = await CollaborationAssetStore.create({ onDiagnostic, onUploadProgress: (member, progress) => send(member.socket, { type: 'media-upload-progress', ...progress }) });
   const publishAssets = (room, manifest) => {
     for (const member of room.members.values()) if (member.id !== room.host && member.receiveAssets === true) send(member.socket, { type: 'asset-manifest', manifest });
   };
   const http = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json'); response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    if (request.url?.startsWith('/collab/media/')) {
+    if (request.method === 'GET' && /^\/collab\/media\/local\/[0-9a-f]{32}$/.test(request.url ?? '')) {
+      response.setHeader('Access-Control-Allow-Origin', '*');
+      response.end(JSON.stringify({ signature: createHmac('sha256', localMediaProof).update(request.url.split('/').at(-1)).digest('hex') }));
+    } else if (request.url?.startsWith('/collab/media/')) {
       assetStore.handle(request, response, rooms, publishAssets).catch(() => { if (!response.headersSent) response.writeHead(500); response.end('{}'); });
     } else if (request.method === 'GET' && request.url === '/health') { response.end(JSON.stringify({ service: 'RPE Next 协作', protocol: COLLAB_PROTOCOL })); }
     else { response.writeHead(404); response.end('{}'); }
@@ -38,7 +42,7 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
   const publishLocks = room => broadcast(room, { type: 'locks', locks: locks(room) });
   const welcome = (room, member, chartAccepted = false) => {
     member.mediaToken ??= token();
-    send(member.socket, { type: 'welcome', protocol: COLLAB_PROTOCOL, mediaHttp: true, mediaToken: member.mediaToken, assetDelivery: true, chartAccepted, id: member.id, resume: member.resume, room: room.id, invite: room.invite, host: room.host, chart: chartAccepted ? undefined : room.chart, revision: room.revision, members: members(room), locks: locks(room), chat: room.chat });
+    send(member.socket, { type: 'welcome', protocol: COLLAB_PROTOCOL, mediaHttp: true, mediaSocketUpload: true, mediaSocketResume: true, mediaLocal: member.id === room.host ? { port: http.address().port, proof: localMediaProof.toString('hex') } : undefined, mediaToken: member.mediaToken, assetDelivery: true, chartAccepted, id: member.id, resume: member.resume, room: room.id, invite: room.invite, host: room.host, chart: chartAccepted ? undefined : room.chart, revision: room.revision, members: members(room), locks: locks(room), chat: room.chat });
     onDiagnostic({ phase: 'welcome-queued', members: room.members.size, chartAccepted, compression: Boolean(member.socket.extensions.includes('permessage-deflate')) });
     publishMembers(room);
   };
@@ -48,7 +52,7 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
     socket.sender = new CollaborationMessageSender(socket, error => { onDiagnostic({ phase: 'send-failed', error: error.name }); socket.close(1011); });
     onDiagnostic({ phase: 'socket-open' });
     socket.alive = true; socket.on('pong', () => { socket.alive = true; });
-    let room; let member; let pendingRoom; let windowStart = Date.now(); let count = 0; let bytes = 0;
+    let room; let member; let pendingRoom; let windowStart = Date.now(); let count = 0; let bytes = 0; let stateCount = 0; let lastRateNotice = -Infinity;
     const deadline = new CollaborationSyncDeadline(reason => {
       onDiagnostic({ phase: 'sync-timeout', reason, pendingParts: reader.parts.length, receivedBytes: reader.bytes });
       socket.close(1008, reason === 'idle' ? '同步空闲超时' : '同步总时限');
@@ -58,8 +62,8 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
     socket.on('message', raw => {
       if (socket.readyState !== WebSocket.OPEN) return;
       try {
-        if (Date.now() - windowStart > 1000) { windowStart = Date.now(); count = 0; bytes = 0; }
-        if ((bytes += raw.length) > 70 * 1024 * 1024) throw new Error('消息发送过于频繁');
+        if (Date.now() - windowStart > 1000) { windowStart = Date.now(); count = 0; bytes = 0; stateCount = 0; }
+        if ((bytes += raw.length) > 70 * 1024 * 1024) { socket.close(1008, '消息流量超限'); return; }
         const message = reader.read(raw.toString()); socket.alive = true;
         if (message?.type === '$rpeAck') { socket.sender.acknowledge(message); return; }
         deadline.progress();
@@ -67,7 +71,15 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
           if (reader.parts.length === 1 || reader.parts.length % 64 === 0) onDiagnostic({ phase: 'sync-receiving', parts: reader.parts.length, total: reader.total, bytes: reader.bytes });
           return;
         }
-        if (++count > 100) throw new Error('消息发送过于频繁');
+        if (member && ['presence', 'ping', 'locks'].includes(message.type)) {
+          if (++stateCount > 60) return;
+        } else if (++count > 100) {
+          if (Date.now() - lastRateNotice >= 5000) {
+            lastRateNotice = Date.now(); onDiagnostic({ phase: 'request-rate-limited' });
+            send(socket, { type: 'error', code: 'RATE_LIMIT', message: '消息发送过于频繁，请稍后重试' });
+          }
+          return;
+        }
         validateData(message);
         if (['create', 'join', 'approve'].includes(message.type)) onDiagnostic({ phase: 'receive', type: message.type, bytes });
         if (!member) {
@@ -144,6 +156,13 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
           member.receiveAssets = message.enabled === true;
           const manifest = assetStore.manifest(room.id);
           if (member.receiveAssets && member.id !== room.host && manifest) send(socket, { type: 'asset-manifest', manifest });
+        } else if (message.type === 'media-upload' || message.type === 'media-upload-resume') {
+          if (typeof message.request !== 'string' || !/^[0-9a-f-]{36}$/.test(message.request)) throw new Error('素材请求编号无效');
+          const uploading = message.type === 'media-upload' ? assetStore.uploadSocket(room, member, message) : assetStore.resumeUpload(room, member, message.upload);
+          uploading.then(
+            result => send(socket, { type: 'media-upload-result', request: message.request, ...result }),
+            error => send(socket, { type: 'media-upload-result', request: message.request, error: error.status ? error.message : '素材写入失败，请重试', status: error.status ?? 500 })
+          );
         } else if (message.type === 'asset') {
           if (member.id !== room.host) throw new Error('仅房主可发送共享素材');
           if (message.transfer !== undefined && (typeof message.transfer !== 'string' || message.transfer.length > 80)) throw new Error('素材传输标识无效');

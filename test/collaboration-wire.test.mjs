@@ -86,3 +86,26 @@ test('连接关闭会终止等待中的异步素材发送', async () => {
   const pending = sender.sendAsync({ type: 'asset', data: 'x'.repeat(40000) });
   sender.close(); await assert.rejects(pending, /关闭/);
 });
+
+test('慢素材阻塞时状态消息只保留最新值，恢复后不会倾倒数百条过期状态', () => {
+  const frames = []; const sender = new CollaborationMessageSender({ readyState: 1, bufferedAmount: 0, send(frame) { frames.push(frame); } });
+  const upload = { type: 'media-upload', data: 'x'.repeat(1400000) }; sender.send(upload);
+  for (let index = 0; index < 600; index++) {
+    sender.send({ type: 'presence', seconds: index }); sender.send({ type: 'ping', time: index }); sender.send({ type: 'locks', ids: [index] });
+  }
+  assert.equal(sender.queue.length, 4);
+  const messages = []; const reader = new CollaborationMessageReader(receipt => sender.acknowledge(receipt));
+  for (const frame of frames) { const message = reader.read(frame); if (message) messages.push(message); }
+  assert.deepEqual(messages, [upload, { type: 'presence', seconds: 599 }, { type: 'ping', time: 599 }, { type: 'locks', ids: [599] }]);
+  assert.equal(sender.bytes, 0); sender.close();
+});
+
+test('合并状态不会丢失其他人的光标，也不会跨编辑操作合并选中锁', () => {
+  const sender = new CollaborationMessageSender({ readyState: 1, bufferedAmount: 0, send() {} });
+  sender.send({ type: 'media-upload', data: 'x'.repeat(1400000) });
+  sender.send({ type: 'presence', id: 'first', seconds: 1 }); sender.send({ type: 'presence', id: 'second', seconds: 2 });
+  sender.send({ type: 'presence', id: 'first', seconds: 3 });
+  sender.send({ type: 'locks', ids: ['before'] }); sender.send({ type: 'edit', operation: 'kept' }); sender.send({ type: 'locks', ids: ['after'] });
+  assert.equal(sender.queue.length, 6);
+  assert.equal(sender.queue.filter(entry => entry.type === 'edit').length, 1); sender.close();
+});

@@ -54,8 +54,20 @@ export class CollaborationMessageSender {
     if (this.closed || this.socket.readyState !== 1) throw new Error('连接已经关闭');
     const id = ++this.nextId; const frames = encodeCollaborationMessage(message, id);
     const bytes = frames.reduce((sum, frame) => sum + frame.length * 2, 0);
+    const stateKey = !resolve && ['presence', 'ping', 'pong', 'locks'].includes(message.type) ? `${message.type}:${message.id ?? ''}` : null;
+    if (stateKey) {
+      for (let index = this.queue.length - 1; index >= 0; index--) {
+        const queued = this.queue[index];
+        if (message.type === 'locks' && queued.type === 'edit') break;
+        if (queued.stateKey !== stateKey || queued.index !== 0) continue;
+        if (this.bytes - queued.bytes + bytes > maxMessageBytes * 4) throw new Error('网络拥堵，请稍后重试');
+        this.bytes += bytes - queued.bytes;
+        this.queue[index] = { frames, index: 0, acknowledged: 0, id, bytes, type: message.type, stateKey };
+        this.pump(); return;
+      }
+    }
     if (this.bytes + bytes > maxMessageBytes * 4) throw new Error('网络拥堵，请稍后重试');
-    this.queue.push({ frames, index: 0, acknowledged: 0, id, bytes, type: message.type, resolve, reject }); this.bytes += bytes; this.pump();
+    this.queue.push({ frames, index: 0, acknowledged: 0, id, bytes, type: message.type, stateKey, resolve, reject }); this.bytes += bytes; this.pump();
   }
   acknowledge(message) {
     const item = this.queue[0];

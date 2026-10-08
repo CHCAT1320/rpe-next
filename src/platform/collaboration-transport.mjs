@@ -1,17 +1,19 @@
 import { CollaborationMessageReader, CollaborationMessageSender, CollaborationSyncDeadline } from '../core/collaboration-wire.mjs';
 import { CollaborationMedia } from './collaboration-media.mjs';
+import { assetBase64 } from './collaboration-assets.mjs';
 
 export class CollaborationTransport extends EventTarget {
   constructor() {
-    super(); this.peers = new Map(); this.connected = false; this.closed = false; this.diagnostics = []; this.assetReceipts = new Map(); this.media = new CollaborationMedia();
+    super(); this.peers = new Map(); this.connected = false; this.closed = false; this.diagnostics = []; this.assetReceipts = new Map(); this.mediaReceipts = new Map(); this.media = new CollaborationMedia();
+    this.media.addEventListener('diagnostic', event => { const { phase, ...details } = event.detail; this.trace(phase, details); });
     this.media.addEventListener('progress', event => {
       const progress = event.detail;
-      if (['upload', 'download'].includes(progress.phase) && progress.bytes === progress.total) this.trace(`media-${progress.phase}-complete`, { bytes: progress.bytes, seconds: Number(progress.seconds.toFixed(2)), concurrency: 4 });
+      if (['upload', 'download'].includes(progress.phase) && progress.bytes === progress.total) this.trace(`media-${progress.phase}-complete`, { bytes: progress.bytes, seconds: Number(progress.seconds.toFixed(2)), channel: progress.channel ?? 'http', concurrency: progress.channel === 'socket' ? 2 : 4 });
     });
   }
   trace(phase, details = {}) {
     this.diagnostics.push({ time: new Date().toISOString(), phase, ...details });
-    if (this.diagnostics.length > 200) this.diagnostics.shift();
+    if (this.diagnostics.length > 2000) this.diagnostics.shift();
   }
   emit(type, detail) { this.dispatchEvent(new CustomEvent(type, { detail })); }
   connect(url, hello) {
@@ -30,7 +32,15 @@ export class CollaborationTransport extends EventTarget {
     });
     this.syncDeadline = deadline;
     this.sender = new CollaborationMessageSender(socket, error => { this.trace('send-failed', { error: error.name }); socket.close(); }, progress => {
-      if (this.socket !== socket || synchronized || !['create', 'join'].includes(progress.type)) return;
+      if (this.socket !== socket) return;
+      if (progress.type === 'media-upload') {
+        for (const receipt of this.mediaReceipts.values()) receipt.touch();
+        if (progress.sent % 16 === 0 || progress.sent === progress.total) {
+          this.trace('media-socket-frames', { sent: progress.sent, total: progress.total });
+          this.media.progress({ phase: 'upload-transfer', sent: progress.sent, total: progress.total });
+        }
+      }
+      if (synchronized || !['create', 'join'].includes(progress.type)) return;
       deadline.progress();
       const percent = Math.floor(progress.sent / progress.total * 100);
       if (progress.type === 'create' && percent !== uploadPercent) {
@@ -61,7 +71,7 @@ export class CollaborationTransport extends EventTarget {
           if (reader.parts.length === 1 || reader.parts.length % 64 === 0) this.trace('sync-receiving', { parts: reader.parts.length, total: reader.total, bytes: reader.bytes });
           return;
         }
-        if (!['presence', 'locks', 'pong', 'signal', 'lock-result'].includes(message.type)) this.trace('receive', { type: message.type, bytes: event.data.length, members: message.members?.length });
+        if (!['presence', 'locks', 'pong', 'signal', 'lock-result', 'media-upload-progress', 'media-upload-result'].includes(message.type)) this.trace('receive', { type: message.type, bytes: event.data.length, members: message.members?.length });
         if (['welcome', 'waiting', 'error'].includes(message.type)) deadline.stop();
         if (message.type === 'welcome') {
           if (message.chartAccepted) {
@@ -70,12 +80,27 @@ export class CollaborationTransport extends EventTarget {
           }
           synchronized = true;
           this.mediaHttp = message.mediaHttp === true;
-          this.trace('media-channel', { binaryHttp: this.mediaHttp });
-          if (this.mediaHttp) this.media.configure(url, message.room, message.mediaToken);
+          this.trace('media-channel', { binaryHttp: this.mediaHttp, socketUpload: message.mediaSocketUpload === true });
+          if (this.mediaHttp) this.media.configure(url, message.room, message.mediaToken, message.mediaSocketUpload === true ? (chunk, signal) => this.uploadMediaChunk(chunk, signal) : null, message.id === message.host ? message.mediaLocal : null, message.mediaSocketResume === true ? (upload, signal) => this.requestMediaUpload({ type: 'media-upload-resume', upload }, signal) : null);
           this.assetDelivery = message.assetDelivery === true;
           if (this.assetDelivery && this.acceptAssets !== undefined) this.send({ type: 'asset-subscribe', enabled: this.acceptAssets });
           this.id = message.id;
           this.hello = { type: 'join', room: message.room, token: message.invite, resume: message.resume, profile: hello.profile };
+        }
+        if (message.type === 'media-upload-progress') {
+          if (['accepted', 'receiving', 'writing', 'stored', 'failed'].includes(message.phase) && ['http', 'socket'].includes(message.channel) && [message.index, message.bytes, message.total].every(value => Number.isSafeInteger(value) && value >= 0)) {
+            this.trace(`media-server-${message.phase}`, { channel: message.channel, index: message.index, bytes: message.bytes, total: message.total });
+            this.media.dispatchEvent(new CustomEvent('server-progress', { detail: message }));
+          }
+          return;
+        }
+        if (message.type === 'media-upload-result') {
+          const receipt = this.mediaReceipts.get(message.request);
+          if (receipt) {
+            if (message.error) receipt.finish(Object.assign(new Error(message.error), { status: message.status }));
+            else receipt.finish(null, { received: message.received, completed: message.completed });
+          }
+          return;
         }
         if (message.type === 'asset-delivered') {
           const receipt = this.assetReceipts.get(message.delivery);
@@ -125,6 +150,32 @@ export class CollaborationTransport extends EventTarget {
   cancelAssetTransfers() {
     for (const receipt of this.assetReceipts.values()) { clearTimeout(receipt.timer); receipt.reject(new Error('素材传输连接已关闭')); }
     this.assetReceipts.clear();
+    for (const receipt of this.mediaReceipts.values()) receipt.finish(new Error('素材传输连接已关闭'));
+  }
+  uploadMediaChunk(chunk, signal) {
+    return this.requestMediaUpload({ type: 'media-upload', upload: chunk.upload, hash: chunk.hash, index: chunk.index, data: assetBase64(chunk.bytes) }, signal);
+  }
+  requestMediaUpload(message, signal) {
+    signal.throwIfAborted();
+    if (!this.connected) return Promise.reject(new Error('素材传输连接已关闭'));
+    if (this.mediaReceipts.size >= 2) return Promise.reject(new Error('备用素材发送窗口已满'));
+    const request = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      let timer; const started = Date.now();
+      const abort = () => finish(signal.reason ?? new DOMException('操作已取消', 'AbortError'));
+      const finish = (error, result) => {
+        if (!this.mediaReceipts.delete(request)) return;
+        clearTimeout(timer); signal.removeEventListener('abort', abort);
+        if (error) reject(error); else resolve(result);
+      };
+      const touch = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => finish(new DOMException('备用素材通道没有继续收到确认，请检查连接并导出诊断', 'TimeoutError')), Math.max(0, Math.min(60000, 600000 - (Date.now() - started))));
+      };
+      this.mediaReceipts.set(request, { finish, touch }); touch(); signal.addEventListener('abort', abort, { once: true });
+      try { this.send({ ...message, request }); }
+      catch (error) { finish(error); }
+    });
   }
   presence(message) {
     const frame = JSON.stringify({ ...message, type: 'presence', id: this.id });

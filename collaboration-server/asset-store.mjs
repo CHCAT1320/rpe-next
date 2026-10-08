@@ -10,20 +10,82 @@ const validHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(va
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (response, value) => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(value)); };
 
-async function body(request, limit) {
+async function body(request, limit, progress = () => {}) {
   const chunks = []; let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
     if (size > limit) throw fail('请求数据过大', 413);
     chunks.push(chunk);
+    progress(size);
   }
   return Buffer.concat(chunks);
 }
 
 export class CollaborationAssetStore {
-  static async create() { return new CollaborationAssetStore(await mkdtemp(join(tmpdir(), 'rpe-next-media-'))); }
-  constructor(root) { this.root = root; this.rooms = new Map(); this.tasks = new Set(); this.active = 0; this.closed = false; }
+  static async create(options) { return new CollaborationAssetStore(await mkdtemp(join(tmpdir(), 'rpe-next-media-')), options); }
+  constructor(root, { onDiagnostic = () => {}, onUploadProgress = () => {} } = {}) {
+    this.root = root; this.rooms = new Map(); this.tasks = new Set(); this.active = 0; this.closed = false;
+    this.onDiagnostic = onDiagnostic; this.onUploadProgress = onUploadProgress;
+  }
   manifest(room) { return this.rooms.get(room)?.current ?? null; }
+  async writeUpload(room, member, id, hash, index, read, abort, channel) {
+    const state = this.rooms.get(room.id); const pending = state?.pending;
+    if (!pending || pending.id !== id || state.busy) throw fail('素材上传已过期或正在提交', 409);
+    const file = pending.uploads.get(hash);
+    if (!file || !Number.isInteger(index) || index < 0 || index >= Math.ceil(file.size / chunkSize)) throw fail('素材块无效');
+    const previous = file.writing.get(index);
+    if (previous) {
+      if (channel !== 'socket' || previous.channel !== 'http') throw fail('素材块仍在写入', 409);
+      previous.abort(); await previous.finished;
+    }
+    if (state.pending !== pending || state.busy || file.writing.has(index)) throw fail('素材上传已变更', 409);
+    const expected = Math.min(chunkSize, file.size - index * chunkSize);
+    let finish; const finished = new Promise(resolve => { finish = resolve; });
+    file.writing.set(index, { abort, finished, channel });
+    let reported = -1; let reportedAt = 0;
+    const report = (phase, bytes) => {
+      const details = { phase, channel, index, bytes, total: expected };
+      this.onDiagnostic({ ...details, phase: `media-upload-${phase}` });
+      this.onUploadProgress(member, { ...details, upload: id, fileIndex: pending.files.findIndex(file => file.hash === hash) });
+    };
+    report('accepted', 0);
+    try {
+      const bytes = await read(expected, received => {
+        if (reported < 0 || received === expected || received - reported >= 65536 && Date.now() - reportedAt >= 500) {
+          reported = received; reportedAt = Date.now(); report('receiving', received);
+        }
+      });
+      if (bytes.length !== expected) throw fail('素材块长度不正确');
+      if (state.pending !== pending) throw fail('素材上传已被替换', 409);
+      report('writing', bytes.length);
+      const target = join(this.root, room.id, pending.id, `${hash}.${index}`);
+      await writeFile(`${target}.tmp`, bytes, { mode: 0o600 }); await rename(`${target}.tmp`, target); file.chunks.add(index);
+      report('stored', bytes.length); return { received: bytes.length };
+    } catch (error) { report('failed', 0); throw error; }
+    finally { file.writing.delete(index); finish(); }
+  }
+  async uploadSocket(room, member, message) {
+    if (member.id !== room.host || member.socket?.readyState !== 1) throw fail('仅在线房主可发布素材', 403);
+    if (!/^[0-9a-f]{32}$/.test(message.upload) || !validHash(message.hash) || typeof message.data !== 'string' || message.data.length > 4 * Math.ceil(chunkSize / 3) || message.data.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(message.data)) throw fail('素材块无效');
+    if (this.closed || this.active >= 32 || (member.mediaRequests ?? 0) >= 6) throw fail('素材请求繁忙，请稍后重试', 429);
+    this.active++; member.mediaRequests = (member.mediaRequests ?? 0) + 1;
+    const task = this.writeUpload(room, member, message.upload, message.hash, message.index, async () => Buffer.from(message.data, 'base64'), () => {}, 'socket');
+    this.tasks.add(task);
+    try { return await task; }
+    finally { this.tasks.delete(task); this.active--; member.mediaRequests--; }
+  }
+  async resumeUpload(room, member, id) {
+    if (member.id !== room.host || member.socket?.readyState !== 1) throw fail('仅在线房主可发布素材', 403);
+    const state = this.rooms.get(room.id); const pending = state?.pending;
+    if (this.closed || !pending || pending.id !== id || state.busy) throw fail('素材上传已过期或正在提交', 409);
+    const writers = [...pending.uploads.values()].flatMap(file => [...file.writing.values()].filter(writer => writer.channel === 'http'));
+    for (const writer of writers) writer.abort();
+    await Promise.all(writers.map(writer => writer.finished));
+    if (state.pending !== pending || state.busy) throw fail('素材上传已变更', 409);
+    const completed = [...pending.uploads].flatMap(([hash, file]) => [...file.chunks].map(index => ({ hash, index })));
+    this.onDiagnostic({ phase: 'media-upload-resumed', cancelledRequests: writers.length, completedChunks: completed.length });
+    return { completed };
+  }
   async handle(request, response, rooms, publish) {
     if (!request.url?.startsWith('/collab/media/')) return false;
     response.setHeader('Access-Control-Allow-Origin', '*');
@@ -84,7 +146,7 @@ export class CollaborationAssetStore {
           state.reserved = bytes;
           if (state.pending) await rm(join(this.root, room.id, state.pending.id), { recursive: true, force: true });
           const id = randomBytes(16).toString('hex');
-          const pending = { id, reserved: bytes, files: files.map(({ name, hash, size }) => ({ name, hash, size })), uploads: new Map(missing.map(([hash, size]) => [hash, { size, chunks: new Set(), writing: new Set() }])) };
+          const pending = { id, reserved: bytes, files: files.map(({ name, hash, size }) => ({ name, hash, size })), uploads: new Map(missing.map(([hash, size]) => [hash, { size, chunks: new Set(), writing: new Map() }])) };
           state.pending = pending;
           await mkdir(join(this.root, room.id, id), { recursive: true, mode: 0o700 });
           json(response, { id, chunkSize, missing: missing.map(([hash]) => hash) }); return;
@@ -94,18 +156,11 @@ export class CollaborationAssetStore {
       const pending = state?.pending;
       if (!pending || pending.id !== path[5] || state.busy) throw fail('素材上传已过期或正在提交', 409);
       if (request.method === 'PUT' && path[4] === 'upload' && path.length === 8) {
-        const hash = path[6]; const index = Number(path[7]); const file = pending.uploads.get(hash);
-        if (!file || !Number.isInteger(index) || index < 0 || index >= Math.ceil(file.size / chunkSize) || file.writing.has(index)) throw fail('素材块无效');
-        const expected = Math.min(chunkSize, file.size - index * chunkSize);
-        file.writing.add(index);
+        request.setTimeout(30000, () => request.destroy());
         try {
-          const bytes = await body(request, expected);
-          if (bytes.length !== expected) throw fail('素材块长度不正确');
-          if (state.pending !== pending) throw fail('素材上传已被替换', 409);
-          const target = join(this.root, room.id, pending.id, `${hash}.${index}`);
-          await writeFile(`${target}.tmp`, bytes, { mode: 0o600 }); await rename(`${target}.tmp`, target); file.chunks.add(index);
-          json(response, { received: bytes.length }); return;
-        } finally { file.writing.delete(index); }
+          const result = await this.writeUpload(room, member, path[5], path[6], Number(path[7]), (expected, progress) => body(request, expected, progress), () => request.destroy(), 'http');
+          json(response, result); return;
+        } finally { request.setTimeout(0); }
       }
       if (request.method === 'POST' && path[4] === 'commit' && path.length === 6) {
         for (const file of pending.uploads.values()) if (file.writing.size || file.chunks.size !== Math.ceil(file.size / chunkSize)) throw fail('素材尚未上传完整', 409);
