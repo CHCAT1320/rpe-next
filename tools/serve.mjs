@@ -3,9 +3,11 @@ import { readFile, realpath } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { collaborationConnectSources } from '../src/core/collaboration-policy.mjs';
 
 const root = await realpath(fileURLToPath(new URL('../', import.meta.url)));
 const port = Number(process.env.RPE_PORT ?? 4173);
+const connectSources = collaborationConnectSources(process.env.RPE_MEDIA_ORIGINS);
 const mimeTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ogg': 'audio/ogg', '.ttf': 'font/ttf', '.json': 'application/json' };
 const server = createServer(async (request, response) => {
   try {
@@ -18,7 +20,7 @@ const server = createServer(async (request, response) => {
     if (!path.startsWith(root + sep)) throw new Error('Unavailable');
     const content = await readFile(path);
     response.writeHead(200, { 'Content-Type': mimeTypes[extname(path)] ?? 'application/octet-stream', 'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
+      'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'` });
     response.end(request.method === 'HEAD' ? undefined : content);
   } catch { response.writeHead(404); response.end('Not found'); }
 });

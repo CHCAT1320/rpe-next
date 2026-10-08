@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { applyChanges, changeResources, cleanProfile, COLLAB_ID, COLLAB_PROTOCOL, validateData, validateIdentities, validateNewEventOverlaps } from '../src/core/collaboration.mjs';
 import { assertChart } from '../src/core/chart.mjs';
 import { CollaborationMessageReader, CollaborationMessageSender, CollaborationSyncDeadline } from '../src/core/collaboration-wire.mjs';
+import { CollaborationAssetStore } from './asset-store.mjs';
 
 const token = () => randomBytes(24).toString('base64url');
 const send = (socket, message) => {
@@ -14,10 +15,16 @@ const send = (socket, message) => {
 
 export async function startCollaborationServer({ port = 4182, host = '127.0.0.1', maxRooms = 20, maxMembers = 12, onStatus = () => {}, onDiagnostic = () => {}, creationKey = '' } = {}) {
   const rooms = new Map();
+  const assetStore = await CollaborationAssetStore.create();
+  const publishAssets = (room, manifest) => {
+    for (const member of room.members.values()) if (member.id !== room.host && member.receiveAssets === true) send(member.socket, { type: 'asset-manifest', manifest });
+  };
   const http = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json'); response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    if (request.method === 'GET' && request.url === '/health') { response.end(JSON.stringify({ service: 'RPE Next 协作', protocol: COLLAB_PROTOCOL })); }
+    if (request.url?.startsWith('/collab/media/')) {
+      assetStore.handle(request, response, rooms, publishAssets).catch(() => { if (!response.headersSent) response.writeHead(500); response.end('{}'); });
+    } else if (request.method === 'GET' && request.url === '/health') { response.end(JSON.stringify({ service: 'RPE Next 协作', protocol: COLLAB_PROTOCOL })); }
     else { response.writeHead(404); response.end('{}'); }
   });
   const wss = new WebSocketServer({ server: http, path: '/collab', maxPayload: 64 * 1024 * 1024, perMessageDeflate: {
@@ -30,7 +37,8 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
   const locks = room => [...room.locks].map(([id, lock]) => ({ id, owner: lock.owner }));
   const publishLocks = room => broadcast(room, { type: 'locks', locks: locks(room) });
   const welcome = (room, member, chartAccepted = false) => {
-    send(member.socket, { type: 'welcome', protocol: COLLAB_PROTOCOL, assetDelivery: true, chartAccepted, id: member.id, resume: member.resume, room: room.id, invite: room.invite, host: room.host, chart: chartAccepted ? undefined : room.chart, revision: room.revision, members: members(room), locks: locks(room), chat: room.chat });
+    member.mediaToken ??= token();
+    send(member.socket, { type: 'welcome', protocol: COLLAB_PROTOCOL, mediaHttp: true, mediaToken: member.mediaToken, assetDelivery: true, chartAccepted, id: member.id, resume: member.resume, room: room.id, invite: room.invite, host: room.host, chart: chartAccepted ? undefined : room.chart, revision: room.revision, members: members(room), locks: locks(room), chat: room.chat });
     onDiagnostic({ phase: 'welcome-queued', members: room.members.size, chartAccepted, compression: Boolean(member.socket.extensions.includes('permessage-deflate')) });
     publishMembers(room);
   };
@@ -134,6 +142,8 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
           room.chat.push(item); if (room.chat.length > 100) room.chat.shift(); broadcast(room, { type: 'chat', item });
         } else if (message.type === 'asset-subscribe') {
           member.receiveAssets = message.enabled === true;
+          const manifest = assetStore.manifest(room.id);
+          if (member.receiveAssets && member.id !== room.host && manifest) send(socket, { type: 'asset-manifest', manifest });
         } else if (message.type === 'asset') {
           if (member.id !== room.host) throw new Error('仅房主可发送共享素材');
           if (message.transfer !== undefined && (typeof message.transfer !== 'string' || message.transfer.length > 80)) throw new Error('素材传输标识无效');
@@ -168,14 +178,17 @@ export async function startCollaborationServer({ port = 4182, host = '127.0.0.1'
       for (const [key, lock] of room.locks) if (lock.expires < Date.now()) { room.locks.delete(key); changed = true; }
       if (changed) publishLocks(room);
       for (const [key, pending] of room.pending) if (Date.now() - pending.created > 60000) { pending.socket.close(4003, '批准超时'); room.pending.delete(key); }
-      if (![...room.members.values()].some(member => member.socket) && Date.now() - room.touched > 30 * 60 * 1000) rooms.delete(id);
+      if (![...room.members.values()].some(member => member.socket) && Date.now() - room.touched > 30 * 60 * 1000) { rooms.delete(id); assetStore.remove(id).catch(() => {}); }
     }
     status();
   }, 3000);
   timer.unref();
   const heartbeat = setInterval(() => { for (const socket of wss.clients) { if (!socket.alive) { onDiagnostic({ phase: 'heartbeat-timeout' }); socket.terminate(); } else { socket.alive = false; socket.ping(); } } }, 15000); heartbeat.unref();
-  await new Promise((resolve, reject) => { http.once('error', reject); http.listen(port, host, resolve); });
-  return { port: http.address().port, rooms, close: async () => { clearInterval(timer); clearInterval(heartbeat); for (const socket of wss.clients) socket.terminate(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => http.close(resolve)); } };
+  try { await new Promise((resolve, reject) => { http.once('error', reject); http.listen(port, host, resolve); }); }
+  catch (error) { clearInterval(timer); clearInterval(heartbeat); await assetStore.close(); throw error; }
+  let closing;
+  const close = () => closing ??= (async () => { clearInterval(timer); clearInterval(heartbeat); for (const socket of wss.clients) socket.terminate(); http.closeAllConnections(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => http.close(resolve)); await assetStore.close(); })();
+  return { port: http.address().port, rooms, close };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

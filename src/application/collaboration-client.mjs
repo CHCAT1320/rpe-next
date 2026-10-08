@@ -108,6 +108,7 @@ export class CollaborationClient extends EventTarget {
         this.setChart(message.chart); this.notify(message.message, 'warning');
       } else if (message.type === 'error') this.notify(message.message, 'error');
       else if (message.type === 'asset') this.dispatchEvent(new CustomEvent('asset', { detail: message }));
+      else if (message.type === 'asset-manifest') this.dispatchEvent(new CustomEvent('asset-manifest', { detail: message.manifest }));
       this.changed();
     } catch (error) { this.transport.trace?.('apply-failed', { type: message.type, error: error.name }); this.state = '同步异常，已暂停'; this.transport.close(); this.notify(error.message, 'error'); this.changed(); }
   }

@@ -1,7 +1,14 @@
 import { CollaborationMessageReader, CollaborationMessageSender, CollaborationSyncDeadline } from '../core/collaboration-wire.mjs';
+import { CollaborationMedia } from './collaboration-media.mjs';
 
 export class CollaborationTransport extends EventTarget {
-  constructor() { super(); this.peers = new Map(); this.connected = false; this.closed = false; this.diagnostics = []; this.assetReceipts = new Map(); }
+  constructor() {
+    super(); this.peers = new Map(); this.connected = false; this.closed = false; this.diagnostics = []; this.assetReceipts = new Map(); this.media = new CollaborationMedia();
+    this.media.addEventListener('progress', event => {
+      const progress = event.detail;
+      if (['upload', 'download'].includes(progress.phase) && progress.bytes === progress.total) this.trace(`media-${progress.phase}-complete`, { bytes: progress.bytes, seconds: Number(progress.seconds.toFixed(2)), concurrency: 4 });
+    });
+  }
   trace(phase, details = {}) {
     this.diagnostics.push({ time: new Date().toISOString(), phase, ...details });
     if (this.diagnostics.length > 200) this.diagnostics.shift();
@@ -10,7 +17,7 @@ export class CollaborationTransport extends EventTarget {
   connect(url, hello) {
     clearTimeout(this.retry);
     this.syncDeadline?.stop();
-    this.cancelAssetTransfers(); this.assetDelivery = false;
+    this.cancelAssetTransfers(); this.media.close(); this.mediaHttp = false; this.assetDelivery = false;
     this.url = url; this.hello = { acceptOwnChart: true, ...hello }; this.closed = false;
     const socket = new WebSocket(url); this.socket = socket;
     const reader = new CollaborationMessageReader(receipt => socket.send(JSON.stringify(receipt)));
@@ -62,6 +69,9 @@ export class CollaborationTransport extends EventTarget {
             message.chart = this.hello.chart;
           }
           synchronized = true;
+          this.mediaHttp = message.mediaHttp === true;
+          this.trace('media-channel', { binaryHttp: this.mediaHttp });
+          if (this.mediaHttp) this.media.configure(url, message.room, message.mediaToken);
           this.assetDelivery = message.assetDelivery === true;
           if (this.assetDelivery && this.acceptAssets !== undefined) this.send({ type: 'asset-subscribe', enabled: this.acceptAssets });
           this.id = message.id;
@@ -81,7 +91,7 @@ export class CollaborationTransport extends EventTarget {
     };
     socket.onclose = event => {
       if (this.socket !== socket) return;
-      deadline.stop(); this.sender.close(); this.cancelAssetTransfers(); this.trace('socket-close', { code: event.code, clean: event.wasClean, pendingParts: reader.parts.length, receivedBytes: reader.bytes });
+      deadline.stop(); this.sender.close(); this.cancelAssetTransfers(); this.media.close(); this.trace('socket-close', { code: event.code, clean: event.wasClean, pendingParts: reader.parts.length, receivedBytes: reader.bytes });
       this.connected = false; for (const id of this.peers.keys()) this.dropPeer(id);
       this.emit('state', event.code === 4003 ? '加入被拒绝或已被移出' : `连接已断开（${event.code}），编辑暂停`);
       if (!this.closed && this.hello.resume && event.code !== 4003 && event.code !== 4000) this.retry = setTimeout(() => this.connect(url, this.hello), 2500);
@@ -95,6 +105,7 @@ export class CollaborationTransport extends EventTarget {
   }
   subscribeAssets(enabled) {
     this.acceptAssets = Boolean(enabled);
+    if (!enabled) this.media.stopReceiving();
     if (this.connected && this.assetDelivery) this.send({ type: 'asset-subscribe', enabled: this.acceptAssets });
   }
   async sendAsset(message) {
@@ -157,5 +168,5 @@ export class CollaborationTransport extends EventTarget {
     }
   }
   dropPeer(id) { this.peers.get(id)?.connection.close(); this.peers.delete(id); }
-  close() { this.closed = true; clearTimeout(this.retry); this.syncDeadline?.stop(); this.sender?.close(); this.cancelAssetTransfers(); this.connected = false; const socket = this.socket; this.socket = null; socket?.close(); for (const id of this.peers.keys()) this.dropPeer(id); }
+  close() { this.closed = true; clearTimeout(this.retry); this.syncDeadline?.stop(); this.sender?.close(); this.cancelAssetTransfers(); this.media.close(); this.connected = false; const socket = this.socket; this.socket = null; socket?.close(); for (const id of this.peers.keys()) this.dropPeer(id); }
 }

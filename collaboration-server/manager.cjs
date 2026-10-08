@@ -77,4 +77,10 @@ app.whenReady().then(async () => {
     console.log(JSON.stringify({ health, ui, errors })); app.exit(health.protocol === 1 && ui.bridge === 'function' && ui.start && !errors.length ? 0 : 1);
   }
 }).catch(error => { console.error(error.message); app.exit(1); });
-app.on('window-all-closed', () => { tunnel?.kill(); service?.close(); app.quit(); });
+let quitting = false;
+app.on('before-quit', event => {
+  if (quitting) return;
+  event.preventDefault(); quitting = true; tunnel?.kill();
+  Promise.resolve(service?.close()).catch(() => {}).finally(() => app.quit());
+});
+app.on('window-all-closed', () => app.quit());

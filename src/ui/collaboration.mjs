@@ -20,6 +20,11 @@ export class CollaborationPanel {
     this.client = new CollaborationClient(this.transport, { session: () => context().session, receiveChart, notify, interactionBusy: () => Boolean(context().timeline.drag || context().timeline.eventInteraction.drag || context().interactionBusy) });
     this.client.addEventListener('change', () => this.renderState());
     this.client.addEventListener('asset', event => this.asset(event.detail).catch(error => notify(error.message, 'warning')));
+    this.client.addEventListener('asset-manifest', event => {
+      if (!this.acceptAssets.checked) return;
+      this.transport.media.receive(event.detail, receiveAsset).catch(error => { this.assetStatus.textContent = error.message; notify(error.message, 'warning'); });
+    });
+    this.transport.media.addEventListener('progress', event => this.mediaProgress(event.detail));
     this.createForm(); this.createChat();
     this.cursors = node('div', '', 'collaboration-cursors'); document.body.append(this.cursors);
     this.markers = node('div', '', 'collaboration-markers'); this.markers.setAttribute('aria-label', '协作者时间位置'); document.querySelector('.scrubber-wrap').append(this.markers);
@@ -58,6 +63,7 @@ export class CollaborationPanel {
     this.acceptAssets = input(this.host, '接收房主发送的音乐和图片', 'checkbox'); this.acceptAssets.checked = false;
     this.transport.subscribeAssets(false);
     this.acceptAssets.onchange = () => this.transport.subscribeAssets(this.acceptAssets.checked);
+    this.host.append(node('p', '勾选后自动接收房主最近发布的音乐和图片；以后发布的新一组也会自动接收。需要新版服务器。', 'hint'));
     const actions = node('div', '', 'collaboration-actions');
     this.create = button('创建房间', () => this.connect());
     this.join = button('加入邀请', () => this.confirmJoin(() => this.connect(true)));
@@ -98,7 +104,7 @@ export class CollaborationPanel {
     this.copy.disabled = !client.ready; this.leave.disabled = !active; this.share.hidden = !active || !host; this.share.disabled = this.sharing || !client.ready;
     this.recovery.hidden = !client.recoveryChart;
     const direct = [...this.transport.peers.values()].filter(peer => peer.channel?.readyState === 'open').length;
-    this.status.textContent = `${client.state}${active ? ` · ${client.latency ?? 0} ms · ${client.queue.length} 项待确认 · ${direct} 位鼠标直连` : ''}`;
+    this.status.textContent = `${client.state}${active ? ` · ${client.latency ?? 0} ms · ${client.queue.length} 项待确认 · ${direct} 位鼠标直连` : ''}${client.ready ? this.transport.mediaHttp ? ' · 素材快速通道' : ' · 素材兼容通道（升级服务器可提速和自动补收）' : ''}`;
     const requestSignature = JSON.stringify([host, client.requests]);
     if (requestSignature !== this.requestSignature) {
       this.requestSignature = requestSignature; this.requests.replaceChildren();
@@ -242,6 +248,11 @@ export class CollaborationPanel {
     this.sharing = true; this.renderState();
     try {
       const { sharedAssets } = this.context(); let count = 0;
+      if (this.transport.mediaHttp) {
+        const files = sharedAssets().filter(([name, bytes]) => /\.(png|jpe?g|webp|gif|ogg|mp3|wav|flac|m4a)$/i.test(name) && bytes.length > 0 && bytes.length <= 128 * 1024 * 1024);
+        await this.transport.media.publish(files);
+        this.notify('素材组已发布；勾选接收的成员及后来加入的成员将自动下载', 'success'); return;
+      }
       for (const [name, bytes] of sharedAssets()) {
         if (!/\.(png|jpe?g|webp|gif|ogg|mp3|wav|flac|m4a)$/i.test(name) || bytes.length > 128 * 1024 * 1024) continue;
         this.assetStatus.textContent = `正在校验：${name}`;
@@ -256,6 +267,17 @@ export class CollaborationPanel {
       this.notify(this.assetStatus.textContent, 'success');
     } catch (error) { this.assetStatus.textContent = error.message; this.notify(error.message, 'warning'); }
     finally { this.sharing = false; this.renderState(); }
+  }
+  mediaProgress(progress) {
+    if (!this.assetStatus) return;
+    if (progress.phase === 'hash') this.assetStatus.textContent = `正在校验：${progress.name}`;
+    else if (progress.phase === 'commit') this.assetStatus.textContent = '正在校验并发布整组素材…';
+    else if (progress.phase === 'published') this.assetStatus.textContent = `已发布 ${progress.count} 个素材 · 新成员可自动补收${progress.skippedBytes ? ' · 已复用相同文件' : ''}`;
+    else if (progress.phase === 'received') this.assetStatus.textContent = `最近一组 ${progress.count} 个素材已就绪`;
+    else {
+      const speed = progress.bytes / Math.max(0.1, progress.seconds) / 1048576;
+      this.assetStatus.textContent = `${progress.phase === 'upload' ? '上传' : '下载'} ${progress.name} · ${Math.floor(progress.bytes / progress.total * 100)}% · ${speed.toFixed(2)} MiB/s · HTTP 4 路并发`;
+    }
   }
   async asset(message) {
     if (!this.acceptAssets.checked || message.from !== this.client.host) return;
