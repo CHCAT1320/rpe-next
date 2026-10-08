@@ -19,9 +19,11 @@ export function sameSelection(left, right) {
 
 function remapIndices(source, target, indices) {
   const locations = new Map(target.map((item, index) => [item, index]));
+  const identities = new Map(target.flatMap((item, index) => item?._rpeCollabId ? [[item._rpeCollabId, index]] : []));
   const sourceItems = new Set(source);
   return indices.flatMap(index => {
     if (!source[index]) return [];
+    if (source[index]._rpeCollabId) return identities.has(source[index]._rpeCollabId) ? [identities.get(source[index]._rpeCollabId)] : [];
     const mapped = locations.get(source[index]);
     if (mapped !== undefined) return [mapped];
     return source.length === target.length && target[index] && !sourceItems.has(target[index]) ? [index] : [];
@@ -30,7 +32,7 @@ function remapIndices(source, target, indices) {
 
 export function remapSelection(source, target, state) {
   const line = source.judgeLineList?.[state.lineIndex]; const lines = target.judgeLineList ?? [];
-  const matching = line ? lines.findIndex(candidate => candidate === line || candidate.notes === line.notes && candidate.eventLayers === line.eventLayers) : -1;
+  const matching = line ? lines.findIndex(candidate => line._rpeCollabId ? candidate._rpeCollabId === line._rpeCollabId : candidate === line || candidate.notes === line.notes && candidate.eventLayers === line.eventLayers) : -1;
   const lineIndex = matching >= 0 ? matching : Math.max(0, Math.min(state.lineIndex, lines.length - 1));
   const sourceSession = { ...state, chart: source, line };
   const targetSession = { ...state, chart: target, lineIndex, line: lines[lineIndex] };
@@ -44,23 +46,33 @@ export function remapSelection(source, target, state) {
   }
   for (const [type, indices] of byType) for (const index of remapIndices(eventList(sourceSession, type), eventList(targetSession, type), indices)) eventSelection.push(eventKey(type, index));
   const multiEventSelection = (state.multiEventSelection ?? []).flatMap(([sourceLineIndex, keys]) => {
-    const sourceLine = source.judgeLineList?.[sourceLineIndex]; const targetLine = target.judgeLineList?.[sourceLineIndex];
+    const sourceLine = source.judgeLineList?.[sourceLineIndex];
+    const targetLineIndex = sourceLine?._rpeCollabId ? lines.findIndex(line => line._rpeCollabId === sourceLine._rpeCollabId) : sourceLineIndex;
+    const targetLine = target.judgeLineList?.[targetLineIndex];
     if (!sourceLine || !targetLine) return [];
     const sourceSession = { ...state, chart: source, lineIndex: sourceLineIndex, line: sourceLine };
-    const targetSession = { ...state, chart: target, lineIndex: sourceLineIndex, line: targetLine };
+    const targetSession = { ...state, chart: target, lineIndex: targetLineIndex, line: targetLine };
     const byType = new Map();
     for (const key of keys) { const [type, index] = String(key).split(':'); if (!byType.has(type)) byType.set(type, []); byType.get(type).push(Number(index)); }
     const mapped = [];
     for (const [type, indices] of byType) for (const index of remapIndices(eventList(sourceSession, type), eventList(targetSession, type), indices)) mapped.push(eventKey(type, index));
-    return mapped.length ? [[sourceLineIndex, mapped]] : [];
+    return mapped.length ? [[targetLineIndex, mapped]] : [];
   });
   const multiLineSelection = (state.multiLineSelection ?? []).flatMap(([sourceLineIndex, indices]) => {
     const sourceNotes = source.judgeLineList?.[sourceLineIndex]?.notes ?? [];
-    const targetNotes = target.judgeLineList?.[sourceLineIndex]?.notes ?? [];
+    const id = source.judgeLineList?.[sourceLineIndex]?._rpeCollabId;
+    const targetLineIndex = id ? lines.findIndex(line => line._rpeCollabId === id) : sourceLineIndex;
+    const targetNotes = target.judgeLineList?.[targetLineIndex]?.notes ?? [];
     const mapped = remapIndices(sourceNotes, targetNotes, indices);
-    return mapped.length ? [[sourceLineIndex, mapped]] : [];
+    return mapped.length ? [[targetLineIndex, mapped]] : [];
   });
-  return { ...state, lineIndex, selection, eventSelection, multiLineSelection, multiEventSelection };
+  const multiLineIndices = (state.multiLineIndices ?? []).flatMap(index => {
+    const identity = source.judgeLineList?.[index]?._rpeCollabId;
+    if (!identity) return [index];
+    const mapped = lines.findIndex(line => line._rpeCollabId === identity);
+    return mapped < 0 ? [] : [mapped];
+  });
+  return { ...state, lineIndex, selection, eventSelection, multiLineSelection, multiEventSelection, multiLineIndices };
 }
 
 export function restoreSelection(session, state) {

@@ -55,6 +55,7 @@ import { TimelineActivity } from '../core/timeline-activity.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
 import { AudioAnalysis } from './audio-analysis.mjs';
 import { TrajectoryPanel } from './trajectory-panel.mjs';
+import { CollaborationPanel } from './collaboration.mjs';
 
 const element = selector => document.querySelector(selector);
 const displayFields = [
@@ -351,6 +352,33 @@ const advanceEditClock = timestamp => {
 };
 const formatEditTime = seconds => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
 const currentBeat = () => tempo.beat(chartSeconds(), session.line?.bpmfactor ?? 1);
+let collaborationJoining = false;
+const collaborationTool = document.createElement('button'); collaborationTool.id = 'collaboration-tool'; collaborationTool.textContent = '联机协作'; element('[data-panel="chart"] .action-grid').append(collaborationTool);
+const collaboration = new CollaborationPanel(element('#collaboration-panel'), () => ({
+  session, timeline, interactionBusy: batchControls.active, seconds: chartSeconds(), offset: offsetSeconds(), duration: Number(element('#scrubber').max) || 600,
+  seek: seconds => playback.seek(seconds + offsetSeconds()),
+  sharedAssets: () => {
+    const references = resourceReferences(session.chart, assets, chartName);
+    const names = new Set([references.song, references.background, session.chart.META.background, ...session.chart.judgeLineList.map(line => line.Texture)].filter(Boolean));
+    return [...names].flatMap(name => { const bytes = assetBytes(assets, name, chartName); return bytes ? [[name, bytes]] : []; });
+  }
+}), {
+  notify, activate: activatePane,
+  confirmJoin: run => guardReplace(run),
+  receiveChart: (chart, owner) => {
+    if (owner) { session.history.document = chart; return; }
+    collaborationJoining = true;
+    try { replaceChart(chart, '联机谱面.json'); } finally { collaborationJoining = false; }
+    activatePane('collaboration');
+  },
+  receiveAsset: async (name, bytes) => {
+    assets.set(name, bytes); assetDirty = true; images.load(session.chart, assets, chartName);
+    const references = resourceReferences(session.chart, assets, chartName);
+    if (name === references.song || name === session.chart.META.song) await loadMusic(bytes, name, false);
+    hitSounds.setProject(session.chart, assets, chartName); renderSession();
+  }
+});
+element('#collaboration-tool').onclick = () => activatePane('collaboration');
 const playback = new EditorPlayback(audio, hitSounds, () => {
   timeline.origin = currentBeat();
   preview.effectsSince = realtimePreview.effectsSince = chartSeconds();
@@ -428,6 +456,7 @@ const home = new ProjectHome(async id => {
 });
 
 function setHome(visible) {
+  if (visible && collaboration.client.active) collaboration.client.leave();
   atHome = visible;
   if (visible) clearNoteSourceToast();
   if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element('#mute-current-line')?.classList.remove('active'); }
@@ -723,6 +752,7 @@ function renderSession() {
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
     if (multiEdit.committing) multiEdit.sync();
+    else if (activePaneName === 'collaboration') collaboration.renderState();
     else if (trajectoryPanel.active && selectionCount !== 1) activatePane('trajectory');
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
@@ -737,7 +767,7 @@ function renderSession() {
       if (session.focus === 'events' && event?.trajectory) { curveEditorOpen = false; trajectoryPanel.open(event, selected.lineIndex, timeline.layer); }
       else activatePane(session.focus === 'events' ? 'events' : 'notes');
     }
-    else if (!['multi-line', 'lines', 'assets'].includes(activePaneName)) activatePane('chart');
+    else if (!['multi-line', 'lines', 'assets', 'collaboration'].includes(activePaneName)) activatePane('chart');
   }
   const limits = previewLimitations(session.chart);
   element('#compatibility').textContent = '已使用原 RPE 音符素材与打击音；支持封面、静态纹理、多线与控制曲线。尚需原版逐帧对照。' + (limits.length ? `需进一步验证：${limits.join('、')}。` : '');
@@ -748,6 +778,7 @@ session.addEventListener('change', renderSession);
 
 function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   assertChart(chart);
+  if (!collaborationJoining && collaboration.client.active) collaboration.client.leave();
   lineSwitcher.reset();
   playback.pause(); audio.clear();
   audioAnalysis.setBuffer(null);

@@ -1,0 +1,10 @@
+{
+  "name": "rpe-next-collaboration-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "manager.cjs",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "scripts": { "start": "node server.mjs", "test": "node --test test/*.test.mjs" },
+  "dependencies": { "ws": "8.22.0" }
+}

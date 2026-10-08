@@ -32,7 +32,7 @@ else {
         if (!path.startsWith(root + sep)) return new Response('Not found', { status: 404 });
         const response = await net.fetch(pathToFileURL(path).href);
         const headers = new Headers(response.headers);
-        headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+        headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
         headers.set('X-Content-Type-Options', 'nosniff');
         if (path.endsWith('.mjs')) headers.set('Content-Type', 'text/javascript; charset=utf-8');
         return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers });

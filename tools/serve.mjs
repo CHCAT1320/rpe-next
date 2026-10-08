@@ -18,7 +18,7 @@ const server = createServer(async (request, response) => {
     if (!path.startsWith(root + sep)) throw new Error('Unavailable');
     const content = await readFile(path);
     response.writeHead(200, { 'Content-Type': mimeTypes[extname(path)] ?? 'application/octet-stream', 'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
+      'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
     response.end(request.method === 'HEAD' ? undefined : content);
   } catch { response.writeHead(404); response.end('Not found'); }
 });

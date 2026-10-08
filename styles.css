@@ -417,3 +417,18 @@ h2 { margin: 0; font-size: 21px; font-weight: 400; }
   .view-controls-inline select { width: 52px; }
   .field { margin: 11px 14px; }
 }
+:root { --collaboration-accent: #72d6a8; }
+.collaboration-actions { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 12px; }
+#collaboration-panel > h3, #collaboration-panel > .hint, #collaboration-panel .field { margin: 12px; }
+#collaboration-panel .field { display: flex; flex-wrap: wrap; gap: 6px; }
+#collaboration-panel input:not([type=checkbox]):not([type=color]) { width: 100%; min-width: 0; box-sizing: border-box; }
+.collaboration-user { padding: 10px 12px; border-bottom: 1px solid #555; display: flex; gap: 6px; flex-wrap: wrap; }
+.collaboration-user strong, .collaboration-user small { width: 100%; }
+.collaboration-pointer { position: fixed; z-index: 45; pointer-events: none; font: 13px sans-serif; text-shadow: 0 1px 3px #000, 1px 0 3px #000; white-space: nowrap; }
+.collaboration-markers { position: absolute; left: 0; right: 0; top: -16px; height: 16px; z-index: 25; pointer-events: none; }
+.collaboration-markers button { position: absolute; transform: translateX(-50%); max-width: 145px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; padding: 1px 4px; white-space: nowrap; background: #242424e8; border: 1px solid currentColor; pointer-events: auto; }
+.collaboration-banner { position: absolute; left: 15px; top: 35px; max-width: 80%; padding: 6px 12px; background: #4a3825e8; color: #ffdb96; pointer-events: none; z-index: 45; }
+.collaboration-chat { position: fixed; bottom: 36px; left: 20px; width: min(650px, calc(100vw - 40px)); background: #171717eF; border: 1px solid #6d987e; padding: 10px; z-index: 100; box-sizing: border-box; }
+.collaboration-chat-log { max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; font-size: 14px; }
+.collaboration-chat input { margin-top: 8px; width: 100%; box-sizing: border-box; }
+.collaboration-chat-toast { position: fixed; left: 24px; bottom: 42px; max-width: 60vw; background: #222c; color: #dff5e6; padding: 5px 10px; z-index: 44; pointer-events: none; overflow-wrap: anywhere; }

@@ -17,6 +17,8 @@ jobs:
         with:
           node-version: '22'
       - run: npm test
+      - run: npm ci --prefix collaboration-server --ignore-scripts
+      - run: npm run test:collaboration-server
       - run: npm run build:pages
       - run: node tools/smoke-pages.mjs
       - uses: actions/upload-pages-artifact@v3
