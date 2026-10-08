@@ -8,7 +8,7 @@ export class PasteGesture {
   down(event, context) {
     event.preventDefault();
     if (this.pending || event.repeat) return;
-    const pending = { context, key: shortcutKey(event), opened: false };
+    const pending = { context, key: shortcutKey(event), opened: false, releaseKeys: ['CONTROL', 'META', ...(event.shiftKey ? ['SHIFT'] : []), ...(event.altKey ? ['ALT'] : [])] };
     this.pending = pending;
     try {
       pending.timer = this.schedule(() => {
@@ -23,7 +23,7 @@ export class PasteGesture {
 
   up(event) {
     const pending = this.pending;
-    if (!pending || ![pending.key, 'CONTROL', 'META'].includes(shortcutKey(event))) return false;
+    if (!pending || ![pending.key, ...pending.releaseKeys].includes(shortcutKey(event))) return false;
     event.preventDefault(); this.cancel();
     if (!pending.opened && this.valid(pending.context)) this.paste(pending.context);
     return true;

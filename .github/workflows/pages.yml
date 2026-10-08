@@ -21,6 +21,8 @@ jobs:
       # requires it, which this web-only job never does. So a plain ci install stays small.
       - run: npm ci
       - run: npm test
+      - run: npm ci --prefix collaboration-server --ignore-scripts
+      - run: npm run test:collaboration-server
       - run: npm run build:pages
       - run: npm run smoke-pages
       - uses: actions/upload-pages-artifact@v3
