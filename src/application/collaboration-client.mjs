@@ -14,9 +14,11 @@ export class CollaborationClient extends EventTarget {
   changed() { this.dispatchEvent(new Event('change')); }
   connect(server, profile, invitation = null, creationKey = '') {
     this.queue = []; this.undo = []; this.redo = []; this.requests = []; this.chat = []; this.authoritative = null; this.deferred = null;
-    this.active = true; this.profile = cleanProfile(profile); this.server = server;
-    const chart = identifyChart(this.getSession().chart);
-    this.transport.connect(server, invitation ? { type: 'join', ...invitation, profile: this.profile } : { type: 'create', chart, profile: this.profile, creationKey });
+    this.profile = cleanProfile(profile); this.server = server;
+    const chart = invitation ? null : identifyChart(this.getSession().chart);
+    try { this.transport.connect(server, invitation ? { type: 'join', ...invitation, profile: this.profile } : { type: 'create', chart, profile: this.profile, creationKey }); }
+    catch (error) { this.active = false; this.state = '连接未建立'; this.changed(); throw error; }
+    this.active = true;
     this.session = this.getSession(); this.session.collaboration = this;
     this.state = '连接中'; this.changed();
   }
@@ -72,6 +74,7 @@ export class CollaborationClient extends EventTarget {
           this.recovery = pending;
         }
         this.state = '已连接'; this.syncHistory();
+        if (!reconnect) this.notify('已加入联机房间：按 / 打开聊天，Enter 发送，Esc 关闭', 'success', 6000);
       } else if (message.type === 'members') this.members = message.members;
       else if (message.type === 'locks') this.locks = new Map(message.locks.map(lock => [lock.id, lock.owner]));
       else if (message.type === 'lock-result' && message.conflicts.length) this.notify('选中内容正由其他人编辑，暂不可修改', 'warning');
@@ -106,7 +109,7 @@ export class CollaborationClient extends EventTarget {
       } else if (message.type === 'error') this.notify(message.message, 'error');
       else if (message.type === 'asset') this.dispatchEvent(new CustomEvent('asset', { detail: message }));
       this.changed();
-    } catch (error) { this.state = '同步异常，已暂停'; this.transport.close(); this.notify(error.message, 'error'); this.changed(); }
+    } catch (error) { this.transport.trace?.('apply-failed', { type: message.type, error: error.name }); this.state = '同步异常，已暂停'; this.transport.close(); this.notify(error.message, 'error'); this.changed(); }
   }
   rebase() {
     let chart = this.authoritative;

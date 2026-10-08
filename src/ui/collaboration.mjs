@@ -1,9 +1,11 @@
 import { CollaborationTransport } from '../platform/collaboration-transport.mjs';
+import { sendCollaborationAsset } from '../platform/collaboration-assets.mjs';
 import { CollaborationClient } from '../application/collaboration-client.mjs';
 import { parseInvitation, COLLAB_ID } from '../core/collaboration.mjs';
 import { eventListAt } from '../application/event-commands.mjs';
 import { isTypingText } from './keyboard.mjs';
 import { download } from '../platform/files.mjs';
+import { collaborationMarkerPosition, collaborationLabelBackground } from './collaboration-display.mjs';
 
 const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
 const button = (text, run) => { const element = node('button', text); element.type = 'button'; element.onclick = run; return element; };
@@ -54,6 +56,8 @@ export class CollaborationPanel {
     this.creationKey = input(this.host, '创建房间密钥（可选）', 'password');
     this.invitation = input(this.host, '粘贴邀请链接');
     this.acceptAssets = input(this.host, '接收房主发送的音乐和图片', 'checkbox'); this.acceptAssets.checked = false;
+    this.transport.subscribeAssets(false);
+    this.acceptAssets.onchange = () => this.transport.subscribeAssets(this.acceptAssets.checked);
     const actions = node('div', '', 'collaboration-actions');
     this.create = button('创建房间', () => this.connect());
     this.join = button('加入邀请', () => this.confirmJoin(() => this.connect(true)));
@@ -67,8 +71,11 @@ export class CollaborationPanel {
     this.leave = button('离开房间', () => this.client.leave());
     this.share = button('发送本谱面引用的音乐和图片', () => this.shareAssets());
     this.recovery = button('导出冲突前本地副本', () => { if (this.client.recoveryChart) download(new Blob([JSON.stringify(this.client.recoveryChart)], { type: 'application/json' }), 'collaboration-recovery.json'); });
-    actions.append(this.create, this.join, this.copy, this.leave, this.share, this.recovery); this.host.append(actions);
+    this.diagnostics = button('导出联机诊断', () => download(new Blob([JSON.stringify({ format: 1, framed: true, entries: this.transport.diagnostics }, null, 2)], { type: 'text/plain' }), 'rpe-collaboration-diagnostics.log'));
+    actions.append(this.create, this.join, this.copy, this.leave, this.share, this.recovery, this.diagnostics); this.host.append(actions);
+    this.host.append(node('p', '诊断仅记录连接阶段、数据大小和断线代码，不包含谱面内容、昵称、服务器地址或邀请凭据。', 'hint'));
     this.status = node('p', '', 'hint'); this.status.setAttribute('role', 'status'); this.host.append(this.status);
+    this.assetStatus = node('p', '', 'hint'); this.assetStatus.setAttribute('role', 'status'); this.host.append(this.assetStatus);
     this.requests = node('div'); this.host.append(this.requests);
     this.users = node('div', '', 'collaboration-users'); this.host.append(this.users);
     this.host.append(node('p', '传输：编辑操作经服务器可靠确认；鼠标优先 P2P，失败自动回退。昵称/颜色只保存在本机；邀请和密钥不写入设置。房间保留在服务器内存中，请正常保存或导出谱面。', 'hint'));
@@ -92,9 +99,12 @@ export class CollaborationPanel {
     this.recovery.hidden = !client.recoveryChart;
     const direct = [...this.transport.peers.values()].filter(peer => peer.channel?.readyState === 'open').length;
     this.status.textContent = `${client.state}${active ? ` · ${client.latency ?? 0} ms · ${client.queue.length} 项待确认 · ${direct} 位鼠标直连` : ''}`;
-    this.requests.replaceChildren();
-    if (host) for (const request of client.requests) {
-      const row = node('div', '', 'collaboration-user'); row.append(node('span', `${request.profile.name} 请求加入`), button('允许', () => client.approve(request.request, true)), button('拒绝', () => client.approve(request.request, false))); this.requests.append(row);
+    const requestSignature = JSON.stringify([host, client.requests]);
+    if (requestSignature !== this.requestSignature) {
+      this.requestSignature = requestSignature; this.requests.replaceChildren();
+      if (host) for (const request of client.requests) {
+        const row = node('div', '', 'collaboration-user'); row.append(node('span', `${request.profile.name} 请求加入`), button('允许', () => client.approve(request.request, true)), button('拒绝', () => client.approve(request.request, false))); this.requests.append(row);
+      }
     }
     const signature = JSON.stringify(client.members.map(member => [member.id, member.online, member.stats, Math.round((member.id === client.id ? client.latency ?? 0 : member.presence?.latency ?? 0) / 10)]));
     if (signature !== this.userSignature) {
@@ -113,26 +123,65 @@ export class CollaborationPanel {
     this.chatLog = node('div', '', 'collaboration-chat-log'); this.chatLog.setAttribute('role', 'log');
     this.chatInput = node('input'); this.chatInput.maxLength = 1000; this.chatInput.placeholder = 'Enter 发送 · Esc 关闭'; this.chatInput.setAttribute('aria-label', '联机聊天');
     this.chatBox.append(this.chatLog, this.chatInput); document.body.append(this.chatBox);
-    window.addEventListener('keydown', event => {
-      if (!this.client.active) return;
-      if (event.target === this.chatInput) {
-        event.stopImmediatePropagation();
-        if (event.key === 'Escape') { event.preventDefault(); this.chatBox.hidden = true; this.chatInput.blur(); }
-        if (event.key === 'Enter' && !event.isComposing) {
-          event.preventDefault(); if (this.chatInput.value.trim()) { try { this.transport.send({ type: 'chat', text: this.chatInput.value }); this.chatInput.value = ''; } catch (error) { this.notify(error.message, 'warning'); } }
-        }
-      } else if (event.key === '/' && !isTypingText(event.target) && !event.ctrlKey && !event.altKey && !event.metaKey) {
-        event.preventDefault(); event.stopImmediatePropagation(); this.chatBox.hidden = false; this.chatInput.focus(); this.chatLog.scrollTop = this.chatLog.scrollHeight;
+    window.addEventListener('keydown', event => this.handleChatKey(event), true);
+    this.toast = node('div', '', 'collaboration-chat-toast'); this.toast.hidden = true; this.toast.setAttribute('role', 'log'); document.body.append(this.toast);
+  }
+  openChat() {
+    this.chatBox.hidden = false; this.chatInput.focus(); this.chatLog.scrollTop = this.chatLog.scrollHeight;
+    this.updateChatVisibility();
+  }
+  closeChat() {
+    this.chatBox.hidden = true; this.chatInput.blur(); this.updateChatVisibility();
+  }
+  updateChatVisibility() {
+    if (!this.toast) return;
+    const visible = this.client.active && this.chatBox.hidden;
+    this.toast.hidden = !visible;
+    for (const message of this.toast.children) {
+      clearTimeout(message.fadeTimer); clearTimeout(message.removeTimer);
+      message.classList.remove('leaving');
+      if (visible) message.fadeTimer = setTimeout(() => {
+        message.classList.add('leaving');
+        message.removeTimer = setTimeout(() => message.remove(), 1000);
+      }, 5000);
+    }
+  }
+  handleChatKey(event) {
+    if (!this.client.active || event.isComposing) return;
+    if (event.key === 'Escape' && !this.chatBox.hidden) {
+      event.preventDefault(); event.stopImmediatePropagation(); this.closeChat(); return;
+    }
+    if (event.target === this.chatInput) {
+      event.stopImmediatePropagation();
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        try {
+          if (this.chatInput.value.trim()) this.transport.send({ type: 'chat', text: this.chatInput.value });
+          this.chatInput.value = ''; this.closeChat();
+        } catch (error) { this.notify(error.message, 'warning'); }
       }
-    }, true);
-    this.toast = node('div', '', 'collaboration-chat-toast'); document.body.append(this.toast);
+    } else if (event.key === '/' && !isTypingText(event.target) && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault(); event.stopImmediatePropagation(); this.openChat();
+    }
   }
   renderChat() {
     const signature = JSON.stringify(this.client.chat); if (signature === this.chatSignature) return;
     this.chatSignature = signature; this.chatLog.replaceChildren();
     for (const item of this.client.chat) { const row = node('div'); const name = node('strong', `${item.name}：`); name.style.color = /^#[0-9a-f]{6}$/i.test(item.color) ? item.color : '#fff'; row.append(name, node('span', item.text)); this.chatLog.append(row); }
     this.chatLog.scrollTop = this.chatLog.scrollHeight;
-    const last = this.client.chat.at(-1); if (last) { this.toast.textContent = `${last.name}：${last.text}`; this.toast.hidden = false; clearTimeout(this.toastTimer); this.toastTimer = setTimeout(() => { this.toast.hidden = true; }, 6000); }
+    const last = this.client.chat.at(-1);
+    if (!last) {
+      for (const message of this.toast.children) { clearTimeout(message.fadeTimer); clearTimeout(message.removeTimer); }
+      this.toast.replaceChildren(); this.toast.hidden = true; return;
+    }
+    const message = node('div', `${last.name}：${last.text}`, 'collaboration-chat-message'); this.toast.append(message);
+    while (this.toast.children.length > 5) {
+      const oldest = this.toast.firstElementChild; clearTimeout(oldest.fadeTimer); clearTimeout(oldest.removeTimer); oldest.remove();
+    }
+    this.toast.hidden = !this.client.active || !this.chatBox.hidden;
+    if (!this.toast.hidden) message.fadeTimer = setTimeout(() => {
+      message.classList.add('leaving'); message.removeTimer = setTimeout(() => message.remove(), 1000);
+    }, 5000);
   }
   pointer(event, canvas, area) {
     const { session, timeline } = this.context(); const point = timeline.point(event, canvas); const line = timeline.lineIndexAt(point.x, canvas.clientWidth, area); const factor = timeline.factorForLine(line);
@@ -152,19 +201,20 @@ export class CollaborationPanel {
       } catch {}
     }
     this.cursors.replaceChildren();
-    const visibleMembers = client.members.filter(member => member.id !== client.id && member.online && member.presence);
+    const visibleMembers = client.members.filter(member => member.id !== client.id && member.online && member.presence).sort((left, right) => left.presence.seconds - right.presence.seconds);
     for (const marker of this.markers.children) if (!visibleMembers.some(member => member.id === marker.dataset.member)) marker.remove();
     const selectedOwner = client.selectionIds().map(id => client.locks.get(id)).find(owner => owner && owner !== client.id);
     this.banner.hidden = !client.active || client.ready && !selectedOwner;
     this.banner.textContent = selectedOwner ? `由 ${client.members.find(member => member.id === selectedOwner)?.name ?? '他人'} 编辑中 · 只读查看` : '联机编辑暂停 · 等待连接或房主恢复';
     const markerRows = [];
+    const scrubber = document.querySelector('#scrubber'); const track = scrubber.getBoundingClientRect(); const markerBounds = this.markers.getBoundingClientRect();
     for (const member of visibleMembers) {
       const presence = member.presence; const label = `${member.name} 线:${presence.line}`;
-      const position = Math.max(0, Math.min(1, (presence.seconds + this.context().offset) / Math.max(1, duration))) * this.markers.clientWidth;
+      const position = track.left - markerBounds.left + collaborationMarkerPosition(presence.seconds, { offset: this.context().offset, minimum: scrubber.min || 0, maximum: scrubber.max || duration, width: track.width });
       let row = markerRows.findIndex(end => position - 65 > end); if (row < 0) row = markerRows.length; markerRows[row] = position + 65;
       let marker = [...this.markers.children].find(marker => marker.dataset.member === member.id);
       if (!marker) { marker = button(label, () => { const current = client.members.find(entry => entry.id === member.id)?.presence; if (current) seek(current.seconds); }); marker.dataset.member = member.id; this.markers.append(marker); }
-      marker.textContent = label; marker.style.left = `${position}px`; marker.style.top = `${-row * 17}px`; marker.style.color = member.color; marker.title = `${label} · ${presence.seconds.toFixed(2)} s`;
+      marker.textContent = label; marker.style.left = `${position}px`; marker.style.top = `${-row * 17}px`; marker.style.color = member.color; marker.style.backgroundColor = collaborationLabelBackground(member.color); marker.title = `${label} · ${presence.seconds.toFixed(2)} s`;
       const cursor = presence.cursor; if (!cursor || !Number.isFinite(cursor.x)) continue;
       if (cursor.area === 'preview' && Number.isFinite(cursor.y)) {
         const preview = document.querySelector('.preview-wrap').hidden ? document.querySelector('#realtime-preview') : document.querySelector('#preview');
@@ -188,35 +238,40 @@ export class CollaborationPanel {
     if (!client.active) { this.chatBox.hidden = true; this.toast.hidden = true; }
   }
   async shareAssets() {
+    if (this.sharing) return;
     this.sharing = true; this.renderState();
     try {
       const { sharedAssets } = this.context(); let count = 0;
       for (const [name, bytes] of sharedAssets()) {
         if (!/\.(png|jpe?g|webp|gif|ogg|mp3|wav|flac|m4a)$/i.test(name) || bytes.length > 128 * 1024 * 1024) continue;
-        const digest = await hash(bytes); const total = Math.ceil(bytes.length / 49152);
-        for (let index = 0; index < total; index++) {
-          if (!this.client.ready) throw new Error('连接中断，素材传输已停止');
-          const data = btoa(String.fromCharCode(...bytes.subarray(index * 49152, (index + 1) * 49152)));
-          this.transport.send({ type: 'asset', name, hash: digest, index, total, data }); await new Promise(resolve => setTimeout(resolve, 40));
-        }
+        this.assetStatus.textContent = `正在校验：${name}`;
+        const digest = await hash(bytes); const started = performance.now();
+        await sendCollaborationAsset(this.transport, name, bytes, digest, (sent, total) => {
+          const speed = sent / Math.max(0.1, (performance.now() - started) / 1000) / 1048576;
+          this.assetStatus.textContent = `发送 ${name} · ${Math.floor(sent / total * 100)}% · ${speed.toFixed(2)} MiB/s`;
+        });
         count++;
       }
-      this.notify(`已发送 ${count} 个引用素材；接收者需勾选接收素材`, 'success');
-    } catch (error) { this.notify(error.message, 'warning'); }
+      this.assetStatus.textContent = `已传输 ${count} 个引用素材，接收端会校验并载入`;
+      this.notify(this.assetStatus.textContent, 'success');
+    } catch (error) { this.assetStatus.textContent = error.message; this.notify(error.message, 'warning'); }
     finally { this.sharing = false; this.renderState(); }
   }
   async asset(message) {
     if (!this.acceptAssets.checked || message.from !== this.client.host) return;
+    const key = message.transfer ?? message.hash;
+    if (message.index === 0) for (const [id, entry] of this.transfers) if (id !== key && entry.name === message.name) this.transfers.delete(id);
     if (this.transfers.size > 8) this.transfers.clear();
-    let transfer = this.transfers.get(message.hash);
-    if (!transfer) { transfer = { chunks: new Map(), size: 0, name: message.name, total: message.total }; this.transfers.set(message.hash, transfer); }
-    if (transfer.total !== message.total || transfer.name !== message.name || transfer.chunks.has(message.index)) return;
+    let transfer = this.transfers.get(key);
+    if (!transfer) { transfer = { chunks: new Map(), size: 0, name: message.name, total: message.total, hash: message.hash }; this.transfers.set(key, transfer); }
+    if (transfer.total !== message.total || transfer.name !== message.name || transfer.hash !== message.hash || transfer.chunks.has(message.index)) return;
     const bytes = Uint8Array.from(atob(message.data), character => character.charCodeAt(0)); transfer.chunks.set(message.index, bytes); transfer.size += bytes.length;
-    if (transfer.size > 128 * 1024 * 1024) { this.transfers.delete(message.hash); throw new Error('接收素材超过 128 MiB，已停止'); }
+    this.assetStatus.textContent = `接收 ${message.name} · ${Math.floor(transfer.chunks.size / transfer.total * 100)}% · ${(transfer.size / 1048576).toFixed(1)} MiB`;
+    if (transfer.size > 128 * 1024 * 1024) { this.transfers.delete(key); throw new Error('接收素材超过 128 MiB，已停止'); }
     if (transfer.chunks.size !== transfer.total) return;
     const result = new Uint8Array(transfer.size); let offset = 0;
     for (let index = 0; index < transfer.total; index++) { const chunk = transfer.chunks.get(index); result.set(chunk, offset); offset += chunk.length; }
-    this.transfers.delete(message.hash); if (await hash(result) !== message.hash) throw new Error('素材校验失败，请重新发送');
+    this.transfers.delete(key); if (await hash(result) !== message.hash) throw new Error('素材校验失败，请重新发送');
     await this.receiveAsset(message.name, result); this.notify(`已接收素材：${message.name}`, 'success');
   }
 }

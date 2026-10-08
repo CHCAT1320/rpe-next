@@ -1,16 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WebSocket } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { startCollaborationServer } from '../server.mjs';
 import { createChart, createNote } from '../../src/core/chart.mjs';
 import { identifyChart, chartChanges, COLLAB_ID } from '../../src/core/collaboration.mjs';
 import { CollaborationTransport } from '../../src/platform/collaboration-transport.mjs';
 import { CollaborationClient } from '../../src/application/collaboration-client.mjs';
 import { EditorSession } from '../../src/application/session.mjs';
+import { CollaborationMessageReader } from '../../src/core/collaboration-wire.mjs';
 
 async function peer(port) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/collab`); const inbox = []; const waiters = [];
-  socket.on('message', data => { const message = JSON.parse(String(data)); const index = waiters.findIndex(entry => entry.predicate(message)); if (index >= 0) { const [waiter] = waiters.splice(index, 1); clearTimeout(waiter.timer); waiter.resolve(message); } else inbox.push(message); });
+  const reader = new CollaborationMessageReader(receipt => socket.send(JSON.stringify(receipt)));
+  socket.on('message', data => { const message = reader.read(String(data)); if (!message) return; const index = waiters.findIndex(entry => entry.predicate(message)); if (index >= 0) { const [waiter] = waiters.splice(index, 1); clearTimeout(waiter.timer); waiter.resolve(message); } else inbox.push(message); });
   await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
   return { socket, send: message => socket.send(JSON.stringify(message)), wait: (type, predicate = () => true) => {
     const matches = message => message.type === type && predicate(message); const index = inbox.findIndex(matches); if (index >= 0) return Promise.resolve(inbox.splice(index, 1)[0]);
@@ -50,13 +52,69 @@ test('创建密钥与错误邀请被拒绝，健康接口不暴露房间', async
   const health = await fetch(`http://127.0.0.1:${service.port}/health`).then(response => response.json()); assert.equal(health.protocol, 1); assert.equal(health.rooms, undefined);
 });
 
+test('既没有 Pong 也没有有效数据的连接仍由心跳清理', async context => {
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  const diagnostics = [];
+  const service = await startCollaborationServer({ port: 0, onDiagnostic: entry => diagnostics.push(entry) }); context.after(() => service.close());
+  const socket = new WebSocket(`ws://127.0.0.1:${service.port}/collab`, { autoPong: false }); context.after(() => socket.terminate());
+  await new Promise(resolve => socket.once('open', resolve));
+  const closed = new Promise(resolve => socket.once('close', resolve));
+  context.mock.timers.tick(30000);
+  assert.equal(await closed, 1006);
+  assert.ok(diagnostics.some(entry => entry.phase === 'heartbeat-timeout'));
+});
+
+test('有音乐曲绘的大谱面经 64 KiB 帧限制代理建房，持续同步时批准第三人', async context => {
+  const diagnostics = []; const service = await startCollaborationServer({ port: 0, onDiagnostic: entry => diagnostics.push(entry) }); context.after(() => service.close());
+  const proxy = new WebSocketServer({ port: 0 }); await new Promise(resolve => proxy.once('listening', resolve));
+  const upstreams = []; let largestFrame = 0;
+  context.after(async () => { for (const socket of [...proxy.clients, ...upstreams]) socket.terminate(); await new Promise(resolve => proxy.close(resolve)); });
+  proxy.on('connection', frontend => {
+    const backend = new WebSocket(`ws://127.0.0.1:${service.port}/collab`); upstreams.push(backend); const pending = [];
+    const forward = (target, data) => { largestFrame = Math.max(largestFrame, data.length); if (data.length > 65536) target.terminate(); else if (target.readyState === WebSocket.OPEN) target.send(data, { binary: false }); };
+    frontend.on('message', data => backend.readyState === WebSocket.CONNECTING ? pending.push(data) : forward(backend, data));
+    backend.on('open', () => { for (const data of pending) forward(backend, data); });
+    backend.on('message', data => forward(frontend, data));
+    frontend.on('close', () => backend.close()); backend.on('close', () => frontend.close()); backend.on('error', () => {});
+  });
+  const notices = [];
+  const make = chart => {
+    const session = new EditorSession(chart); const transport = new CollaborationTransport();
+    const client = new CollaborationClient(transport, { session: () => session, receiveChart: chart => { session.history.document = chart; }, notify: (message, level) => { if (level !== 'success') notices.push(message); } });
+    context.after(() => client.leave()); return { client, session, transport };
+  };
+  const wait = (client, predicate) => new Promise((resolve, reject) => {
+    if (predicate()) { resolve(); return; }
+    const listener = () => { if (predicate()) { clearTimeout(timer); client.removeEventListener('change', listener); resolve(); } };
+    const timer = setTimeout(() => { client.removeEventListener('change', listener); reject(new Error('三人同步超时：' + notices.join('；'))); }, 10000);
+    client.addEventListener('change', listener);
+  });
+  const chart = createChart(); chart.META.song = '测试音乐.ogg'; chart.META.background = '测试曲绘.png'; chart.META.offset = 650;
+  chart.judgeLineList[0].notes = Array.from({ length: 3000 }, (_, index) => createNote(1, index / 4, 0));
+  const host = make(chart); const second = make(createChart()); const third = make(createChart());
+  const address = `ws://127.0.0.1:${proxy.address().port}/collab`;
+  host.client.connect(address, { name: 'Host' }); await wait(host.client, () => host.client.ready);
+  second.client.connect(address, { name: 'Second' }, { room: host.client.room, token: host.client.token });
+  await wait(host.client, () => host.client.requests.length === 1); host.client.approve(host.client.requests[0].request, true); await wait(second.client, () => second.client.ready);
+  const movement = setInterval(() => second.transport.presence({ type: 'presence', seconds: 42, line: 0, cursor: null }), 20); context.after(() => clearInterval(movement));
+  third.client.connect(address, { name: 'Third' }, { room: host.client.room, token: host.client.token });
+  await wait(host.client, () => host.client.requests.length === 1); host.client.approve(host.client.requests[0].request, true); await wait(third.client, () => third.client.ready);
+  await wait(host.client, () => host.client.members.length === 3);
+  assert.deepEqual(third.session.chart, host.session.chart); assert.equal(third.session.chart.META.song, chart.META.song);
+  assert.equal(host.session.chart.META.background, chart.META.background); assert.ok(largestFrame <= 65536);
+  assert.deepEqual(notices, []);
+  const log = JSON.stringify([...host.transport.diagnostics, ...diagnostics]);
+  assert.ok(log.includes('create')); assert.ok(!log.includes(host.client.token)); assert.ok(!log.includes('测试音乐')); assert.ok(!log.includes(address));
+  clearInterval(movement);
+});
+
 test('编辑器客户端端到端：并行修改、独立撤销重做、断线恢复及素材传输', async context => {
   const service = await startCollaborationServer({ port: 0 }); context.after(() => service.close());
   const base = createChart(); base.judgeLineList[0].notes = [createNote(1, 1, 0), createNote(4, 2, 50)];
   const problems = [];
   const make = chart => {
     const session = new EditorSession(chart); const transport = new CollaborationTransport();
-    const client = new CollaborationClient(transport, { session: () => session, receiveChart: chart => { session.history.document = chart; }, notify: message => problems.push(message) });
+    const client = new CollaborationClient(transport, { session: () => session, receiveChart: chart => { session.history.document = chart; }, notify: (message, level) => { if (level !== 'success') problems.push(message); } });
     context.after(() => client.leave()); return { session, transport, client };
   };
   const host = make(base); const guest = make(createChart());

@@ -4,10 +4,20 @@ const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 const { networkInterfaces } = require('node:os');
 const { readFileSync, writeFileSync, mkdirSync } = require('node:fs');
+const { appendFile } = require('node:fs/promises');
 const smoke = process.argv.includes('--smoke-test');
 app.setPath('userData', join(app.getPath('appData'), smoke ? 'rpe-next-server-smoke' : 'rpe-next-server'));
 mkdirSync(app.getPath('userData'), { recursive: true });
 const configPath = join(app.getPath('userData'), 'preferences.json');
+const diagnosticPath = join(app.getPath('userData'), 'collaboration-diagnostics.log');
+writeFileSync(diagnosticPath, '');
+let diagnosticBytes = 0; let diagnosticWrites = Promise.resolve();
+const diagnostic = entry => {
+  const line = JSON.stringify({ time: new Date().toISOString(), ...entry }) + '\n';
+  if (diagnosticBytes + line.length > 1024 * 1024) return;
+  diagnosticBytes += line.length;
+  diagnosticWrites = diagnosticWrites.then(() => appendFile(diagnosticPath, line)).catch(() => {});
+};
 let preferences = {};
 try { preferences = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
 let window; let service; let tunnel; let tunnelPath = ''; let publicAddress = ''; let counts = { rooms: 0, users: 0 }; let message = '服务未启动';
@@ -21,11 +31,14 @@ ipcMain.handle('server-action', async (event, action, values = {}) => {
     if (action === 'start' && !service) {
       const port = Number(values.port); if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('端口须为 1024–65535');
       const module = await import(pathToFileURL(join(__dirname, 'server.mjs')).href);
-      service = await module.startCollaborationServer({ port, host: values.lan ? '0.0.0.0' : '127.0.0.1', creationKey: String(values.key ?? ''), onStatus: value => { counts = value; update(); } });
+      service = await module.startCollaborationServer({ port, host: values.lan ? '0.0.0.0' : '127.0.0.1', creationKey: String(values.key ?? ''), onDiagnostic: diagnostic, onStatus: value => { counts = value; update(); } });
+      diagnostic({ phase: 'service-start', framed: true, acknowledgementWindow: 16, maximumWindow: 128, compression: true, assetDelivery: true });
       preferences = { port, lan: Boolean(values.lan), tunnelPath }; writeFileSync(configPath, JSON.stringify(preferences));
       message = '服务已启动。公网协作请启动隧道或配置固定公网入口。';
     } else if (action === 'stop') {
       tunnel?.kill(); tunnel = null; if (service) await service.close(); service = null; counts = { rooms: 0, users: 0 }; publicAddress = ''; message = '服务已停止';
+    } else if (action === 'diagnostics') {
+      await diagnosticWrites; await shell.showItemInFolder(diagnosticPath);
     } else if (action === 'download-tunnel') {
       await shell.openExternal('https://github.com/cloudflare/cloudflared/releases/latest');
     } else if (action === 'choose-tunnel') {

@@ -431,4 +431,6 @@ h2 { margin: 0; font-size: 21px; font-weight: 400; }
 .collaboration-chat { position: fixed; bottom: 36px; left: 20px; width: min(650px, calc(100vw - 40px)); background: #171717eF; border: 1px solid #6d987e; padding: 10px; z-index: 100; box-sizing: border-box; }
 .collaboration-chat-log { max-height: 220px; overflow-y: auto; overflow-wrap: anywhere; font-size: 14px; }
 .collaboration-chat input { margin-top: 8px; width: 100%; box-sizing: border-box; }
-.collaboration-chat-toast { position: fixed; left: 24px; bottom: 42px; max-width: 60vw; background: #222c; color: #dff5e6; padding: 5px 10px; z-index: 44; pointer-events: none; overflow-wrap: anywhere; }
+.collaboration-chat-toast { position: fixed; left: 24px; bottom: 42px; width: max-content; max-width: min(650px, calc(100vw - 48px)); color: #dff5e6; z-index: 100; pointer-events: none; overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 3px; font-size: 14px; line-height: 1.5; }
+.collaboration-chat-message { background: #171717ed; border-left: 2px solid #6d987e; padding: 5px 10px; opacity: 1; transition: opacity 1s ease; }
+.collaboration-chat-message.leaving { opacity: 0; }
