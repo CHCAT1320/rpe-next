@@ -313,7 +313,7 @@ export class Preview {
         const descriptor: PreviewImage | undefined = this.images?.describe?.(runtime.line.Texture);
         const texture: PreviewImage | undefined = runtime.line.Texture && runtime.line.Texture !== 'line.png'
           ? descriptor ?? this.images?.images.get(runtime.line.Texture)
-          : { naturalWidth: DEFAULT_LINE_WIDTH, naturalHeight: DEFAULT_LINE_HEIGHT };
+          : { naturalWidth: DEFAULT_LINE_WIDTH, naturalHeight: DEFAULT_LINE_HEIGHT * this.lineScale };
         if (!texture || texture.naturalWidth && !textureInViewport(texture as SizedImage, runtime.line, state, width, height, scale, viewport)) continue;
       }
       context.save();
@@ -510,8 +510,9 @@ export class Preview {
       const source = (rawTexture?.source ?? rawTexture) as TintDrawable | undefined;
       const texture = (defaultLine ? this.skin?.tinted('line', state.color) : this.skin?.tintedSource(`line:${line.Texture}`, source, state.color)) as TintDrawable | null | undefined;
       if (defaultLine) {
-        if (texture) context.drawImage(texture as CanvasImageSource, -DEFAULT_LINE_WIDTH * scale / 2, -DEFAULT_LINE_HEIGHT * scale / 2, DEFAULT_LINE_WIDTH * scale, DEFAULT_LINE_HEIGHT * scale);
-        else context.fillRect(-DEFAULT_LINE_WIDTH * scale / 2, -DEFAULT_LINE_HEIGHT * scale / 2, DEFAULT_LINE_WIDTH * scale, DEFAULT_LINE_HEIGHT * scale);
+        const height = DEFAULT_LINE_HEIGHT * this.lineScale * scale;
+        if (texture) context.drawImage(texture as CanvasImageSource, -DEFAULT_LINE_WIDTH * scale / 2, -height / 2, DEFAULT_LINE_WIDTH * scale, height);
+        else context.fillRect(-DEFAULT_LINE_WIDTH * scale / 2, -height / 2, DEFAULT_LINE_WIDTH * scale, height);
       } else if (texture && rawTexture) {
         const anchor = line.anchor ?? [0.5, 0.5];
         // `naturalWidth`/`naturalHeight` are optional on a texture record and `width`/`height` are

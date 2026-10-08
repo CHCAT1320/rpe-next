@@ -838,7 +838,7 @@ export class Timeline {
     this.changed();
     if (!active && this.notesCanvas.style) {
       const hit = this.hit(cursor);
-      this.notesCanvas.style.cursor = hit?.item.type === 2 && (Math.abs(cursor.y - this.vertical(hit.end)) < 8 || Math.abs(cursor.y - this.vertical(hit.start)) < 8) ? 'ns-resize' : hit ? 'move' : 'crosshair';
+      this.notesCanvas.style.cursor = hit?.item.type === 2 && (Math.abs(cursor.y - this.vertical(hit.end)) < 8 || Math.abs(cursor.y - this.vertical(hit.start)) < 8) ? 'ns-resize' : hit ? 'move' : 'default';
     }
   }
 

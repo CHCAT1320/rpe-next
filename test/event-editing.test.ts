@@ -195,5 +195,6 @@ test('原版显示和音效设置转换为实际参数且保留原值', () => {
   const result = migratePreferences(JSON.stringify(settings));
   assert.equal(result.settings.hitVolume, 0.4); assert.equal(result.settings.noteSize, 200);
   assert.equal(result.settings.backgroundAlpha, 80 / 255); assert.equal(result.settings.gridCount, 21);
-  assert.deepEqual(result.originalSettings, settings); assert.deepEqual(result.report.retainedSettings, ['LineScale', 'unhandled']);
+  assert.deepEqual(result.originalSettings, settings); assert.deepEqual(result.report.retainedSettings, ['unhandled']);
+  assert.equal(result.settings.lineScale, 2); assert.ok(result.report.appliedSettings.includes('LineScale'));
 });

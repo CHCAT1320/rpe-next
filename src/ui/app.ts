@@ -50,10 +50,13 @@ import { EditorPlayback } from '../application/playback.ts';
 import { readEditorPreferences, writeEditorPreferences } from '../platform/editor-preferences.ts';
 import { ProjectHome } from './home.ts';
 import { createSettingsPanel } from './settings.ts';
+import { showHotkeySettings } from './hotkey-settings.ts';
 import { AutoSaveClock } from '../application/autosave.ts';
+import { ManualSaveQueue } from '../application/manual-save.ts';
 import { SPECIAL_TRACKS, MAX_BASE_LAYERS } from '../core/editor-display.ts';
 import { lineGroupName, isDefaultLineGroup, lineDisplayLabel } from '../core/line-groups.ts';
 import { isPlaybackSpace, isTextEntry, isTypingText, releaseShortcutFocus } from './keyboard.ts';
+import type { ShortcutTarget } from './keyboard.ts';
 import { setRatioOptions, applyViewControls } from './view-controls.ts';
 import { generateCurveNotes } from '../core/curve-notes.ts';
 import { createEasingPicker } from './easing-picker.ts';
@@ -64,6 +67,7 @@ import { TimelineActivity } from '../core/timeline-activity.ts';
 import { assetUrl } from '../core/asset-url.ts';
 import { AudioAnalysis } from './audio-analysis.ts';
 import { TrajectoryPanel } from './trajectory-panel.ts';
+import { CollaborationPanel } from './collaboration.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, JudgeLine, Note, NoteType } from '../core/types.ts';
 import type { Timeline as TimelineClass, TimelineSession, CursorPosition } from './timeline.ts';
 import type { AudioContextLike } from '../platform/audio.ts';
@@ -250,12 +254,11 @@ function isBaseEventType(value: string): value is (typeof EVENT_TYPES)[number] {
 /**
  * The event target viewed the way `keyboard.ts` reads it.
  *
- * That module declares its `ShortcutTarget` parameter but does not export it, and probes every member
- * (`isContentEditable`, `closest`, `blur`) before use, so naming the three optional members here is
- * the same structural view it already accepts — `keyboard.ts`'s own `isPlaybackSpace` casts
- * `event.target` to it directly.
+ * `keyboard.ts` probes every member (`isContentEditable`, `closest`, `blur`) before use, so this is
+ * just its exported structural view named at the call site — `keyboard.ts`'s own `isPlaybackSpace`
+ * casts `event.target` to the same type.
  */
-type ShortcutTargetArg = { isContentEditable?: boolean; closest?(selector: string): { type?: string; blur?(): void } | null; blur?(): void };
+type ShortcutTargetArg = ShortcutTarget;
 
 /** The open timeline context menu, or `null` when it is closed. */
 interface PendingTimelineMenu {
@@ -296,6 +299,7 @@ const element = <T extends HTMLElement = HTMLElement>(selector: string): T => do
 const displayFields: [string, keyof EditorPreferences, number | boolean][] = [
   ['event-cut-density', 'cutDensity', 4],
   ['judgement-offset', 'judgementOffset', 92],
+  ['default-line-thickness', 'lineScale', 1.5],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
   ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
@@ -318,7 +322,7 @@ let dirtyFrame = true;
 let lastDraftDocument: Chart | undefined;
 let preferences: MigratedPreferences = migratePreferences();
 let libraryProject: StoredProject | null = null;
-let saving = false;
+const manualSaves = new ManualSaveQueue(storeProject);
 let editorPreferences: EditorPreferences = readEditorPreferences();
 let atHome = true;
 let hasDocument = false;
@@ -646,6 +650,33 @@ const advanceEditClock = (timestamp: number) => {
 };
 const formatEditTime = (seconds: number) => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
 const currentBeat = () => tempo.beat(chartSeconds(), session.line?.bpmfactor ?? 1);
+let collaborationJoining = false;
+const collaborationTool = document.createElement('button'); collaborationTool.id = 'collaboration-tool'; collaborationTool.textContent = '联机协作'; element('[data-panel="chart"] .action-grid').append(collaborationTool);
+const collaboration = new CollaborationPanel(element('#collaboration-panel'), () => ({
+  session, timeline, interactionBusy: Boolean(batchControls.active), seconds: chartSeconds(), offset: offsetSeconds(), duration: Number(element<HTMLInputElement>('#scrubber').max) || 600,
+  seek: seconds => playback.seek(seconds + offsetSeconds()),
+  sharedAssets: () => {
+    const references = resourceReferences(session.chart, assets, chartName);
+    const names = new Set([references.song, references.background, session.chart.META.background, ...session.chart.judgeLineList.map(line => line.Texture)].filter(Boolean));
+    return [...names].flatMap(name => { const bytes = assetBytes(assets, name, chartName); return bytes ? [[name, bytes]] : []; });
+  }
+}), {
+  notify, activate: activatePane,
+  confirmJoin: run => guardReplace(run),
+  receiveChart: (chart, owner) => {
+    if (owner) { session.history.document = chart; return; }
+    collaborationJoining = true;
+    try { replaceChart(chart, '联机谱面.json'); } finally { collaborationJoining = false; }
+    activatePane('collaboration');
+  },
+  receiveAsset: async (name, bytes) => {
+    assets.set(name, bytes); assetDirty = true; images.load(session.chart, assets, chartName);
+    const references = resourceReferences(session.chart, assets, chartName);
+    if (name === references.song || name === session.chart.META.song) await loadMusic(bytes, name, false);
+    hitSounds.setProject(session.chart, assets, chartName); renderSession();
+  }
+});
+element('#collaboration-tool').onclick = () => activatePane('collaboration');
 const playback = new EditorPlayback(audio, hitSounds, () => {
   timeline.origin = currentBeat();
   preview.effectsSince = realtimePreview.effectsSince = chartSeconds();
@@ -730,6 +761,7 @@ const home = new ProjectHome(async id => {
 });
 
 function setHome(visible: boolean) {
+  if (visible && collaboration.client.active) collaboration.client.leave();
   atHome = visible;
   if (visible) clearNoteSourceToast();
   if (visible) { lineSwitcher.reset(); hitSounds.onlyCurrentLine = false; element<HTMLButtonElement>('#mute-current-line')?.setAttribute('aria-pressed', 'false'); element<HTMLButtonElement>('#mute-current-line')?.classList.remove('active'); }
@@ -1083,6 +1115,7 @@ function renderSession() {
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
     if (multiEdit.committing) multiEdit.sync();
+    else if (activePaneName === 'collaboration') collaboration.renderState();
     else if (trajectoryPanel.active && selectionCount !== 1) activatePane('trajectory');
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
@@ -1100,7 +1133,7 @@ function renderSession() {
       if (session.focus === 'events' && event?.trajectory && selected) { curveEditorOpen = false; trajectoryPanel.open(event, selected.lineIndex, timeline.layer); }
       else activatePane(session.focus === 'events' ? 'events' : 'notes');
     }
-    else if (!['multi-line', 'lines', 'assets'].includes(activePaneName)) activatePane('chart');
+    else if (!['multi-line', 'lines', 'assets', 'collaboration'].includes(activePaneName)) activatePane('chart');
   }
   const limits = previewLimitations(session.chart);
   element('#compatibility').textContent = '已使用原 RPE 音符素材与打击音；支持封面、静态纹理、多线与控制曲线。尚需原版逐帧对照。' + (limits.length ? `需进一步验证：${limits.join('、')}。` : '');
@@ -1111,6 +1144,7 @@ session.addEventListener('change', renderSession);
 
 function replaceChart(chart: Chart, name: string, nextAssets: Map<string, Uint8Array> = new Map(), nextFolders: Iterable<string> = []) {
   assertChart(chart);
+  if (!collaborationJoining && collaboration.client.active) collaboration.client.leave();
   lineSwitcher.reset();
   playback.pause(); audio.clear();
   audioAnalysis.setBuffer(null);
@@ -1200,17 +1234,32 @@ async function togglePlayback() {
   invalidate();
 }
 
-async function save() {
-  if (saving) return;
-  saving = true;
-  const savingSession = session; const snapshot = { ...session.chart }; delete snapshot.chartTime;
-  const project = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
-    chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
-  try {
-    await storeProject(project);
-    savingSession.history.markSaved(savingSession.chart);
-    if (session === savingSession) { libraryProject = project; assetDirty = false; renderSession(); status('已保存到谱面库，包含当前资源；可导出 PEZ 备份'); notify('已保存到谱面库', 'success'); }
-  } finally { saving = false; }
+function save() {
+  const savingSession = session;
+  // The capture closure returns the document it saved alongside the project, so `complete` can mark
+  // exactly that revision as saved. Naming the snapshot here is what lets `ManualSaveQueue` infer its
+  // project type from `storeProject` while still typing the extra `document` field.
+  type SaveSnapshot = { document: Chart; project: StoredProject };
+  return manualSaves.save(savingSession, (): SaveSnapshot => {
+    const document = session.chart; const snapshot = { ...document }; delete snapshot.chartTime;
+    const project: StoredProject = { ...(libraryProject ?? { id: crypto.randomUUID(), source: 'Next 本地项目', imported: Date.now() }),
+      chart: snapshot, chartName, assets: [...assets], assetFolders: [...assetFolders], bytes: [...assets.values()].reduce((sum, bytes) => sum + bytes.length, 0), updated: Date.now(), viewState: { lineIndex: session.lineIndex } };
+    status('正在后台保存，可继续编辑…');
+    return { document, project };
+  }, ({ document, project }) => {
+    savingSession.history.markSaved(document);
+    if (session !== savingSession) return;
+    libraryProject = project;
+    // `assetFolders` and `viewState` are optional on `StoredProject` because records written by older
+    // builds carry neither; this project was just built with both, so the fallbacks are unreachable
+    // here and only satisfy the optional type.
+    const savedFolders = project.assetFolders ?? [];
+    assetDirty = assets.size !== project.assets.length || project.assets.some(([name, bytes]) => assets.get(name) !== bytes)
+      || assetFolders.size !== savedFolders.length || savedFolders.some(folder => !assetFolders.has(folder));
+    renderSession();
+    const message = session.history.dirty || assetDirty ? '已保存开始保存时的版本；后续修改尚未保存' : '已保存到谱面库';
+    status(message); notify(message, 'success');
+  });
 }
 
 function validateCommit(label: string, next: Chart) { assertChart(next); session.commit(label, next); }
@@ -1715,25 +1764,21 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || event.key !== 'Tab' || dialogOpen() || isTypingText(event.target as ShortcutTargetArg)) return;
+  if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || isTypingText(event.target as ShortcutTargetArg)) return;
   event.preventDefault();
   if (event.repeat) return;
   lineInfoVisible = !lineInfoVisible;
   updateLineInfo();
 }, true);
-window.addEventListener('keyup', event => {
-  if (event.key !== 'Tab') return;
-  event.preventDefault();
-}, true);
 window.addEventListener('blur', () => { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); });
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || dialogOpen() || !isPlaybackSpace(event)) return;
+  if (atHome || !hasDocument || dialogOpen() || isTextEntry(event.target as ShortcutTargetArg) || !shortcutMatches(event, preferences.hotkeys.Pause)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   playbackSpaceHeld = true;
   if (!event.repeat) togglePlayback().catch(reportError);
 }, true);
 window.addEventListener('keyup', event => {
-  if (event.key !== ' ' || !playbackSpaceHeld) return;
+  if (!shortcutReleased(event, preferences.hotkeys.Pause) || !playbackSpaceHeld) return;
   event.preventDefault(); event.stopImmediatePropagation(); playbackSpaceHeld = false;
 }, true);
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
@@ -1746,21 +1791,25 @@ window.addEventListener('keydown', async event => {
   if (isTextEntry(target) && event.key.toLowerCase() === 'v' && (event.ctrlKey || event.metaKey)) return;
   if (batchControls.active) { event.preventDefault(); return; }
   const area = timeline.hoverArea ?? session.focus;
-  const matchedAction = shortcutAction(event, preferences, area);
-  if (matchedAction || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
-  if (pasteGesture.pending && matchedAction !== 'Paste') pasteGesture.cancel();
-    if (matchedAction === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
+  const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
+  const hasSelection = Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
+  const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
+  if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
+  if (pasteGesture.pending && action !== 'Paste') pasteGesture.cancel();
+    if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
     pasteGesture.down(event, { session, chart: session.chart, lineIndex: session.lineIndex, targetLineIndex: clipboardTargetLine(), layer: timeline.layer, beat: clipboardBeat(timeline) }); return;
   }
-  // A key that matches no shortcut yields `undefined`; the original's `else if (action === '…')` chain
-  // never matched such a key either, so returning here is a no-op for every value it could receive.
-  if (!matchedAction) return;
-  const action = matchedAction;
+  // A key that matches no shortcut yields `undefined`; the `else if (action === '…')` chain below
+  // never matched such a key either, falling through to `handled = false`, so returning here is a
+  // no-op for every value it could receive — it only narrows the type for the chain.
+  if (!action) return;
   let handled = true;
   try {
     if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD', 'ToggleMultiLine', 'SwitchMultiLineMode'].includes(action)) { event.preventDefault(); return; }
-    const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
-    if (!preview.visible && !event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && (session.selection.size || session.eventSelection.size || hasMultiSelection)) nudgeSelection(session, event.key, timeline.division, timeline.gridCount);
+    // `action` is narrowed to a string by the guard above, and the `Page*` test guarantees the
+    // lookup below hits; the explicit key type is what lets the index be read without a cast.
+    const pageKey = action as 'PageLeft' | 'PageRight' | 'PageUp' | 'PageDown';
+    if (!preview.visible && action.startsWith('Page')) nudgeSelection(session, { PageLeft: 'ArrowLeft', PageRight: 'ArrowRight', PageUp: 'ArrowUp', PageDown: 'ArrowDown' }[pageKey], timeline.division, timeline.gridCount);
     else if (timeline.eventInteraction.pending && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.altKey) timeline.eventInteraction.place(undefined, undefined, Number(event.key) || 10);
     else if (action === 'Save') { event.preventDefault(); await save(); }
     else if (action === 'Undo') travel('undo');
@@ -1935,7 +1984,9 @@ function applyPreferences(next: MigratedPreferences) {
   hitSounds.setVolume(Number(editorPreferences.hitVolume ?? next.settings.hitVolume));
   element<HTMLInputElement>('#hit-volume').value = String(hitSounds.volume);
   preview.noteSize = realtimePreview.noteSize = next.settings.noteSize;
-  preview.lineScale = next.settings.lineScale;
+  // `lineScale` is a range-backed preference, so it is always a number here; `Number` is the same
+  // narrowing the surrounding lines use and is the identity for the only value this can hold.
+  preview.lineScale = realtimePreview.lineScale = Number(editorPreferences.lineScale ?? next.settings.lineScale);
   preview.backgroundAlpha = realtimePreview.backgroundAlpha = next.settings.backgroundAlpha;
   timeline.noteScale = next.settings.noteSize / 175;
   timeline.gridCount = Number(editorPreferences.gridCount ?? next.settings.gridCount);
@@ -1968,6 +2019,7 @@ function applyPreferences(next: MigratedPreferences) {
 
 function applyMigratedPreferences(next: MigratedPreferences) {
   editorPreferences = { ...editorPreferences, volume: next.settings.volume, hitVolume: next.settings.hitVolume, gridCount: next.settings.gridCount, realtimeAlpha: next.settings.realtimeAlpha,
+    lineScale: next.settings.lineScale,
     ratioWidth: next.settings.ratioWidth, ratioHeight: next.settings.ratioHeight, barWidth: next.settings.barWidth, barAlpha: next.settings.barAlpha,
     autoSave: next.settings.autoSave, autoSaveSeconds: next.settings.autoSaveSeconds, autoSaveLimit: next.settings.autoSaveLimit, autoplayView: next.settings.autoplayView, highlight: next.settings.highlight, showGameUI: next.settings.showGameUI };
   applyPreferences(next); persistEditor();
@@ -2022,18 +2074,8 @@ listen('#library', () => {
 listen('#preferences', () => settingsDialog.showModal());
 listen('#advanced-preferences', () => {
   settingsDialog.close();
-  const content = showDialog('热键与设置', '已迁移热键会用于实际操作。未支持的项目保留在导出文件中；浏览器系统快捷键可能无法覆盖。');
-  const report = document.createElement('p');
-  report.textContent = `已应用热键：${preferences.report.appliedHotkeys.join('、') || '默认热键'}。仅保留设置：${preferences.report.retainedSettings.join('、') || '无'}。`;
-  content.append(report);
-  const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = '编辑热键 / 设置';
-  edit.onclick = () => editJson('编辑热键 / 设置', '修改 originalSettings 和 originalHotkeys，应用后生效。其他字段为迁移记录。', preferences, next => {
-    const nextPreferences = migratePreferences(JSON.stringify(next.originalSettings), Object.entries(next.originalHotkeys).map(([key, value]) => `${key} ${value}`).join('\n'), next.originalUI);
-    storePreferences(nextPreferences).then(() => applyMigratedPreferences(nextPreferences)).catch(reportError);
-  });
-  const exportButton = document.createElement('button'); exportButton.type = 'button'; exportButton.textContent = '导出全部迁移配置';
-  exportButton.onclick = () => download(new Blob([JSON.stringify(preferences, null, 2)], { type: 'application/json' }), 'rpe-next-preferences.json');
-  content.append(edit, exportButton);
+  pasteGesture.cancel();
+  showHotkeySettings(preferences, async next => { await storePreferences(next); applyPreferences(next); });
 });
 /**
  * Whether a value read back from storage is a usable migration record.
@@ -2087,6 +2129,7 @@ function applyDisplaySettings() {
   element('#clipboard-history').hidden = !clipboardHistory.enabled;
   if (!clipboardHistory.enabled && activePaneName === 'clipboard') activatePane('chart');
   preview.backgroundBlur = realtimePreview.backgroundBlur = Number(element<HTMLInputElement>('#background-blur').value);
+  preview.lineScale = realtimePreview.lineScale = Number(element<HTMLInputElement>('#default-line-thickness').value);
   timeline.highlight = preview.highlight = realtimePreview.highlight = element<HTMLInputElement>('#highlight-notes').checked;
   audio.setPreservePitch(element<HTMLInputElement>('#preserve-pitch').checked);
   rotateTip();

@@ -6,8 +6,14 @@ import { shortcutKey } from '../core/preferences.ts';
 // `document`, where the target may be a non-element (the document itself) and the test suite passes
 // plain objects standing in for inputs, so `closest` is probed rather than assumed.
 
-/** A minimal stand-in for the parts of `EventTarget` these helpers inspect. */
-interface ShortcutTarget {
+/**
+ * A minimal stand-in for the parts of `EventTarget` these helpers inspect.
+ *
+ * Exported so callers can name it when narrowing `event.target` (which is `EventTarget | null`) down
+ * to the members actually probed. The helpers still test every member before using it, so a target
+ * that is not really an element remains safe.
+ */
+export interface ShortcutTarget {
   isContentEditable?: boolean;
   closest?(selector: string): { type?: string; blur?(): void } | null;
   blur?(): void;

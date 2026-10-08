@@ -1,3 +1,5 @@
+import { normalizeShortcutKey, parseShortcut } from './shortcut-spec.ts';
+
 /**
  * The shortcut map as the editor ships it.
  *
@@ -13,6 +15,7 @@ export interface DefaultHotkeys {
   StartView: string; EndView: string; JumpView: string; ReplayView: string; StartView_HOLD: string; JumpView_HOLD: string;
   SwitchUI: string; ResetCamera: string; CurveBegin: string; CurveEnd: string;
   ToggleMultiLine: string; SwitchMultiLineMode: string;
+  ShowLineInfo: string; PageLeft: string; PageRight: string; PageUp: string; PageDown: string;
 }
 
 /** The shortcut map parsed out of a legacy `Hotkey.txt`; keys are whatever the file contained. */
@@ -117,14 +120,15 @@ export const DEFAULT_HOTKEYS: DefaultHotkeys = {
   StartView: 'I', EndView: 'O', JumpView: 'P', ReplayView: 'LEFTBRACKET', StartView_HOLD: 'T', JumpView_HOLD: 'U',
   SwitchUI: 'LEFTALT&N', ResetCamera: 'LEFTCTRL&M', CurveBegin: 'LEFTCTRL&F', CurveEnd: 'LEFTCTRL&G',
   ToggleMultiLine: 'J', SwitchMultiLineMode: 'K',
+  ShowLineInfo: 'TAB', PageLeft: 'LEFTARROW', PageRight: 'RIGHTARROW', PageUp: 'UPARROW', PageDown: 'DOWNARROW',
 };
-export const SUPPORTED_SETTINGS: string[] = ['CutRho', 'MusicVolume', 'maxHistorySize', 'AutoSave', 'AutoSaveGap', 'AutoSaveLimit', 'FpsLimit', 'showHotkey', 'SEVolume', 'NoteSize', 'GridlineCount', 'ScrollSpeed', 'Alpha', 'RealTimeAlpha', 'ScrollAcc', 'ratioWidth', 'ratioHeight', 'BarWidth', 'BarAlpha', 'HighLight', 'autoplayT', 'showViewUI'];
+export const SUPPORTED_SETTINGS: string[] = ['CutRho', 'MusicVolume', 'maxHistorySize', 'AutoSave', 'AutoSaveGap', 'AutoSaveLimit', 'FpsLimit', 'showHotkey', 'SEVolume', 'NoteSize', 'LineScale', 'GridlineCount', 'ScrollSpeed', 'Alpha', 'RealTimeAlpha', 'ScrollAcc', 'ratioWidth', 'ratioHeight', 'BarWidth', 'BarAlpha', 'HighLight', 'autoplayT', 'showViewUI'];
 
 export function parseHotkeys(text: string): HotkeyMap {
   const result: HotkeyMap = {};
   for (const line of text.split(/\r?\n/)) {
-    const match = line.trim().match(/^(\S+)\s+(.+)$/);
-    if (match && !line.trim().startsWith('//')) result[match[1]] = match[2].trim();
+    const match = line.trim().match(/^(\S+)(?:\s+(.*))?$/);
+    if (match && !line.trim().startsWith('//')) result[match[1]] = match[2]?.trim() === 'NONE' ? '' : match[2]?.trim() ?? '';
   }
   return result;
 }
@@ -181,18 +185,42 @@ const keyNames: Record<string, string> = { ' ': 'SPACE', ARROWLEFT: 'LEFTARROW',
 
 export function shortcutKey(event: ShortcutEvent): string {
   let key = String(event.key ?? '').toUpperCase();
+  if (event.shiftKey) {
+    const base: string | undefined = { Minus: 'MINUS', Equal: 'EQUAL', Comma: 'COMMA', Period: 'PERIOD', Slash: 'SLASH', Backslash: 'BACKSLASH', Semicolon: 'SEMICOLON', Quote: 'QUOTE', Backquote: 'TILDE', BracketLeft: 'LEFTBRACKET', BracketRight: 'RIGHTBRACKET' }[event.code ?? ''];
+    if (base) key = base;
+    else if (/^Digit[0-9]$/.test(event.code ?? '')) key = (event.code ?? '').slice(-1);
+  }
   if (event.isComposing || ['PROCESS', 'UNIDENTIFIED', 'DEAD', ''].includes(key)) {
     const code = String(event.code ?? '').toUpperCase();
     key = /^(KEY[A-Z]|DIGIT[0-9])$/.test(code) ? code.replace(/^(KEY|DIGIT)/, '') : code;
     if (key === 'BRACKETLEFT') key = 'LEFTBRACKET';
     if (key === 'BRACKETRIGHT') key = 'RIGHTBRACKET';
   }
-  return keyNames[key] ?? key;
+  if (['CONTROL', 'META', 'ALT', 'SHIFT'].includes(key)) return key;
+  // `shortcut-spec.mjs` is untyped from here (TS7016), so its parameter types are unknown; the
+  // argument is a `string` and the return value is bound to a `string` before being returned.
+  const normalized: string = normalizeShortcutKey(keyNames[key] ?? key);
+  return normalized;
+}
+
+/**
+ * The record `parseShortcut` returns.
+ *
+ * `shortcut-spec.mjs` is untyped from this module's point of view, so the contract its callers rely
+ * on is restated here; the parsed value is bound to this type rather than left as `any`.
+ */
+interface ParsedShortcut {
+  value?: string;
+  parts?: string[];
+  key?: string;
+  error?: string;
 }
 
 export function shortcutMatches(event: ShortcutEvent, specification: unknown): boolean {
   if (typeof specification !== 'string') return false;
-  const parts = specification.toUpperCase().replaceAll(' ', '').split('&');
+  const parsed: ParsedShortcut = parseShortcut(specification);
+  if (parsed.error || !parsed.value) return false;
+  const parts = parsed.parts ?? [];
   const control = parts.some(part => ['LEFTCTRL', 'RIGHTCTRL', 'CTRL'].includes(part));
   const shift = parts.some(part => ['LEFTSHIFT', 'RIGHTSHIFT', 'SHIFT'].includes(part));
   const alt = parts.some(part => ['LEFTALT', 'RIGHTALT', 'ALT'].includes(part));
@@ -207,15 +235,23 @@ export function shortcutMatches(event: ShortcutEvent, specification: unknown): b
  * `preferences` is read only for `hotkeys`, and a stored shortcut may be missing or a non-string,
  * so the source is modelled as optional entries rather than a complete map — an absent or invalid
  * entry falls back to `DEFAULT_HOTKEYS`, which is exactly what the lookup already does.
+ *
+ * `hasSelection` gates the selection-only actions: the page actions exist only while something is
+ * selected, and the beat actions step the view instead once a selection takes over the arrow keys.
  */
-export function shortcutAction(event: ShortcutEvent, preferences?: { hotkeys?: HotkeySource } | null, area: string = 'notes'): string | undefined {
-  const actions = Object.keys(DEFAULT_HOTKEYS).filter(action => area === 'events' ? !['AddHold', 'AddDrag', 'AddFlick'].includes(action) : action !== 'AddEvent');
+export function shortcutAction(event: ShortcutEvent, preferences?: { hotkeys?: HotkeySource } | null, area: string = 'notes', { hasSelection = false }: { hasSelection?: boolean } = {}): string | undefined {
+  const actions = Object.keys(DEFAULT_HOTKEYS).filter(action => {
+    if (action.startsWith('Page')) return hasSelection;
+    if (hasSelection && ['LastBeat', 'NextBeat'].includes(action)) return false;
+    return area === 'events' ? !['AddHold', 'AddDrag', 'AddFlick'].includes(action) : action !== 'AddEvent';
+  });
   return actions.find(action => shortcutMatches(event, preferences?.hotkeys?.[action as keyof DefaultHotkeys] ?? DEFAULT_HOTKEYS[action as keyof DefaultHotkeys]));
 }
 
 export function shortcutReleased(event: ShortcutEvent, specification: unknown): boolean {
   if (typeof specification !== 'string') return false;
   const key = shortcutKey(event);
-  const alias = { CONTROL: 'CTRL', META: 'CTRL', SHIFT: 'SHIFT', ALT: 'ALT' }[key];
-  return specification.toUpperCase().replaceAll(' ', '').split('&').some(part => part === key || alias && part.replace(/^(LEFT|RIGHT)/, '') === alias);
+  const alias: string | undefined = { CONTROL: 'CTRL', META: 'CTRL', SHIFT: 'SHIFT', ALT: 'ALT' }[key];
+  const parts: string[] = parseShortcut(specification).parts ?? [];
+  return parts.some(part => part === key || alias && part.replace(/^(LEFT|RIGHT)/, '') === alias);
 }

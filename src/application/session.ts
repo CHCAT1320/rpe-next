@@ -68,6 +68,15 @@ export class EditorSession extends EventTarget {
   cutDensity?: number;
   /** Whether a shader event's parameters follow it when its start beat changes; defaults to on. */
   shaderAutoAlign?: boolean;
+  /**
+   * The live collaboration client, attached by `collaboration-client.mjs` when a shared session
+   * starts and set back to `null` when it ends; absent entirely in a local session, which is why
+   * `commit` and `travel` both test it first.
+   *
+   * Typed structurally rather than imported: the client is still plain JavaScript, so importing it
+   * would pull an untyped module into the type graph for the sake of two method signatures.
+   */
+  collaboration?: { commit(label: string, chart: Chart, beforeSelection?: SelectionState): void; travel(direction: 'undo' | 'redo'): void } | null;
 
   constructor(chart: Chart = createChart()) {
     super();
@@ -160,6 +169,7 @@ export class EditorSession extends EventTarget {
   selectionState(): SelectionState { return selectionState(this); }
 
   commit(label: string, chart: Chart, beforeSelection: SelectionState = this.selectionState()): void {
+    if (this.collaboration) return this.collaboration.commit(label, chart, beforeSelection);
     if (this.history.commit(label, chart, { beforeSelection, afterSelection: this.selectionState() })) {
       const time = Number.isFinite(this.editSeconds) ? Math.max(0, this.editSeconds) : 0;
       this.recentEdits.push({ start: time, end: time, label });
@@ -321,6 +331,7 @@ export class EditorSession extends EventTarget {
   }
 
   travel(direction: 'undo' | 'redo'): void {
+    if (this.collaboration) return this.collaboration.travel(direction);
     const command = (direction === 'undo' ? this.history.undoStack : this.history.redoStack).at(-1);
     if (!command) return;
     const current = this.selectionState(); const source = this.chart;

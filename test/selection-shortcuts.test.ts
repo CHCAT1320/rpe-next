@@ -150,7 +150,9 @@ test('计时器或历史渲染出错仍清理长按状态，不让后续取消�
   const noContext: PasteContextDouble = {};
   const gesture = new PasteGesture({ paste() {}, open() {}, valid: () => true, schedule() { throw new Error('schedule'); }, reportError: error => errors.push(error.message) });
   gesture.down(key, noContext as PasteContext); assert.equal(gesture.pending, null); gesture.cancel();
-  gesture.pending = { context: noContext as PasteContext, key: 'v', opened: false, timer: 1 }; gesture.unschedule = () => { throw new Error('cancel'); };
+  // `cancel()` only reads `timer`, but `PastePending` declares `releaseKeys` as required, so the
+  // literal carries an empty list rather than leaving the field off the shape the gesture defines.
+  gesture.pending = { context: noContext as PasteContext, key: 'v', opened: false, releaseKeys: [], timer: 1 }; gesture.unschedule = () => { throw new Error('cancel'); };
   gesture.cancel(); assert.equal(gesture.pending, null); gesture.cancel();
   assert.deepEqual(errors, ['schedule', 'cancel']);
   let callback: (() => void) | undefined;

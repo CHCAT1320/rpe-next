@@ -57,11 +57,27 @@ export function sameSelection(left: SelectionState, right: SelectionState | null
     && ['selection', 'eventSelection'].every(key => listValue(left, key).length === listValue(right, key).length && listValue(left, key).every((value, index) => value === listValue(right, key)[index])));
 }
 
+/**
+ * The collaboration identity a line or note carries once a document has been through a shared
+ * session. Returns the raw value (not narrowed to `string`) so the truthiness test and the `Map` key
+ * below behave exactly as the untyped original did.
+ */
+function collabId(item: unknown): unknown {
+  return (item as { _rpeCollabId?: unknown } | null | undefined)?._rpeCollabId;
+}
+
 function remapIndices(source: readonly unknown[], target: readonly unknown[], indices: readonly number[]): number[] {
   const locations = new Map(target.map((item, index) => [item, index]));
+  // A shared document identifies lines and notes by `_rpeCollabId` rather than by object identity,
+  // because a collaboration round-trip rebuilds every object.
+  const identities = new Map<unknown, number>(target.flatMap((item, index) => { const id = collabId(item); return id ? [[id, index] as [unknown, number]] : []; }));
   const sourceItems = new Set(source);
   return indices.flatMap(index => {
     if (!source[index]) return [];
+    const id = collabId(source[index]);
+    // `identities` only ever holds numbers, so a miss is exactly `undefined`; that keeps this
+    // equivalent to the original `has`/`get` pair without a non-null assertion.
+    if (id) { const mapped = identities.get(id); return mapped === undefined ? [] : [mapped]; }
     const mapped = locations.get(source[index]);
     if (mapped !== undefined) return [mapped];
     return source.length === target.length && target[index] && !sourceItems.has(target[index]) ? [index] : [];
@@ -102,7 +118,8 @@ export function remapSelection(source: Chart, target: Chart, state: SelectionSta
   // what an out-of-range or missing index resolves to.
   const stateLineIndex = state.lineIndex ?? 0;
   const line = source.judgeLineList?.[stateLineIndex]; const lines = target.judgeLineList ?? [];
-  const matching = line ? lines.findIndex(candidate => candidate === line || candidate.notes === line.notes && candidate.eventLayers === line.eventLayers) : -1;
+  const lineId = collabId(line);
+  const matching = line ? lines.findIndex(candidate => lineId ? collabId(candidate) === lineId : candidate === line || candidate.notes === line.notes && candidate.eventLayers === line.eventLayers) : -1;
   const lineIndex = matching >= 0 ? matching : Math.max(0, Math.min(stateLineIndex, lines.length - 1));
   const selection = remapIndices(line?.notes ?? [], lines[lineIndex]?.notes ?? [], state.selection ?? []);
   const eventSelection: string[] = [];
@@ -113,21 +130,34 @@ export function remapSelection(source: Chart, target: Chart, state: SelectionSta
   }
   for (const [type, indices] of byType) for (const index of remapIndices(eventList(sessionHost(state, source, stateLineIndex), eventType(type)), eventList(sessionHost(state, target, lineIndex), eventType(type)), indices)) eventSelection.push(eventKey(eventType(type), index));
   const multiEventSelection = (state.multiEventSelection ?? []).flatMap(([sourceLineIndex, keys]) => {
-    const sourceLine = source.judgeLineList?.[sourceLineIndex]; const targetLine = target.judgeLineList?.[sourceLineIndex];
+    const sourceLine = source.judgeLineList?.[sourceLineIndex];
+    // A shared document rebuilds every line, so a snapshot taken before the round-trip has to be
+    // re-anchored by `_rpeCollabId` rather than by position.
+    const sourceLineId = collabId(sourceLine);
+    const targetLineIndex = sourceLineId ? lines.findIndex(candidate => collabId(candidate) === sourceLineId) : sourceLineIndex;
+    const targetLine = target.judgeLineList?.[targetLineIndex];
     if (!sourceLine || !targetLine) return [];
     const byType = new Map<string, number[]>();
     for (const key of keys) { const [type, index] = String(key).split(':'); (byType.get(type) ?? byType.set(type, []).get(type)!).push(Number(index)); }
     const mapped: string[] = [];
-    for (const [type, indices] of byType) for (const index of remapIndices(eventList(sessionHost(state, source, sourceLineIndex), eventType(type)), eventList(sessionHost(state, target, sourceLineIndex), eventType(type)), indices)) mapped.push(eventKey(eventType(type), index));
-    return mapped.length ? [[sourceLineIndex, mapped] as [number, string[]]] : [];
+    for (const [type, indices] of byType) for (const index of remapIndices(eventList(sessionHost(state, source, sourceLineIndex), eventType(type)), eventList(sessionHost(state, target, targetLineIndex), eventType(type)), indices)) mapped.push(eventKey(eventType(type), index));
+    return mapped.length ? [[targetLineIndex, mapped] as [number, string[]]] : [];
   });
   const multiLineSelection = (state.multiLineSelection ?? []).flatMap(([sourceLineIndex, indices]) => {
     const sourceNotes = source.judgeLineList?.[sourceLineIndex]?.notes ?? [];
-    const targetNotes = target.judgeLineList?.[sourceLineIndex]?.notes ?? [];
+    const id = collabId(source.judgeLineList?.[sourceLineIndex]);
+    const targetLineIndex = id ? lines.findIndex(candidate => collabId(candidate) === id) : sourceLineIndex;
+    const targetNotes = target.judgeLineList?.[targetLineIndex]?.notes ?? [];
     const mapped = remapIndices(sourceNotes, targetNotes, indices);
-    return mapped.length ? [[sourceLineIndex, mapped] as [number, number[]]] : [];
+    return mapped.length ? [[targetLineIndex, mapped] as [number, number[]]] : [];
   });
-  return { ...state, lineIndex, selection, eventSelection, multiLineSelection, multiEventSelection };
+  const multiLineIndices = (state.multiLineIndices ?? []).flatMap(index => {
+    const identity = collabId(source.judgeLineList?.[index]);
+    if (!identity) return [index];
+    const mapped = lines.findIndex(candidate => collabId(candidate) === identity);
+    return mapped < 0 ? [] : [mapped];
+  });
+  return { ...state, lineIndex, selection, eventSelection, multiLineSelection, multiEventSelection, multiLineIndices };
 }
 
 export function restoreSelection(session: EditorSession, state: SelectionState): void {

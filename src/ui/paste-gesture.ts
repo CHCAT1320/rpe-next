@@ -33,6 +33,11 @@ export interface PastePending {
   context: PasteContext;
   key: string;
   opened: boolean;
+  /**
+   * The modifiers that were held when the press began, so releasing the hotkey is recognised no
+   * matter which modifier the user lets go of first.
+   */
+  releaseKeys: string[];
   timer?: unknown;
 }
 
@@ -71,7 +76,7 @@ export class PasteGesture {
   down(event: PasteKeyEvent, context: PasteContext): void {
     event.preventDefault();
     if (this.pending || event.repeat) return;
-    const pending: PastePending = { context, key: shortcutKey(event), opened: false };
+    const pending: PastePending = { context, key: shortcutKey(event), opened: false, releaseKeys: ['CONTROL', 'META', ...(event.shiftKey ? ['SHIFT'] : []), ...(event.altKey ? ['ALT'] : [])] };
     this.pending = pending;
     try {
       pending.timer = this.schedule(() => {
@@ -86,7 +91,7 @@ export class PasteGesture {
 
   up(event: PasteKeyEvent): boolean {
     const pending = this.pending;
-    if (!pending || ![pending.key, 'CONTROL', 'META'].includes(shortcutKey(event))) return false;
+    if (!pending || ![pending.key, ...pending.releaseKeys].includes(shortcutKey(event))) return false;
     event.preventDefault(); this.cancel();
     if (!pending.opened && this.valid(pending.context)) this.paste(pending.context);
     return true;

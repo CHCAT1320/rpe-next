@@ -22,6 +22,15 @@ export interface StoredProject {
   pinned?: boolean;
   archived?: boolean;
   bytes?: number;
+  /**
+   * The folder names the assets were imported from, and the editor scroll position.
+   *
+   * Both are written by `save()` and read back when a project is reopened, so they are part of the
+   * stored record even though the library's own listing never looks at them. They are optional
+   * because a record saved by an older build, or a draft the recovery path supplies, carries neither.
+   */
+  assetFolders?: string[];
+  viewState?: { lineIndex?: number };
 }
 
 /** The denormalized record the chart library lists, kept in step with its project. */
@@ -72,7 +81,7 @@ function database(): Promise<IDBDatabase> {
 async function access<T>(stores: StoreName[], mode: IDBTransactionMode, action: (transaction: IDBTransaction) => IDBRequest<T> | undefined): Promise<T | undefined> {
   const connection = await database();
   return new Promise<T | undefined>((resolve, reject) => {
-    const transaction = connection.transaction(stores, mode);
+    const transaction = connection.transaction(stores, mode, mode === 'readwrite' ? { durability: 'strict' } : undefined);
     let result: IDBRequest<T> | undefined;
     try { result = action(transaction); }
     catch (error) { transaction.abort(); connection.close(); reject(error); return; }
@@ -82,8 +91,50 @@ async function access<T>(stores: StoreName[], mode: IDBTransactionMode, action: 
   });
 }
 
+/** The reply the background worker posts back once it has written (or failed to write) a project. */
+interface WorkerReply {
+  ok: boolean;
+  message?: string;
+}
+
+/**
+ * The in-flight write chain per project id.
+ *
+ * Saves of the same document must not overlap, so each entry is the tail promise of that project's
+ * chain and the entry is dropped once the chain drains.
+ */
+const projectWrites = new Map<string, Promise<void>>();
+
+/**
+ * Saves a project, queued behind any write already in flight for the same project.
+ *
+ * A rejected predecessor is swallowed rather than chained, so one failed save does not fail every
+ * later save of the same project; the returned promise still reports this save's own outcome.
+ */
+export function storeProject(project: StoredProject): Promise<void> {
+  const previous: Promise<void> = projectWrites.get(project.id) ?? Promise.resolve();
+  const operation: Promise<void> = previous.catch(() => {}).then(() => writeProject(project));
+  projectWrites.set(project.id, operation);
+  const release = (): void => { if (projectWrites.get(project.id) === operation) projectWrites.delete(project.id); };
+  operation.then(release, release);
+  return operation;
+}
+
+/** Runs the save in a worker when the platform has one, and on this thread when it does not. */
+async function writeProject(project: StoredProject): Promise<void> {
+  if (typeof Worker === 'undefined') return storeProjectDirect(project);
+  return new Promise<void>((resolve, reject) => {
+    const worker = new Worker(new URL('./library-worker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (event: MessageEvent<WorkerReply>) => { worker.terminate(); event.data.ok ? resolve() : reject(new Error(event.data.message)); };
+    worker.onerror = event => { worker.terminate(); reject(new Error(event.message || '后台保存失败，请重试')); };
+    worker.onmessageerror = () => { worker.terminate(); reject(new Error('后台保存数据无法读取')); };
+    try { worker.postMessage(project); }
+    catch (error) { worker.terminate(); reject(error); }
+  });
+}
+
 /** Saves a project and refreshes its summary, rendering a new thumbnail on the way. */
-export async function storeProject(project: StoredProject): Promise<void> {
+export async function storeProjectDirect(project: StoredProject): Promise<void> {
   const thumbnail = await projectThumbnail(project);
   await access(['projects', 'summaries'], 'readwrite', transaction => {
     transaction.objectStore('projects').put(project);
