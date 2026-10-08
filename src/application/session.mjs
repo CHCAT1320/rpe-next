@@ -95,6 +95,7 @@ export class EditorSession extends EventTarget {
   selectionState() { return selectionState(this); }
 
   commit(label, chart, beforeSelection = this.selectionState()) {
+    if (this.collaboration) return this.collaboration.commit(label, chart, beforeSelection);
     if (this.history.commit(label, chart, { beforeSelection, afterSelection: this.selectionState() })) {
       const time = Number.isFinite(this.editSeconds) ? Math.max(0, this.editSeconds) : 0;
       this.recentEdits.push({ start: time, end: time, label });
@@ -256,6 +257,7 @@ export class EditorSession extends EventTarget {
   }
 
   travel(direction) {
+    if (this.collaboration) return this.collaboration.travel(direction);
     const command = (direction === 'undo' ? this.history.undoStack : this.history.redoStack).at(-1);
     if (!command) return;
     const current = this.selectionState(); const source = this.chart;
