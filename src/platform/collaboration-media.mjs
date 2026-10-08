@@ -13,7 +13,7 @@ async function parallelJobs(jobs, run, signal) {
 }
 
 export class CollaborationMedia extends EventTarget {
-  constructor({ request = fetch } = {}) { super(); this.request = request; this.received = new Map(); }
+  constructor({ request = globalThis.fetch.bind(globalThis) } = {}) { super(); this.request = request; this.received = new Map(); }
   configure(server, room, token) {
     this.close(); this.received.clear();
     const url = new URL(server); url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';

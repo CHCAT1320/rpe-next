@@ -6,6 +6,25 @@ import { CollaborationMedia } from '../src/platform/collaboration-media.mjs';
 const bytes = Uint8Array.of(1, 2, 3, 4);
 const manifest = { id: 'a'.repeat(32), chunkSize: 1024 * 1024, files: [{ name: 'cover.png', size: bytes.length, hash: createHash('sha256').update(bytes).digest('hex') }] };
 
+test('默认请求在上传和下载时保留浏览器 fetch 要求的全局调用对象', async context => {
+  const requests = [];
+  context.mock.method(globalThis, 'fetch', async function (url, options) {
+    if (this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    requests.push(options.method);
+    if (url.pathname.endsWith('/prepare')) return Response.json({ id: manifest.id, chunkSize: manifest.chunkSize, missing: [manifest.files[0].hash] });
+    if (url.pathname.includes('/upload/')) return Response.json({ received: bytes.length });
+    if (url.pathname.includes('/commit/')) return Response.json(manifest);
+    return new Response(bytes);
+  });
+  const media = new CollaborationMedia();
+  context.after(() => media.close());
+  media.configure('wss://example.com/collab', 'room', 'test-secret');
+  await media.publish([['cover.png', bytes]]);
+  let installed = false;
+  await media.receive(manifest, async (name, received) => { assert.equal(name, 'cover.png'); assert.deepEqual(received, bytes); installed = true; });
+  assert.equal(installed, true); assert.deepEqual(requests, ['POST', 'PUT', 'POST', 'GET']);
+});
+
 test('HTTP 素材只将令牌放入认证头，临时下载失败重试且不重复安装相同文件', async () => {
   let requests = 0; let installed = 0;
   const media = new CollaborationMedia({ request: async (url, options) => {
