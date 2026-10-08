@@ -125,7 +125,7 @@ export class EventInteraction {
       }
     }
     const hit = this.hit(point);
-    this.canvas.style.cursor = hit && (Math.abs(point.y - hit.y) < 6 || Math.abs(point.y - hit.y - hit.height) < 6) ? 'ns-resize' : hit ? 'move' : 'crosshair';
+    this.canvas.style.cursor = hit && (Math.abs(point.y - hit.y) < 6 || Math.abs(point.y - hit.y - hit.height) < 6) ? 'ns-resize' : hit ? 'move' : 'default';
     this.timeline.changed();
   }
 
