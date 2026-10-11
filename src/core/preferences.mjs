@@ -1,4 +1,5 @@
 import { normalizeShortcutKey, parseShortcut } from './shortcut-spec.mjs';
+import { validFpsLimit } from './frame-timing.mjs';
 
 export const DEFAULT_HOTKEYS = {
   AddTap: 'Q', AddDrag: 'W', AddFlick: 'E', AddHold: 'R', AddEvent: 'R', Pause: 'SPACE', Save: 'LEFTCTRL&S',
@@ -48,7 +49,7 @@ export function migratePreferences(settingsText = '{}', hotkeyText = '', uiText 
       ratioWidth: finiteRange(originalSettings.ratioWidth, 1, 100, 3), ratioHeight: finiteRange(originalSettings.ratioHeight, 1, 100, 2),
       barWidth: finiteRange(originalSettings.BarWidth, 0.5, 10, 3), barAlpha: finiteRange(originalSettings.BarAlpha, 0.1, 2, 1),
       highlight: originalSettings.HighLight !== false, autoplayView: originalSettings.autoplayT !== false,
-      fpsLimit: finiteRange(originalSettings.FpsLimit, 15, 240, 120),
+      fpsLimit: validFpsLimit(originalSettings.FpsLimit) ? originalSettings.FpsLimit : 0,
       showHotkey: originalSettings.showHotkey !== false,
       showGameUI: originalSettings.showViewUI === true,
     },

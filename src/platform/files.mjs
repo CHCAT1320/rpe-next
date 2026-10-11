@@ -1,11 +1,13 @@
-import { serializeChart } from '../core/chart.mjs';
+import { serializeChart, stringifyPreservingNumbers, EVENT_TYPES, EXTENDED_TYPES } from '../core/chart.mjs';
 import { parseDocument } from '../core/formats.mjs';
-import { readZip, writeZip } from './archive.mjs';
+import { readZip, writeZip, crc32 } from './archive.mjs';
 import { decodeLegacy, parseInfo } from './legacy-text.mjs';
 import { serializeShaderEvent } from '../core/shader-events.mjs';
 import { expandTrajectory } from '../application/trajectory-commands.mjs';
 import { TempoMap } from '../core/tempo.mjs';
 import { beatValue } from '../core/beat.mjs';
+import { NOISE_TRACKS } from '../core/noise-areas.mjs';
+import { integerChartAlpha } from '../core/alpha-values.mjs';
 
 export async function openFiles(fileList) {
   const files = [...fileList];
@@ -22,6 +24,10 @@ export async function openFiles(fileList) {
   }
   if (!candidates.length) throw new Error(errors.join('\n') || '找不到 RPE JSON 谱面');
   attachExternalEffects(candidates, assets);
+  for (const candidate of candidates) if (candidate.chart.rpeNextLegacySource?.format === 'phigros-v3') {
+    const references = resourceReferences(candidate.chart, assets, candidate.name);
+    candidate.chart.META = { ...candidate.chart.META, name: candidate.name.replaceAll('\\', '/').split('/').at(-1).replace(/\.json$/i, ''), ...references };
+  }
   return { candidates, assets };
 }
 
@@ -42,18 +48,22 @@ export function attachExternalEffects(candidates, assets) {
 }
 
 export function assetBytes(assets, name, chartName = '') {
+  return assets.get(assetPath(assets, name, chartName)) ?? null;
+}
+
+function assetPath(assets, name, chartName = '') {
   if (!name) return null;
   const chartPath = chartName.replaceAll('\\', '/');
   const directory = chartPath.includes('/') ? chartPath.slice(0, chartPath.lastIndexOf('/') + 1) : '';
-  const direct = assets.get(directory + name) ?? assets.get(name);
-  if (direct) return direct;
+  if (assets.has(directory + name)) return directory + name;
+  if (assets.has(name)) return name;
   const normalized = normalizePath(name);
   for (const target of [normalizePath(directory + name), normalized]) {
     const exact = [...assets].filter(([path]) => normalizePath(path) === target);
-    if (exact.length === 1) return exact[0][1];
+    if (exact.length === 1) return exact[0][0];
   }
   const matches = [...assets].filter(([path]) => normalizePath(path).split('/').at(-1) === normalized.split('/').at(-1));
-  return matches.length === 1 ? matches[0][1] : null;
+  return matches.length === 1 ? matches[0][0] : null;
 }
 
 export function download(blob, name) {
@@ -68,11 +78,44 @@ export function download(blob, name) {
 }
 
 export function exportChart(chart, name) {
-  download(new Blob([serializeChart(chart)], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
+  download(new Blob([serializeChart(orderedExportChart(chart))], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
+}
+
+function orderedExportChart(chart) {
+  chart = integerChartAlpha(chart);
+  const startBeat = event => {
+    const time = event?.startTime ?? event?.start;
+    return Array.isArray(time) ? beatValue(time) : Number.isFinite(time) ? time : 0;
+  };
+  const ordered = events => [...events].sort((left, right) => startBeat(left) - startBeat(right));
+  const shader = event => {
+    if (!event?.vars) return event;
+    return { ...event, vars: Object.fromEntries(Object.entries(event.vars).map(([name, value]) => [name,
+      Array.isArray(value) && value.length && value.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && ('startTime' in entry || 'start' in entry)) ? ordered(value) : value])) };
+  };
+  const effects = events => ordered(events).map(shader);
+  const orderedLayer = layer => {
+    if (!layer) return layer;
+    const output = { ...layer };
+    for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {
+      if (Array.isArray(layer[type])) output[type] = type === 'paintEvents' ? effects(layer[type]) : ordered(layer[type]);
+    }
+    return output;
+  };
+  return { ...chart, judgeLineList: (chart.judgeLineList ?? []).map(line => ({ ...line,
+    eventLayers: line.eventLayers?.map(orderedLayer), extended: orderedLayer(line.extended) })),
+    ...(Array.isArray(chart.blockAreaList) ? { blockAreaList: chart.blockAreaList.map(area => ({ ...area,
+      ...Object.fromEntries(NOISE_TRACKS.filter(([type]) => Array.isArray(area[type])).map(([type]) => [type, ordered(area[type])])) })) } : {}),
+    ...(Array.isArray(chart.effects) ? { effects: effects(chart.effects) } : {}),
+    ...(Array.isArray(chart.shaderEvents) ? { shaderEvents: effects(chart.shaderEvents) } : {}),
+    ...(Array.isArray(chart.META?.effects) ? { META: { ...chart.META, effects: effects(chart.META.effects) } } : {}) };
 }
 
 export function legacyChart(chart, splitSettings = {}) {
+  if (chart.blockAreaList?.length) throw new Error('原 RPE 不支持噪域，请在导出窗口明确选择移除噪域后导出');
   const next = structuredClone(chart);
+  delete next.blockAreaList;
+  delete next.noiseAreaOptions;
   if (next.META.RPEVersion >= 200) next.META = { ...next.META, RPEVersion: 170 };
   const tempo = new TempoMap(next.BPMList);
   for (const line of next.judgeLineList ?? []) {
@@ -84,7 +127,7 @@ export function legacyChart(chart, splitSettings = {}) {
       for (const event of trajectories) for (const [type, fragments] of expandTrajectory(event, tempo, line.bpmfactor ?? 1, splitSettings)) layer[type] = [...(layer[type] ?? []), ...fragments].sort((left, right) => beatValue(left.startTime) - beatValue(right.startTime));
     }
   }
-  return next;
+  return orderedExportChart(next);
 }
 
 export function exportLegacyChart(chart, name) {
@@ -110,16 +153,21 @@ function matchingInfo(assets, chartName) {
   });
 }
 
-export function resourceReferences(chart, assets, chartName, fallback = {}) {
+function primaryInfo(assets, chartName) {
   const matches = matchingInfo(assets, chartName);
-  const info = matches.length === 1 ? parseInfo(decodeLegacy(matches[0][1])) : fallback;
+  return matches.find(([name]) => name.toLowerCase() === 'info.txt') ?? (matches.length === 1 ? matches[0] : null);
+}
+
+export function resourceReferences(chart, assets, chartName, fallback = {}) {
+  const match = primaryInfo(assets, chartName);
+  const info = match ? parseInfo(decodeLegacy(match[1])) : fallback;
   const normalizedChart = normalizePath(chartName);
   const directory = normalizedChart.split('/').slice(0, -1).join('/');
   const stem = normalizedChart.split('/').at(-1).replace(/\.[^.]+$/, '');
   const infoReference = key => {
     const value = info[key];
-    if (!value || matches.length !== 1) return value;
-    const infoDirectory = matches[0][0].replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    if (!value || !match) return value;
+    const infoDirectory = match[0].replaceAll('\\', '/').split('/').slice(0, -1).join('/');
     return normalizePath(infoDirectory) === directory ? value : (infoDirectory ? infoDirectory + '/' : '') + value;
   };
   const infer = extensions => {
@@ -137,7 +185,25 @@ export function mediaType(name) {
   return ({ mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac', opus: 'audio/ogg', webm: 'audio/webm', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp', avif: 'image/avif' })[extension] ?? 'application/octet-stream';
 }
 
-export function packageEntries(chart, assets, chartName) {
+function packageInfo(chart, assets, chartName, outputName, identifier) {
+  const match = primaryInfo(assets, chartName);
+  const info = match ? parseInfo(decodeLegacy(match[1])) : {};
+  const meta = chart.META;
+  const references = resourceReferences(chart, assets, chartName);
+  const singleLine = value => String(value ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  const candidate = String(identifier || info.Path || meta.id || '').trim();
+  const path = /^(?!\.{1,2}$)[^<>:"/\\|?*\x00-\x1f]{1,80}$/.test(candidate) && !/[. ]$/.test(candidate)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(candidate)
+    ? candidate : String(crc32(new TextEncoder().encode(`${meta.name ?? ''}\n${chartName}`)));
+  const fields = { Name: meta.name ?? info.Name ?? '', Path: path,
+    Song: assetPath(assets, references.song, chartName) ?? '', Picture: assetPath(assets, references.background, chartName) ?? '',
+    Chart: outputName, Level: meta.level ?? info.Level ?? '', Composer: meta.composer ?? info.Composer ?? '',
+    Charter: meta.charter ?? info.Charter ?? '', Illustration: meta.illustration ?? info.Illustration ?? '' };
+  return new TextEncoder().encode('#\n' + Object.entries(fields).map(([key, value]) => `${key}: ${singleLine(value)}\n`).join(''));
+}
+
+export function packageEntries(chart, assets, chartName, options = {}) {
+  chart = orderedExportChart(chart);
   const output = new Map(assets);
   let outputName = chartName;
   if (chart.rpeNextLegacySource) {
@@ -146,15 +212,19 @@ export function packageEntries(chart, assets, chartName) {
     let suffix = 1;
     while ([...output.keys()].some(name => normalizePath(name) === normalizePath(outputName))) outputName = `${stem}.rpe-${suffix++}.json`;
   }
-  output.set(outputName, new TextEncoder().encode(serializeChart(chart)));
+  output.set(outputName, new TextEncoder().encode(serializeChart(chart, { compact: options.compact !== false })));
   const effects = [chart.effects, chart.shaderEvents, chart.META?.effects].filter(Array.isArray).flat();
   for (const [lineIndex, line] of (chart.judgeLineList ?? []).entries()) for (const event of line.extended?.paintEvents ?? []) effects.push(serializeShaderEvent(event, lineIndex));
+  effects.sort((left, right) => {
+    const start = event => { const value = event?.startTime ?? event?.start; return Array.isArray(value) ? beatValue(value) : Number.isFinite(value) ? value : 0; };
+    return start(left) - start(right);
+  });
   if (effects.length || Array.isArray(chart.effects)) {
     const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
     const path = directory ? `${directory}/extra.json` : 'extra.json';
     const existing = [...output.keys()].find(name => normalizePath(name) === normalizePath(path));
     const extra = existing ? JSON.parse(decodeLegacy(output.get(existing))) : {};
-    output.set(existing ?? path, new TextEncoder().encode(JSON.stringify({ ...extra, effects }, null, 2)));
+    output.set(existing ?? path, new TextEncoder().encode(stringifyPreservingNumbers({ ...extra, effects }, options.compact === false ? 2 : 0)));
   }
   if (outputName !== chartName) {
     for (const [name, bytes] of matchingInfo(assets, chartName)) {
@@ -164,6 +234,8 @@ export function packageEntries(chart, assets, chartName) {
       output.set(name, new TextEncoder().encode(info.replace(/^(Chart:[ \t]*)[^\r\n]*/m, (match, prefix) => prefix + reference)));
     }
   }
+  for (const name of output.keys()) if (name.toLowerCase() === 'info.txt') output.delete(name);
+  output.set('info.txt', packageInfo(chart, assets, chartName, outputName, options.identifier));
   return output;
 }
 
@@ -174,10 +246,11 @@ export function exportPackage(chart, assets, chartName) {
 export function createChartExport(chart, assets, chartName, options = {}) {
   const { format = 'pez', compatibility = 'next', name = chartName, split = {} } = options;
   if (!['json', 'pez'].includes(format) || !['next', 'rpe'].includes(compatibility)) throw new Error('导出格式无效');
-  const snapshot = compatibility === 'rpe' ? legacyChart(chart, split) : { ...chart };
+  const source = compatibility === 'rpe' && options.removeNoiseAreas ? { ...chart, blockAreaList: [] } : chart;
+  const snapshot = compatibility === 'rpe' ? legacyChart(source, split) : orderedExportChart(chart);
   delete snapshot.chartTime;
   const stem = String(name).trim().replace(/\.(json|pez|pec|zip)$/i, '');
   if (!stem) throw new Error('请输入导出文件名');
-  const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName)) : new Blob([serializeChart(snapshot)], { type: 'application/json' });
+  const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName, options)) : new Blob([serializeChart(snapshot, { compact: options.compact !== false })], { type: 'application/json' });
   return { blob, name: stem + '.' + format };
 }

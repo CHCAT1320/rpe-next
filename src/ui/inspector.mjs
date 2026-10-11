@@ -1,6 +1,7 @@
 import { beatValue, formatBeat, parseBeat, fromNumber } from '../core/beat.mjs';
 import { NOTE_NAMES, noteIsAbove } from '../core/chart.mjs';
 import { numericWheel } from './numeric-wheel.mjs';
+import { beatInputControl } from './beat-input.mjs';
 import { visibleBeats, visibleSeconds } from '../core/note-editing.mjs';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.mjs';
 
@@ -60,10 +61,10 @@ export function renderProperties(session, reportError) {
     if (key === 'above') input.value = noteIsAbove(note) ? 1 : note.type === 2 ? 0 : 2;
     if (beatDuration && note.visibleTime < 999999) input.value = formatBeat(fromNumber(visibleBeats(note, session.tempo, selectedFactor)));
     if (duration) { input.min = 0; input.title = '999999 表示无限；首次滚轮调节重置为 0，之后每次增减一横线间隔拍'; }
-    const apply = () => {
+    const apply = (quiet = false) => {
       try {
         if (key === 'lineIndex') { session.moveSelectionToLine(Number(input.value)); return; }
-        const value = kind === 'beat' ? parseBeat(input.value) : beatDuration ? beatValue(parseBeat(input.value)) : Number(input.value);
+        const value = kind === 'beat' ? parseBeat(input.value) : beatDuration ? beatValue(parseBeat(input.value)) : key === 'alpha' ? Math.trunc(Number(input.value)) : Number(input.value);
         if (kind !== 'beat' && (input.value.trim() === '' || !Number.isFinite(value))) throw new Error('请输入有限数字');
         if (key === 'size' && value <= 0) throw new Error('大小必须大于零');
         applyNoteTransform(session, `修改${labelText}`, (current, entry) => {
@@ -80,10 +81,10 @@ export function renderProperties(session, reportError) {
           if (key === 'endTime' && (current.type !== 2 || beatValue(value) < beatValue(current.startTime))) throw new Error('结束拍只能用于 Hold，且不能早于开始拍');
           return next;
         });
-      } catch (error) { reportError(error); input.value = key === 'lineIndex' ? selectedLineIndex : kind === 'beat' ? formatBeat(note[key]) : note[key] ?? 0; }
+      } catch (error) { if (!quiet) { reportError(error); input.value = key === 'lineIndex' ? selectedLineIndex : kind === 'beat' ? formatBeat(note[key]) : note[key] ?? 0; } }
     };
-    input.onchange = apply;
-    input.oninput = () => { if (input.value.trim()) apply(); };
+    input.onchange = () => apply();
+    input.oninput = event => { if (!event.isComposing && input.value.trim()) apply(kind === 'beat' || beatDuration); };
     input.onfocus = () => { session.liveNoteEdit = true; };
     input.onblur = () => { session.liveNoteEdit = false; queueMicrotask(() => { if (!session.liveNoteEdit) renderProperties(session, reportError); }); };
     if (kind === 'number') numericWheel(input, step);
@@ -101,7 +102,7 @@ export function renderProperties(session, reportError) {
       unit.append(new Option('秒', 'seconds'), new Option('拍', 'beats')); unit.value = session.visibleTimeUnit ?? 'seconds';
       unit.onchange = () => { session.visibleTimeUnit = unit.value; session.liveNoteEdit = false; renderProperties(session, reportError); };
       controls.append(input, unit); label.append(controls);
-    } else label.append(input);
+    } else label.append(kind === 'beat' ? beatInputControl(input, () => session.division, reportError) : input);
     container.append(label);
   }
 }

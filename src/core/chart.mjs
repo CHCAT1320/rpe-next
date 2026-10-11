@@ -1,8 +1,10 @@
 import { beatValue, fromNumber } from './beat.mjs';
+import { integerChartAlpha } from './alpha-values.mjs';
 import { TempoMap } from './tempo.mjs';
 import { BLOCK_EASE_TYPES } from './block-area.mjs';
 import { sampleCurveTrajectory } from './curve-trajectory.mjs';
 import { trajectorySplitSettings } from './trajectory-simplify.mjs';
+import { validateNoiseAreas, diagnoseNoiseAreas, normalizeNoiseAreas, NOISE_VERSION } from './noise-areas.mjs';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'];
 export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'];
@@ -11,6 +13,17 @@ export const NOTE_NAMES = { 1: 'Tap', 2: 'Hold', 3: 'Flick', 4: 'Drag' };
 // BlockArea is Phigros' private `blockAreaList` extension. rpe-next keeps its editable copy under
 // a different top-level key so it stays distinguishable from the untouched source document that
 // official imports retain at `rpeNextLegacySource.document.blockAreaList`.
+//
+// `blockAreaList` and `blockAreas` are therefore BOTH live keys on the editable chart, holding the
+// same feature at two different fidelities, and a merge of the two ports must keep both:
+//
+//   `blockAreaList` — the noise-area port. `convertOfficialNoiseAreas` rewrites each entry into the
+//     editable shape (rect + `activeIntervals` + converted event tracks, times in beats) and bumps
+//     `META.RPEVersion` to `NOISE_VERSION`. This is what the noise editor and `noisePreview` read.
+//   `blockAreas` — the block-preview port. It is a `structuredClone` of the official entries exactly
+//     as imported (times still in seconds), which is what `BlockPipeline` and `drawBlocks` read.
+//
+// Neither is a legacy alias of the other, so `assertChart` validates each with its own validator.
 const BLOCK_EVENT_LISTS = [
   { name: 'rotateEvents', easeTypes: ['easeType'], vector: null, anchor: true },
   { name: 'moveEvents', easeTypes: ['easeTypeX', 'easeTypeY'], vector: 'endPosition', anchor: false },
@@ -30,7 +43,7 @@ export function createLine(name = '判定线') {
 
 export function createChart() {
   return { META: { RPEVersion: 170, name: '未命名谱面', composer: '', charter: '', illustration: '', level: '', song: '', background: '', offset: 0 },
-    BPMList: [{ bpm: 120, startTime: [0, 0, 1] }], judgeLineGroup: ['Default'], judgeLineList: [createLine('Line 1')], blockAreas: [] };
+    BPMList: [{ bpm: 120, startTime: [0, 0, 1] }], judgeLineGroup: ['Default'], judgeLineList: [createLine('Line 1')], blockAreaList: [], blockAreas: [] };
 }
 
 export function createNote(type, beat, positionX, endBeat = beat + 1) {
@@ -42,24 +55,27 @@ export function parseChart(text) {
   let chart;
   try { chart = JSON.parse(text.replace(/^\uFEFF/, '')); }
   catch { throw new Error('无效的 RPE JSON 文档'); }
+  if (chart.blockAreaList != null) chart.blockAreaList = normalizeNoiseAreas(chart.blockAreaList);
   assertChart(chart);
-  return chart;
+  return integerChartAlpha(chart);
 }
 
 export function noteIsAbove(note) {
   return Number(note.above ?? 1) === 1;
 }
 
-export function serializeChart(chart) {
+export function serializeChart(chart, { compact = false } = {}) {
   assertChart(chart);
-  return stringifyPreservingNumbers(chart) + '\n';
+  chart = integerChartAlpha(chart);
+  const snapshot = chart.blockAreaList?.length ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, NOISE_VERSION) } } : chart;
+  return stringifyPreservingNumbers(snapshot, compact ? 0 : 2) + (compact ? '' : '\n');
 }
 
-export function stringifyPreservingNumbers(value) {
-  const ordinary = JSON.stringify(value, null, 2);
+export function stringifyPreservingNumbers(value, space = 2) {
+  const ordinary = JSON.stringify(value, null, space);
   let marker = '\u0000rpe-negative-zero\u0000';
   while (ordinary.includes(JSON.stringify(marker))) marker += '#';
-  return JSON.stringify(value, (key, entry) => Object.is(entry, -0) ? marker : entry, 2).replaceAll(JSON.stringify(marker), '-0');
+  return JSON.stringify(value, (key, entry) => Object.is(entry, -0) ? marker : entry, space).replaceAll(JSON.stringify(marker), '-0');
 }
 
 function assertBlockAreas(blocks) {
@@ -108,6 +124,11 @@ export function assertChart(chart) {
   assertBlockAreas(chart.blockAreas);
   new TempoMap(chart.BPMList);
   if (chart.META.offset !== undefined && !Number.isFinite(chart.META.offset)) throw new Error('META.offset 必须为毫秒数');
+  if (chart.blockAreaList != null) validateNoiseAreas(chart.blockAreaList);
+  if (chart.noiseAreaOptions !== undefined) {
+    if (!chart.noiseAreaOptions || typeof chart.noiseAreaOptions !== 'object' || Array.isArray(chart.noiseAreaOptions)) throw new Error('noiseAreaOptions 必须为对象');
+    for (const key of ['ignoreTripleInversion']) if (chart.noiseAreaOptions[key] !== undefined && typeof chart.noiseAreaOptions[key] !== 'boolean') throw new Error('noiseAreaOptions.' + key + ' 必须为布尔值');
+  }
   (chart.judgeLineList ?? []).forEach((line, lineIndex) => {
     const path = `judgeLineList[${lineIndex}]`;
     if (!line || typeof line !== 'object') throw new Error(`${path}: 无效判定线`);
@@ -157,6 +178,7 @@ export function assertChart(chart) {
 
 export function diagnose(chart) {
   const issues = [];
+  issues.push(...diagnoseNoiseAreas(chart.blockAreaList ?? []));
   const addIssue = (issue, severity = 'warning') => issues.push({ severity, ...issue });
   const bpmBeats = new Set();
   for (const [index, entry] of chart.BPMList.entries()) {
