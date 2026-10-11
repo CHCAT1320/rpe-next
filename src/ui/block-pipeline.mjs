@@ -490,9 +490,16 @@ export class BlockPipeline {
    * resolution *is* the flame border's resolution, and a coarser one also makes the ring thicker in
    * screen terms. `effectDivisor` makes that 4 adjustable; the block masks keep the game's `Screen/8`,
    * because changing them would move block coverage rather than just the border.
+   *
+   * `pingA`/`pingB` follow it too. They are not independent targets: `Start` allocates all three from
+   * the *same* `w / 4, h / 4` pair, and `RenderEffects` uses the pings purely as the ping-pong partner
+   * of `effectRT` — every edge round and every glow round reads one and writes the other. Leaving them
+   * at 4 while `effectRT` moved would desynchronise the two: `_DilateTexelSize` is derived from
+   * `effectRT` (see `renderEffects`), so each dilation step would offset by a texel of a differently
+   * sized grid, and the final `.y`-only blit would resample a mismatched mask.
    */
   targetDivisor(target) {
-    if (target.key !== 'effectRT') return target.divisor;
+    if (target.key !== 'effectRT' && target.key !== 'pingA' && target.key !== 'pingB') return target.divisor;
     const divisor = Number(this.effectDivisor);
     return Number.isFinite(divisor) && divisor >= 1 ? Math.floor(divisor) : target.divisor;
   }
@@ -652,8 +659,14 @@ export class BlockPipeline {
     // `BlockSprite` reads the renderer colour from the vertex colour, not a `_Color` uniform:
     // Unity bakes SpriteRenderer.color into the sprite's vertex stream. A constant vertex attribute
     // reproduces that without re-uploading the quad per block.
+    //
+    // `behavior.md` §4 (and `states.md` §4.3) pin the two `DisabledBlockShow` endpoints: a normal
+    // block fades `(1,1,1,0) -> (1,1,1,1)`, a subtract block `(1,0,1,0.1) -> (1,1,1,0.1)`. So the
+    // subtract fade moves the *green* channel magenta -> white while `alpha` stays pinned at 0.1 —
+    // that 0.1 is what `SubtractBlockBlender`'s 0.09/0.12 thresholds bracket, so ramping it from 0
+    // would put every freshly-appeared subtract block on the wrong side of the attribution test.
     const color = block.isSubtract
-      ? [1, 1 - coverage, 1, 0.1 * coverage]     // magenta -> white, alpha pinned at 0.1
+      ? [1, coverage, 1, 0.1]                    // magenta -> white, alpha pinned at 0.1
       : [1, 1, 1, coverage];
     const location = gl.getAttribLocation(program.handle, 'in_COLOR0');
     if (location >= 0) gl.vertexAttrib4f(location, color[0], color[1], color[2], color[3]);

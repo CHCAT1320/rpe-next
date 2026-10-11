@@ -1056,12 +1056,15 @@ element('#block-effect-divisor').addEventListener('change', event => {
 });
 
 /**
- * Set the denominator of `effectRT`'s `Screen/4` — the resolution of the edge ring and the glow.
+ * Set the denominator of the `Screen/4` effect targets — the resolution of the edge ring and the glow.
  *
  * `EdgeMask` dilates by one texel of that target, so this number controls both the sharpness of the
- * "flame border" and how thick it is in screen terms; the block masks deliberately stay at the game's
- * `Screen/8` so changing this cannot move block coverage. A live pipeline only picks the value up on
- * its next `resize`, which recomputes sizes every frame, so nothing has to be recreated.
+ * "flame border" and how thick it is in screen terms. It covers `effectRT` **and** its `pingA`/`pingB`
+ * ping-pong partners, because `Start` allocates all three from the same `w/4, h/4` pair and the
+ * dilation offset is derived from `effectRT`; moving one without the others would offset each round by
+ * a texel of a different grid. The block masks deliberately stay at the game's `Screen/8` so changing
+ * this cannot move block coverage. A live pipeline only picks the value up on its next `resize`, which
+ * recomputes sizes every frame, so nothing has to be recreated.
  */
 function setBlockEffectDivisor(divisor) {
   const value = Number.isFinite(divisor) && divisor >= 1 ? Math.floor(divisor) : 4;

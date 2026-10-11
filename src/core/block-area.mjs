@@ -42,59 +42,66 @@ export const BLOCK_EASE_TYPES = 15;
 // instead of duplicated. Indices are rpe-next's `easing(progress, type)` types.
 const EASE_MAP = { 0: 1, 1: 5, 2: 4, 4: 9, 5: 8, 7: 11, 8: 10, 10: 15, 11: 14 };
 
-// These four lookup tables are never written by the game, so they stay at their zero initialiser
-// and the eased progress is always 0: the segment holds its start value and snaps at the next
-// event. Real charts rely on this — 3, 6 and 13 all appear in the only traceable block corpus.
-const CONSTANT_ZERO = new Set([3, 6, 9, 13]);
+// `behavior.md` §2.1.1 records TWO definitions for the same 0..14 enum and says which one this
+// repository implements:
+//
+//   A — APK fact (`GetEase.Instantiation`): the main loop runs for t = 1, 4, 7, 10 and downsamples
+//       `t + 2` *inside that loop*, so 3/6/9/12 are all "composite" tables (halved decimation with a
+//       50..57 zero break and three samples read out of bounds at 47..49). Only 13 is a dead table.
+//   B — the community table, which the dump explicitly adopts for preview/reproduction because A is
+//       an engine-bug artefact: 3/6/9/12 are the symmetric in-out curves.
+//
+// This port follows B. Types 3/6/9 reuse rpe-next's in-out curves; 12 has no equivalent in
+// `easing.mjs`, so `inOutQuint` below supplies it. A's composite tables are deliberately NOT built:
+// three of their samples are uninitialised heap and therefore not reproducible at all.
+const EASE_MAP_IN_OUT = { 3: 7, 6: 12, 9: 13 };
+
+/** easeType 12 under B: in-out-quint, the one in-out curve `easing.mjs` does not already carry. */
+const inOutQuint = (progress) => (progress < 0.5
+  ? 16 * progress ** 5
+  : 1 - ((-2 * progress + 2) ** 5) / 2);
+
+/**
+ * The one table that really is constant. `behavior.md` v20 corrected an earlier reading that put
+ * 3/6/9 here: the downsample runs for every `t`, not just `t = 10`, so those three are composite
+ * tables in the APK and in-out curves under B. Only `13` is genuinely zero-initialised and never
+ * written; `14` is the table of ones.
+ */
+const CONSTANT_ZERO = new Set([13]);
 
 /** easeType 14 is a table of ones: the segment jumps straight to the next value. */
 const CONSTANT_ONE = 14;
 
 const clamp01 = (value) => Math.max(0, Math.min(1, value));
 
-// easeType 12 is a downsampled hybrid, not a normal curve: samples 50..57 are never written (they
-// stay 0, between two ~0.5 shelves) and samples 47..49 read source indices 102/104/106, i.e. past
-// the end of the source table, so the real values are uninitialised heap. Only the shipped
-// formulas are reproducible; the three out-of-range samples are clamped to the last valid source
-// sample and marked approximate. easeType 12 does not occur in the only traceable block corpus.
-const EASE_12 = buildEase12();
-
-function buildEase12() {
-  const table = new Array(101).fill(0);
-  const inQuint = (index) => (index / 100) ** 5;
-  const outQuint = (index) => 1 - (1 - index / 100) ** 5;
-  const source = (index) => inQuint(Math.min(index, 100)); // index 102/104/106 clamped, see above
-  for (let offset = 0; offset <= 49; offset++) table[offset] = source(8 + 2 * offset) * 0.5;
-  for (let offset = 0; 58 + offset <= 100; offset++) table[58 + offset] = outQuint(8 + 2 * offset) * 0.5 + 0.5;
-  table[100] = 1;
-  return table;
-}
-
-function ease12(progress) {
-  const position = clamp01(progress) * 100;
-  const index = Math.min(99, Math.floor(position));
-  return EASE_12[index] + (EASE_12[index + 1] - EASE_12[index]) * (position - index);
-}
-
 /**
  * The game's eased progress for a block curve.
  *
- * `behavior.md` says the block system calls `GetEaseWithProgress` (the entry that linearly
- * interpolates the 101-point table), while the decompiled `CalculateEasedProgress` names
- * `GetEaseWithIndex` (an int-indexed, non-interpolating entry). Taken literally the latter would
- * truncate progress to 0 or 1 and reduce every block motion to a binary snap, which contradicts
- * the decompiled table walk; the call site is assumed mislabelled. This port implements the
- * interpolating semantics. See the plan's §3.5 / §9-R1.
+ * The APK calls `GetEaseWithProgress`, which linearly interpolates a 101-point table built once at
+ * startup; `behavior.md` §2.2 notes a formula is "almost equivalent" on `u ∈ [0, 1]` (max deviation
+ * ~1e-4, from the table's per-0.01 interpolation) and that three behaviours must still be copied:
+ * `13` stays 0, `14` stays 1, and the composite tables' break/out-of-range samples are not
+ * reproducible. Following §2.1.1 this port uses the community curves for `3/6/9/12` rather than
+ * those composite tables, so only the `13`/`14` rules carry over.
  */
 export function blockEase(easeType, progress) {
   // The game casts the serialised easeType to int, so a fractional value floors rather than fails.
   const type = Math.floor(easeType);
   if (CONSTANT_ZERO.has(type)) return 0;
   if (type === CONSTANT_ONE) return 1;
-  if (type === 12) return ease12(progress);
-  const mapped = EASE_MAP[type];
+  // `GetEaseWithProgress` clamps by index rather than by value: `i = (int)(progress * 100)`, then
+  // `i < 0` reads `table[0]` and `i >= 100` reads `table[100]`. Since every table starts at 0 and
+  // ends at 1, that is the same as clamping `progress` to [0, 1] before evaluating — and it is
+  // reachable here, because `assertBlockAreas` deliberately does not require the four times (or the
+  // event times) to be ordered, so a reversed segment yields a negative ratio. `easedProgress` also
+  // clamps its *output*, which would not have caught this.
+  const clamped = clamp01(progress);
+  // NaN survives `clamp01`, and the game's cast turns it into `INT_MIN`, i.e. `table[0]`.
+  if (Number.isNaN(clamped)) return 0;
+  if (type === 12) return inOutQuint(clamped);
+  const mapped = EASE_MAP[type] ?? EASE_MAP_IN_OUT[type];
   if (mapped === undefined) throw new Error(`blockEase: easeType ${easeType} 不在 0..14 内`);
-  return easing(progress, mapped);
+  return easing(clamped, mapped);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,4 +343,59 @@ export function blockShowCoverage(block, now) {
   const appearsInsideWindow = block.appearTime >= block.enableTime && block.appearTime < block.disableTime;
   if (!appearsInsideWindow) return 1;
   return clamp01((now - block.appearTime) / BLOCK_SHOW_DURATION);
+}
+
+/**
+ * Port of `GameInformation.BlockArea.Mirror()` (VA `0x1CA32A8`): a **horizontal** mirror that flips
+ * `x` only and leaves every `y` alone.
+ *
+ * The corner assignment is the part that is easy to get wrong. It is a **crossed** complement, not an
+ * independent per-corner flip:
+ *
+ * ```
+ * tr.x' = 1 - bl.x        bl.x' = 1 - tr.x        // both read the ORIGINAL values
+ * ```
+ *
+ * With the shipped `tr.x = 0.8, bl.x = 0.6` that gives `tr.x' = 0.4, bl.x' = 0.2` — the rectangle
+ * keeps its width and flips about `x = 0.5`. Writing `tr.x' = 1 - tr.x, bl.x' = 1 - bl.x` instead
+ * would give `0.2 / 0.4`, i.e. an *inverted* rectangle, and `blockGeometry` deliberately does not
+ * take `Mathf.Abs`, so that would render as a negative-size block rather than failing loudly.
+ *
+ * The three event lists follow the same "complement about 0.5" rule, except that rotation is
+ * **negated** rather than complemented, because an angle is not a coordinate:
+ *
+ * - `rotateEvents`: `anchor.x ← 1 - anchor.x` (self-complement) and `rotation ← -rotation`
+ * - `moveEvents`: `endPosition.x ← 1 - endPosition.x` (self-complement)
+ * - `scaleEvents`: `anchor.x ← 1 - anchor.x` (self-complement)
+ *
+ * Note "self-complement" only for the *events*: those read and write the same field, unlike the
+ * corners above, which read each other's. Each list is null-checked before iteration, so a missing
+ * list is skipped rather than throwing.
+ *
+ * Returns a new block; the input is not modified (the game mutates in place, but the editor's undo
+ * history needs the pre-mirror document to stay intact).
+ */
+export function mirrorBlockArea(block) {
+  const complement = (value) => 1 - value;
+  const mirrorAnchor = (anchor) => (anchor ? { ...anchor, x: complement(anchor.x) } : anchor);
+  return {
+    ...block,
+    topRightPercentage: { ...block.topRightPercentage, x: complement(block.bottomLeftPercentage.x) },
+    bottomLeftPercentage: { ...block.bottomLeftPercentage, x: complement(block.topRightPercentage.x) },
+    rotateEvents: block.rotateEvents?.map((event) => ({
+      ...event,
+      anchor: mirrorAnchor(event.anchor),
+      rotation: -event.rotation,
+    })),
+    moveEvents: block.moveEvents?.map((event) => ({
+      ...event,
+      endPosition: { ...event.endPosition, x: complement(event.endPosition.x) },
+    })),
+    scaleEvents: block.scaleEvents?.map((event) => ({ ...event, anchor: mirrorAnchor(event.anchor) })),
+  };
+}
+
+/** `Mirror()` over a whole `blockAreaList`. A missing or non-array list is passed through as-is. */
+export function mirrorBlockAreas(blocks) {
+  return Array.isArray(blocks) ? blocks.map(mirrorBlockArea) : blocks;
 }

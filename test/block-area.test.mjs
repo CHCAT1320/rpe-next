@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   blockEase, findCurrentEventIndex, blockGeometry, blockTransform, blockState,
   blockIsActive, blockShowCoverage, blockScreen, BLOCK_SCREEN_HEIGHT, BLOCK_EASE_TYPES,
-  blockIsDestroyed, BLOCK_HIDDEN_POSITION,
+  blockIsDestroyed, BLOCK_HIDDEN_POSITION, mirrorBlockArea, mirrorBlockAreas,
 } from '../src/core/block-area.mjs';
 import { easing } from '../src/core/easing.mjs';
 import { createChart, parseChart, serializeChart, assertChart } from '../src/core/chart.mjs';
@@ -35,34 +35,64 @@ function officialDocument(blockAreaList) {
 
 // ---------------------------------------------------------------------------
 
-test('块缓动映射：9 种对应 rpe-next 曲线，3/6/9/13 恒 0，14 恒 1，越界抛错', () => {
+test('块缓动：9 种对应 rpe-next 曲线，3/6/9/12 按文档 B 的对称 in-out，13 恒 0、14 恒 1', () => {
   const mapped = { 0: 1, 1: 5, 2: 4, 4: 9, 5: 8, 7: 11, 8: 10, 10: 15, 11: 14 };
   for (const [blockType, type] of Object.entries(mapped)) {
     for (const progress of [0, 0.01, 0.17, 0.5, 0.83, 0.99, 1]) {
       assert.equal(blockEase(Number(blockType), progress), easing(progress, type), `easeType ${blockType} @ ${progress}`);
     }
   }
-  for (const type of [3, 6, 9, 13]) for (const progress of [0, 0.3, 0.7, 1]) assert.equal(blockEase(type, progress), 0);
+  // behavior.md §2.1.1: the APK's 3/6/9/12 are downsample+halve composite tables, but this
+  // repository implements the community in-out curves instead. 3/6/9 map onto rpe-next's own
+  // in-out curves; 12 (in-out-quint) has none, so blockEase supplies it directly.
+  for (const [blockType, type] of Object.entries({ 3: 7, 6: 12, 9: 13 })) {
+    for (const progress of [0, 0.01, 0.17, 0.5, 0.83, 0.99, 1]) {
+      assert.equal(blockEase(Number(blockType), progress), easing(progress, type), `easeType ${blockType} @ ${progress}`);
+    }
+  }
+  const inOutQuint = (progress) => (progress < 0.5 ? 16 * progress ** 5 : 1 - ((-2 * progress + 2) ** 5) / 2);
+  for (const progress of [0, 0.01, 0.17, 0.25, 0.5, 0.75, 0.83, 0.99, 1]) {
+    assert.ok(Math.abs(blockEase(12, progress) - inOutQuint(progress)) < 1e-12, `easeType 12 @ ${progress}`);
+  }
+  // The composite tables are non-monotonic; the in-out ones are not, so the midpoints must differ
+  // from the old "dead table" reading and sit at ~0.5 rather than 0.
+  for (const type of [3, 6, 9, 12]) assert.ok(Math.abs(blockEase(type, 0.5) - 0.5) < 1e-12, `easeType ${type} 中点`);
+  for (const progress of [0, 0.3, 0.7, 1]) assert.equal(blockEase(13, progress), 0, '只有 13 是死表');
   for (const progress of [0, 0.3, 0.7, 1]) assert.equal(blockEase(14, progress), 1);
   assert.equal(BLOCK_EASE_TYPES, 15);
   assert.throws(() => blockEase(15, 0.5));
   assert.throws(() => blockEase(-1, 0.5));
+  // `GetEaseWithProgress` clamps by index (`i < 0` -> `table[0]`, `i >= 100` -> `table[100]`), which
+  // is equivalent to clamping the progress itself. This is reachable: the validator deliberately
+  // allows unordered times, so a reversed segment produces a negative or > 1 ratio.
+  for (const type of [0, 1, 2, 3, 6, 9, 12, 13, 14]) {
+    assert.equal(blockEase(type, -0.5), blockEase(type, 0), `easeType ${type} 低于 0 取端点`);
+    assert.equal(blockEase(type, 1.5), blockEase(type, 1), `easeType ${type} 高于 1 取端点`);
+  }
+  // NaN becomes `INT_MIN` in the game's cast, i.e. `table[0]`.
+  for (const type of [0, 3, 12, 13, 14]) assert.equal(blockEase(type, NaN), blockEase(type, 0), `easeType ${type} 遇 NaN 取 table[0]`);
 });
 
-test('type 12 折线复现文档公式的 101 点表，50..57 为 0、100 为 1', () => {
-  // Independent rebuild of the documented construction. Samples 47..49 read source indices
-  // 102/104/106, i.e. past the table, so the shipped values are uninitialised; the port clamps the
-  // source index instead, which is why this rebuild clamps too.
-  const table = new Array(101).fill(0);
-  const inQuint = (index) => (Math.min(index, 100) / 100) ** 5;
-  for (let offset = 0; offset <= 49; offset++) table[offset] = inQuint(8 + 2 * offset) * 0.5;
-  for (let offset = 0; 58 + offset <= 100; offset++) table[58 + offset] = (1 - (1 - (8 + 2 * offset) / 100) ** 5) * 0.5 + 0.5;
-  table[100] = 1;
-  for (let index = 0; index <= 100; index++) {
-    assert.ok(Math.abs(blockEase(12, index / 100) - table[index]) < 1e-12, `sample ${index}`);
-  }
-  for (let index = 50; index <= 57; index++) assert.equal(table[index], 0, `dead sample ${index}`);
+test('type 12 是 in-out-quint：端点、中点与单调性', () => {
+  // behavior.md §2.1.1: 12 is the community in-out-quint here, not the APK's composite table. The
+  // composite construction (50..57 zero break, 47..49 reading source indices 102/104/106) is
+  // deliberately not built — three of its samples are uninitialised heap.
+  assert.equal(blockEase(12, 0), 0);
   assert.equal(blockEase(12, 1), 1);
+  assert.equal(blockEase(12, 0.5), 0.5);
+  // Symmetric about the midpoint, unlike the composite table which dropped to 0 at u = 0.5.
+  for (const progress of [0.1, 0.2, 0.3, 0.4]) {
+    assert.ok(Math.abs(blockEase(12, progress) + blockEase(12, 1 - progress) - 1) < 1e-12, `对称 @ ${progress}`);
+  }
+  // Monotonic, and the first half is the steeper one.
+  let previous = -Infinity;
+  for (let step = 0; step <= 100; step++) {
+    const value = blockEase(12, step / 100);
+    assert.ok(value >= previous, `单调 @ ${step}`);
+    previous = value;
+  }
+  assert.ok(blockEase(12, 0.25) < 0.25, '前半慢于线性');
+  assert.ok(blockEase(12, 0.75) > 0.75, '后半快于线性');
 });
 
 test('FindCurrentEventIndex：严格大于、范围 [-1, Count-2]、等时刻取最后一个', () => {
@@ -310,6 +340,84 @@ test('零缩放不产生 NaN，且块在该轴上塌缩', () => {
   assert.equal(collapsed.size.x, 0);
   assert.equal(collapsed.size.y, 0);
   assert.ok(Number.isFinite(collapsed.center.x) && Number.isFinite(collapsed.center.y));
+});
+
+test('Mirror()：角点交叉取补、旋转取负、anchor/endPosition 自身取补，y 全部不变', () => {
+  // data.md §BlockArea.Mirror() (VA 0x1CA32A8). The corners are a CROSSED complement — both read the
+  // original values — which flips the rectangle about x = 0.5 while keeping its width. Writing
+  // "each corner complements itself" instead inverts the rectangle, and `blockGeometry` does not take
+  // Mathf.Abs, so that would render as a negative-size block rather than failing loudly.
+  const block = plainBlock({
+    topRightPercentage: { x: 0.8, y: 0.7 },
+    bottomLeftPercentage: { x: 0.6, y: 0.2 },
+    rotateEvents: [{ anchor: { x: 0.25, y: 0.9 }, time: 0, easeType: 0, rotation: 30 }],
+    moveEvents: [{ endPosition: { x: 0.3, y: 0.4 }, time: 0, easeTypeX: 0, easeTypeY: 0 }],
+    scaleEvents: [{ anchor: { x: 0.75, y: 0.1 }, time: 0, easeTypeX: 0, easeTypeY: 0, scale: { x: 2, y: 3 } }],
+  });
+  const mirrored = mirrorBlockArea(block);
+  // `1 - 0.8` is 0.19999999999999996 in binary floating point, so the corners are compared
+  // approximately; the game has the same rounding.
+  assert.ok(Math.abs(mirrored.topRightPercentage.x - 0.4) < 1e-12, 'tr.x ← 1 − bl.x');
+  assert.equal(mirrored.topRightPercentage.y, 0.7, 'tr.y 不变');
+  assert.ok(Math.abs(mirrored.bottomLeftPercentage.x - 0.2) < 1e-12, 'bl.x ← 1 − tr.x');
+  assert.equal(mirrored.bottomLeftPercentage.y, 0.2, 'bl.y 不变');
+  assert.deepEqual(mirrored.rotateEvents[0].anchor, { x: 0.75, y: 0.9 }, 'anchor.x 自身取补');
+  assert.equal(mirrored.rotateEvents[0].rotation, -30, 'rotation 取负');
+  assert.deepEqual(mirrored.moveEvents[0].endPosition, { x: 0.7, y: 0.4 }, 'endPosition.x 自身取补');
+  assert.deepEqual(mirrored.scaleEvents[0].anchor, { x: 0.25, y: 0.1 }, 'scale anchor.x 自身取补');
+  assert.deepEqual(mirrored.scaleEvents[0].scale, { x: 2, y: 3 }, 'scale 值不动');
+  // The four times and `isSubtract` ride along untouched.
+  for (const key of ['appearTime', 'enableTime', 'disableTime', 'disappearTime', 'isSubtract']) {
+    assert.equal(mirrored[key], block[key], `${key} 不应改变`);
+  }
+  // The input is not mutated (the game mutates in place; this port returns a new block so the
+  // editor's undo history keeps the pre-mirror document intact).
+  assert.equal(block.topRightPercentage.x, 0.8, '入参不应被修改');
+
+  // Width and height are preserved, and the centre flips about x = 0.5.
+  const aspect = 16 / 9;
+  const before = blockGeometry(block, aspect);
+  const after = blockGeometry(mirrored, aspect);
+  assert.ok(Math.abs(before.size.x - after.size.x) < 1e-12, '宽度不变');
+  assert.ok(Math.abs(before.size.y - after.size.y) < 1e-12, '高度不变');
+  assert.ok(Math.abs(before.center.x + after.center.x) < 1e-12, '中心 x 取反');
+  assert.ok(Math.abs(before.center.y - after.center.y) < 1e-12, '中心 y 不变');
+
+  // Mirroring twice is the identity, which is the cheapest check that the crossed assignment is
+  // symmetric rather than accidentally one-way.
+  const twice = mirrorBlockArea(mirrored);
+  assert.ok(Math.abs(twice.topRightPercentage.x - block.topRightPercentage.x) < 1e-12, '镜像两次回到原状');
+  assert.equal(twice.rotateEvents[0].rotation, 30);
+  assert.ok(Math.abs(twice.moveEvents[0].endPosition.x - 0.3) < 1e-12);
+
+  // Missing event lists are skipped rather than throwing, matching the null checks in the game.
+  const bare = mirrorBlockArea({ topRightPercentage: { x: 1, y: 1 }, bottomLeftPercentage: { x: 0, y: 0 } });
+  assert.equal(bare.rotateEvents, undefined);
+  assert.equal(bare.moveEvents, undefined);
+  assert.equal(bare.scaleEvents, undefined);
+  // An empty list stays empty.
+  assert.deepEqual(mirrorBlockArea(plainBlock({ rotateEvents: [] })).rotateEvents, []);
+
+  // The list-level wrapper maps every block and tolerates a missing list.
+  const many = mirrorBlockAreas([block, block]);
+  assert.equal(many.length, 2);
+  assert.ok(Math.abs(many[0].topRightPercentage.x - mirrored.topRightPercentage.x) < 1e-12);
+  assert.equal(mirrorBlockAreas(undefined), undefined);
+});
+
+test('Mirror() 后块的绘制结果左右翻转，但仍在同一 y 带上', () => {
+  // End-to-end: mirroring a real corpus block must move its rendered rectangle to the mirrored
+  // pixel column without changing its row. This catches a y-axis regression that the field-level
+  // assertions above could miss if the transform consumed the corners differently.
+  const aspect = 16 / 9;
+  const block = fixture[0];
+  const mirrored = mirrorBlockArea(block);
+  const before = blockTransform(block, block.enableTime, aspect);
+  const after = blockTransform(mirrored, block.enableTime, aspect);
+  assert.ok(Math.abs(before.center.x + after.center.x) < 1e-9, '中心 x 取反');
+  assert.ok(Math.abs(before.center.y - after.center.y) < 1e-9, '中心 y 不变');
+  assert.ok(Math.abs(before.size.x - after.size.x) < 1e-9, '宽度不变');
+  assert.ok(Math.abs(before.rotation + after.rotation) < 1e-9, '旋转取负');
 });
 
 test('序列化往返保留 blockAreas', () => {

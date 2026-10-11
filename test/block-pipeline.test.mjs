@@ -389,21 +389,30 @@ test('火焰边框的分母可调，且只影响 effectRT，不动块遮罩', ()
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
   assert.deepEqual(size('effectRT'), [200, 112], '分母 8 -> Screen/8');
   assert.deepEqual(size('normalBlockRT'), [200, 112], '块遮罩不受影响');
+  // The pings are effectRT's ping-pong partners, not independent targets: `Start` allocates all three
+  // from the same `w/4, h/4` pair, and `_DilateTexelSize` is derived from effectRT. If they kept
+  // Screen/4 while effectRT moved, every dilation step would offset by a texel of a different grid.
+  assert.deepEqual(size('pingA'), [200, 112], 'pingA 跟随 effectRT');
+  assert.deepEqual(size('pingB'), [200, 112], 'pingB 跟随 effectRT');
 
   // Sharper than the game, which is the point of making it controllable.
   pipeline.effectDivisor = 2;
   pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
   assert.deepEqual(size('effectRT'), [800, 450], '分母 2 -> Screen/2');
+  assert.deepEqual(size('pingA'), [800, 450], 'pingA 同步变细');
 
   // The game's value is the fallback for anything unusable, including a stale stored NaN.
   for (const bad of [0, -1, Number.NaN, undefined]) {
     pipeline.effectDivisor = bad;
     pipeline.render({ blocks: fixture, now: 66, aspect: 16 / 9, width: 1600, height: 900 });
     assert.deepEqual(size('effectRT'), [400, 225], `effectDivisor=${bad} 应回退到 4`);
+    assert.deepEqual(size('pingA'), [400, 225], `effectDivisor=${bad} 时 pingA 也回退到 4`);
   }
-  // Only effectRT carries a `targetDivisor` override; every other target keeps its documented divisor.
+  // `effectDivisor` covers exactly the three Screen/4 targets; every other target keeps its
+  // documented divisor, because moving a mask would move block coverage rather than the border.
   assert.equal(pipeline.targetDivisor(pipeline.targets.get('sceneColorRT')), 6);
   assert.equal(pipeline.targetDivisor(pipeline.targets.get('pingA')), 4);
+  assert.equal(pipeline.targetDivisor(pipeline.targets.get('pingB')), 4);
   assert.equal(pipeline.targetDivisor(pipeline.targets.get('subtractBlockRT')), 8);
 });
 
@@ -1010,6 +1019,14 @@ test('诊断记录每个块进了哪一层，并在各 RT 的块中心取值', (
   assert.ok(quads.length > 0, '应有块被光栅化');
   for (const quad of quads) {
     assert.ok(['active', 'ready', 'disabled'].includes(quad.state), `未知状态 ${quad.state}`);
+    // A zero-extent quad is recorded but never rasterised, so it carries no layer: block 28's
+    // `scale.x` runs -50 -> 50 and passes through exactly 0 mid-segment, which at t = 66 the
+    // in-out curve for easeType 3 lands on. Those records are covered by their own test.
+    if (quad.skipped === 'zero-size') {
+      assert.equal(quad.layer, undefined, '未光栅化的块不应有层');
+      assert.equal(quad.readyLayer, undefined, '未光栅化的块不应有预备层');
+      continue;
+    }
     assert.ok(quad.layer.endsWith('BlockRT'), `层名 ${quad.layer}`);
     if (quad.state === 'active') assert.equal(quad.layer, quad.isSubtract ? 'subtractBlockRT' : 'normalBlockRT');
     else assert.equal(quad.layer, quad.isSubtract ? 'disabledSubtractBlockRT' : 'disabledNormalBlockRT');
@@ -1036,6 +1053,46 @@ test('诊断记录每个块进了哪一层，并在各 RT 的块中心取值', (
       assert.ok(value === null || Number.isInteger(value), `${name} 应为整数像素值或 null，实际 ${value}`);
     }
   }
+});
+
+test('减块顶点色是 magenta→white 且 alpha 恒 0.1，普通块 alpha 才是淡入量', () => {
+  // `behavior.md` §4 / `states.md` §4.3 pin both `DisabledBlockShow` endpoints:
+  //   normal  (1,1,1,0) -> (1,1,1,1)
+  //   subtract (1,0,1,0.1) -> (1,1,1,0.1)
+  // The subtract fade therefore moves *green* and leaves alpha alone — that 0.1 is what
+  // `SubtractBlockBlender`'s 0.09/0.12 thresholds bracket, so ramping alpha from 0 would put a
+  // freshly-appeared subtract block on the wrong side of the attribution test.
+  const gl = stubGl();
+  const { pipeline } = makePipeline(gl);
+  const subtract = fixture.find((block) => block.isSubtract);
+  assert.ok(subtract, '语料里应有减块');
+  // `blockShowCoverage` only ramps when a block appears *inside* its enabled window.
+  const appearing = { ...subtract, appearTime: 10, enableTime: 8, disableTime: 12, disappearTime: 13 };
+  const colorsAt = (seconds) => {
+    const local = stubGl();
+    makePipeline(local).pipeline.render({ blocks: [appearing], now: seconds, aspect: 16 / 9, width: 1600, height: 900 });
+    // `in_COLOR0` is attribute slot 2 in the stub; `vertexAttrib4f(location, r, g, b, a)`.
+    return local.__calls.filter((call) => call.name === 'vertexAttrib4f' && call.args[0] === 2).map((call) => call.args.slice(1));
+  };
+  const atStart = colorsAt(10);
+  assert.ok(atStart.length > 0, '减块应写入顶点色');
+  for (const color of atStart) assert.deepEqual(color, [1, 0, 1, 0.1], '淡入起点为品红，alpha 恒 0.1');
+  // Halfway through `disabledBlockShowDuration` (0.5 s), only green has moved.
+  for (const color of colorsAt(10.25)) assert.deepEqual(color, [1, 0.5, 1, 0.1], '中点只动绿通道');
+  for (const color of colorsAt(11)) assert.deepEqual(color, [1, 1, 1, 0.1], '淡入终点为白，alpha 仍为 0.1');
+
+  // A normal block instead ramps its alpha, and never touches rgb.
+  const plain = fixture.find((block) => !block.isSubtract);
+  const normalAppearing = { ...plain, appearTime: 10, enableTime: 8, disableTime: 12, disappearTime: 13 };
+  const normalColors = (seconds) => {
+    const local = stubGl();
+    makePipeline(local).pipeline.render({ blocks: [normalAppearing], now: seconds, aspect: 16 / 9, width: 1600, height: 900 });
+    return local.__calls.filter((call) => call.name === 'vertexAttrib4f' && call.args[0] === 2).map((call) => call.args.slice(1));
+  };
+  for (const color of normalColors(10)) assert.deepEqual(color, [1, 1, 1, 0], '普通块从全透明淡入');
+  for (const color of normalColors(10.25)) assert.deepEqual(color, [1, 1, 1, 0.5]);
+  for (const color of normalColors(11)) assert.deepEqual(color, [1, 1, 1, 1]);
+  void pipeline;
 });
 
 test('减块从场景色里扣除，且没有减块时不跑这一趟', () => {

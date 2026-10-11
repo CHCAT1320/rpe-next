@@ -24,7 +24,8 @@ export class Preview {
     // before `applyPreferences` ran would persist `blockPipeline: false` and pin the editor to the
     // approximation forever.
     this.blockRenderer = 'block'; this.blockSceneEffects = true; this.blockError = null; this.onBlockError = null;
-    // Denominator of `effectRT`'s `Screen/4`; see `BlockPipeline.effectDivisor`.
+    // Denominator of the `Screen/4` effect targets (`effectRT` + its pingA/pingB partners); see
+    // `BlockPipeline.effectDivisor`.
     this.blockEffectDivisor = 4;
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
@@ -268,11 +269,15 @@ export class Preview {
       context.shadowBlur = 0.0185 * viewportHeight;
       context.strokeRect(ringLeft, ringTop, ringWidth, ringHeight);
     } else {
-      // Disabled look: flat additive dark red, no edge, no glow. `coverage` reproduces the 0.5 s
-      // colour fade that starts at appearTime. (Subtract blocks also fade magenta -> white over
-      // that window; not modelled, as it runs at alpha 0.1.)
+      // Disabled look: flat additive dark red, no edge, no glow. `coverage` reproduces the
+      // `DisabledBlockShow` fade that starts at appearTime, and is 1 for every block that appears
+      // before `enableTime` — i.e. the whole shipped corpus, where no coroutine runs at all.
+      //
+      // For a subtract block the game pins alpha at 0.1 and fades only the *green* channel
+      // (magenta -> white) over that window, so `coverage` must not scale the alpha here: 0.1 is the
+      // value `SubtractBlockBlender`'s 0.09/0.12 thresholds bracket. Only the normal block ramps.
       context.globalCompositeOperation = 'lighter';
-      context.globalAlpha = tint * coverage;
+      context.globalAlpha = block.isSubtract ? tint : tint * coverage;
       context.fillStyle = 'rgba(127,35,35,0.4)';
       context.fillRect(left, top, width, height);
       if (state.ready) {
