@@ -42,14 +42,61 @@ test('载入音乐优先保存解码样本；解码器不支持时仍可回退�
   globalThis.Audio = LoadedMedia;
   const { audio, context } = setup(); audio.media = null;
   context.createMediaElementSource = () => ({ connect() {}, disconnect() {} });
-  const buffer = { duration: 99.8 }; context.decodeAudioData = async () => buffer;
+  const buffer = { duration: 99.8, length: 4, numberOfChannels: 1, sampleRate: 48000, getChannelData: () => new Float32Array([0, 0.25, -0.5, 1]) };
+  context.decodeAudioData = async () => buffer;
   try {
     assert.equal(await audio.load(new ArrayBuffer(4), 'vbr.mp3'), true);
     assert.equal(audio.buffer, buffer); assert.equal(audio.usesMedia, false); assert.equal(audio.duration, 99.8);
+    const cached = await (await fetch(audio.mediaUrl)).arrayBuffer();
+    assert.equal(new TextDecoder().decode(cached.slice(0, 4)), 'RIFF');
+    assert.equal(new DataView(cached).getFloat32(48, true), 0.25);
     context.decodeAudioData = async () => { throw new Error('仅原生媒体支持此格式'); };
     assert.equal(await audio.load(new ArrayBuffer(4), 'native-only.m4a'), true);
     assert.equal(audio.buffer, null); assert.equal(audio.usesMedia, true);
     audio.clear();
+  } finally { globalThis.Audio = original; }
+});
+
+test('浏览器不支持 PCM 媒体时回退原音乐，保持解码样本可用', async () => {
+  const original = globalThis.Audio;
+  class LoadedMedia extends SeekingMedia {
+    loads = 0;
+    set src(value) { this.loads++; queueMicrotask(() => this.loads === 2 ? this.onerror?.() : this.onloadedmetadata?.()); }
+    removeAttribute() {} load() {}
+  }
+  globalThis.Audio = LoadedMedia;
+  const { audio, context } = setup(); audio.media = null;
+  context.createMediaElementSource = () => ({ connect() {}, disconnect() {} });
+  const buffer = { duration: 1, length: 1, numberOfChannels: 1, sampleRate: 48000, getChannelData: () => new Float32Array(1) };
+  context.decodeAudioData = async () => buffer;
+  try {
+    assert.equal(await audio.load(new Uint8Array([1, 2, 3]).buffer, 'music.mp3'), true);
+    assert.equal(audio.buffer, buffer);
+    assert.equal(audio.media.loads, 3);
+    assert.deepEqual(new Uint8Array(await (await fetch(audio.mediaUrl)).arrayBuffer()), new Uint8Array([1, 2, 3]));
+    audio.clear();
+  } finally { globalThis.Audio = original; }
+});
+
+test('PCM 转换途中清空音乐，不会把已取消的音乐重新装入', async () => {
+  const original = globalThis.Audio;
+  class LoadedMedia extends SeekingMedia {
+    set src(value) { queueMicrotask(() => this.onloadedmetadata?.()); }
+    removeAttribute() {} load() {}
+  }
+  globalThis.Audio = LoadedMedia;
+  const { audio, context } = setup(); audio.media = null;
+  let beganEncoding;
+  const encoding = new Promise(resolve => { beganEncoding = resolve; });
+  context.createMediaElementSource = () => { throw new Error('已取消的音乐不应连接音频输出'); };
+  context.decodeAudioData = async () => ({ duration: 2, length: 96000, numberOfChannels: 1, sampleRate: 48000,
+    getChannelData: () => { beganEncoding(); return new Float32Array(96000); },
+  });
+  try {
+    const loaded = audio.load(new ArrayBuffer(4), 'music.ogg');
+    await encoding; audio.clear();
+    assert.equal(await loaded, false);
+    assert.equal(audio.media, null); assert.equal(audio.buffer, null);
   } finally { globalThis.Audio = original; }
 });
 
@@ -118,6 +165,34 @@ test('保调倍速切换保留音乐秒位置；原生倍速调整不反复触�
   audio.setPreservePitch(false); assert.equal(audio.usesMedia, false); assert.equal(audio.time, 12);
   context.currentTime = 2; assert.equal(audio.time, 12.75);
   audio.setRate(1); assert.equal(audio.time, 12.75);
+});
+
+test('保调倍速暂停记录媒体真正停止的位置，连续续播不触发额外定位', async () => {
+  const { audio } = setup(); audio.buffer = { duration: 100 }; audio.setRate(1.5);
+  const media = audio.media;
+  media.pause = () => { if (!media.paused) media.current += 0.0003; media.paused = true; };
+  audio.seek(10); media.finishSeek();
+  const seeks = media.seeks;
+  for (let index = 0; index < 20; index++) {
+    await audio.play();
+    media.current += 0.8;
+    audio.pause();
+    assert.equal(audio.time, media.currentTime);
+    assert.equal(media.seeks, seeks);
+  }
+  await audio.play();
+  assert.equal(media.seeks, seeks);
+});
+
+test('保调倍速暂停待定位的音频时保留目标时间，不能读取旧播放头', async () => {
+  const { audio } = setup(); audio.buffer = { duration: 100 }; audio.setRate(0.75);
+  audio.media.current = 4;
+  audio.seek(30); const playing = audio.play(); await Promise.resolve();
+  audio.pause(); await playing;
+  assert.equal(audio.time, 30);
+  audio.media.finishSeek();
+  await audio.play();
+  assert.equal(audio.time, 30);
 });
 
 test('媒体负时间预滚不会预先调度越过音乐起点的打击音', async () => {

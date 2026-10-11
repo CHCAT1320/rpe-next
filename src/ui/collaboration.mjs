@@ -5,7 +5,7 @@ import { mediaErrorCode } from '../platform/media-diagnostics.mjs';
 import { CollaborationClient } from '../application/collaboration-client.mjs';
 import { parseInvitation, COLLAB_ID } from '../core/collaboration.mjs';
 import { eventListAt } from '../application/event-commands.mjs';
-import { isTypingText } from './keyboard.mjs';
+import { isTextEntry, usesNativeTextShortcut } from './keyboard.mjs';
 import { download } from '../platform/files.mjs';
 import { collaborationMarkerPosition, collaborationLabelBackground } from './collaboration-display.mjs';
 
@@ -168,7 +168,7 @@ export class CollaborationPanel {
           this.chatInput.value = ''; this.closeChat();
         } catch (error) { this.notify(error.message, 'warning'); }
       }
-    } else if (event.key === '/' && !isTypingText(event.target) && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    } else if (event.key === '/' && !isTextEntry(event.target) && !usesNativeTextShortcut(event) && !event.ctrlKey && !event.altKey && !event.metaKey) {
       event.preventDefault(); event.stopImmediatePropagation(); this.openChat();
     }
   }

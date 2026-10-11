@@ -1,6 +1,7 @@
 import { captureSelection, controlSelection, commitSelectionEdit, selectionScaleAnchor } from '../application/batch-edit.mjs';
 import { beatValue } from '../core/beat.mjs';
 import { snapTime } from '../core/edit-grid.mjs';
+import { usesNativeTextShortcut } from './keyboard.mjs';
 
 const configurations = {
   notes: [['note-move', '整体移动音符', '#ff0088'], ['note-scale', '横向缩放；按 1/2 固定首/尾音符', '#00aabb'], ['note-line', '移动到其他判定线', '#b400ff']],
@@ -26,7 +27,7 @@ export class BatchControls {
       stage.append(host); this.groups.set(area, { host, hint, signature: '' });
     }
     window.addEventListener('keydown', event => {
-      if (!this.active) return;
+      if (!this.active || usesNativeTextShortcut(event)) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); this.cancel(); return; }
       if (['1', '2'].includes(event.key) && this.active.kind === 'note-scale') { event.preventDefault(); this.anchorMode = Number(event.key); this.update(); }
     }, true);

@@ -5,6 +5,7 @@ import { captureSelection, editCapturedSelection, commitSelectionEdit } from '..
 
 import { EASING_NAMES, createEasingPicker } from './easing-picker.mjs';
 import { numericWheel } from './numeric-wheel.mjs';
+import { beatInputControl } from './beat-input.mjs';
 import { EVENT_WHEEL_STEPS } from '../core/note-editing.mjs';
 import { renderShaderInspector } from './shader-inspector.mjs';
 import { canCutEvent } from '../application/event-tools.mjs';
@@ -30,6 +31,7 @@ function applyEventTransform(session, label, transform) {
 }
 
 export function renderEventInspector(session, tempo, currentBeat, reportError, notify = () => {}) {
+  if (session.liveEventEdit) return;
   const container = document.querySelector('#event-properties'); container.replaceChildren();
   const entries = inspectorEntries(session); const event = entries[0]?.event; const eventType = entries[0]?.type;
   document.querySelector('#event-selection-count').textContent = `${entries.length} 已选`;
@@ -50,7 +52,7 @@ export function renderEventInspector(session, tempo, currentBeat, reportError, n
     } else if (kind === 'number') {
       value = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(value)) return;
-      if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) value = Math.max(0, Math.min(255, value));
+      if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) value = Math.trunc(Math.max(0, Math.min(255, value)));
       if (key === 'easingLeft' || key === 'easingRight') value = Math.max(0, Math.min(1, value));
       if (key === 'linkgroup') value = Math.max(0, Math.round(value));
     } else value = input.value;
@@ -68,13 +70,13 @@ export function renderEventInspector(session, tempo, currentBeat, reportError, n
     input.value = kind === 'beat' ? formatBeat(event[key]) : kind === 'array' ? event[key].join(', ') : event[key] ?? (key === 'easingRight' ? 1 : 0);
     input.onfocus = () => { session.liveEventEdit = true; };
     input.onblur = () => { session.liveEventEdit = false; queueMicrotask(() => { if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify); }); };
-    input.oninput = () => { if (kind !== 'number' || input.value.trim()) applyField(input, key, title, kind, true); };
+    input.oninput = event => { if (!event.isComposing && (kind !== 'number' || input.value.trim())) applyField(input, key, title, kind, true); };
     input.onchange = () => applyField(input, key, title, kind);
     if (kind === 'number') {
       const step = key === 'easingLeft' || key === 'easingRight' ? 0.05 : key === 'linkgroup' ? 1 : session.eventWheelSteps?.[eventType] ?? EVENT_WHEEL_STEPS[eventType] ?? 1;
       input.step = step; numericWheel(input, step);
     }
-    label.append(input); container.append(label);
+    label.append(kind === 'beat' ? beatInputControl(input, () => session.division, reportError) : input); container.append(label);
   }
   const lockLabel = document.createElement('label'); lockLabel.className = 'field'; lockLabel.append('钩定（首尾同步）');
   const lock = document.createElement('input'); lock.type = 'checkbox'; lock.checked = Boolean(event.inst); lock.setAttribute('aria-label', '钩定');

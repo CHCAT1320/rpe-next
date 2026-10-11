@@ -1,4 +1,18 @@
 import { mediaType } from './files.mjs';
+import { pcmWave } from './pcm-wave.mjs';
+
+function loadMediaSource(media, url, name) {
+  return new Promise((resolve, reject) => {
+    const finish = error => {
+      clearTimeout(timeout); media.onloadedmetadata = null; media.onerror = null;
+      if (error) reject(error); else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error(`读取音乐 ${name} 超时，请检查文件或重新导入`)), 15000);
+    media.onloadedmetadata = () => finish();
+    media.onerror = () => finish(new Error(`无法解码音乐 ${name}；请检查文件完整性或转为 WAV/FLAC/MP3/OGG`));
+    media.src = url;
+  });
+}
 
 export class AudioTransport {
   constructor(contextFactory = () => new AudioContext()) {
@@ -35,20 +49,24 @@ export class AudioTransport {
     let decoded;
     if (typeof Audio !== 'undefined') {
       const media = new Audio(); media.preload = 'auto';
-      const url = URL.createObjectURL(new Blob([bytes], { type: mediaType(name) }));
+      let url = URL.createObjectURL(new Blob([bytes], { type: mediaType(name) }));
       try {
-        await new Promise((resolve, reject) => {
-          const finish = error => {
-            clearTimeout(timeout); media.onloadedmetadata = null; media.onerror = null;
-            if (error) reject(error); else resolve();
-          };
-          const timeout = setTimeout(() => finish(new Error(`读取音乐 ${name} 超时，请检查文件或重新导入`)), 15000);
-          media.onloadedmetadata = () => finish();
-          media.onerror = () => finish(new Error(`无法解码音乐 ${name}；请检查文件完整性或转为 WAV/FLAC/MP3/OGG`));
-          media.src = url;
-        });
+        await loadMediaSource(media, url, name);
         if (typeof context.decodeAudioData === 'function') {
           try { decoded = await context.decodeAudioData(bytes.slice(0)); } catch { decoded = null; }
+        }
+        if (decoded && revision === this.loadRevision) {
+          let pcmUrl;
+          try {
+            const wave = await pcmWave(decoded, () => revision !== this.loadRevision);
+            if (wave) {
+              pcmUrl = URL.createObjectURL(wave);
+              await loadMediaSource(media, pcmUrl, name);
+              URL.revokeObjectURL(url); url = pcmUrl;
+            }
+          } catch {
+            if (pcmUrl) { URL.revokeObjectURL(pcmUrl); await loadMediaSource(media, url, name); }
+          }
         }
         if (revision !== this.loadRevision) { media.removeAttribute('src'); media.load(); URL.revokeObjectURL(url); return false; }
         this.releaseMedia(); this.media = media; this.mediaUrl = url;
@@ -139,9 +157,11 @@ export class AudioTransport {
 
   pause() {
     this.playRevision++;
-    this.position = Math.min(this.time, this.duration);
-    this.playing = false;
+    const position = this.time;
+    const usePausedMediaTime = this.playing && this.usesMedia && this.position >= 0 && !this.mediaStart && !this.media.seeking;
     this.stopSource();
+    this.position = Math.min(usePausedMediaTime ? this.media.currentTime : position, this.duration);
+    this.playing = false;
   }
 
   stopSource() {

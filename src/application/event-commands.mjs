@@ -1,4 +1,5 @@
 import { EVENT_TYPES, assertChart, createEvent } from '../core/chart.mjs';
+import { integerAlphaEvent } from '../core/alpha-values.mjs';
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { trajectoryHasRotation } from '../core/curve-trajectory.mjs';
 import { EventTrack } from '../core/events.mjs';
@@ -29,7 +30,7 @@ export function chartWithEventLists(chart, lineIndex, eventLayer, updates) {
     if (type === 'paintEvents') continue;
     if (EVENT_TYPES.includes(type)) {
       while (line.eventLayers.length <= eventLayer) line.eventLayers.push({});
-      line.eventLayers[eventLayer] = { ...line.eventLayers[eventLayer], [type]: events };
+      line.eventLayers[eventLayer] = { ...line.eventLayers[eventLayer], [type]: type === 'alphaEvents' ? events.map(integerAlphaEvent) : events };
     }
     else line.extended[type] = events;
   }

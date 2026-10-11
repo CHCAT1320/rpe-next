@@ -1,4 +1,5 @@
 import { assertChart, noteIsAbove } from '../core/chart.mjs';
+import { integerNoteAlpha } from '../core/alpha-values.mjs';
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { snapPosition, verticalGrid } from '../core/edit-grid.mjs';
 import { alignShaderParameters } from '../core/shader-events.mjs';
@@ -48,7 +49,7 @@ export function editCapturedSelection(snapshot, { note = value => value, event =
       const entryTarget = ((entrySource + lineOffset) % count + count) % count;
       const source = lines[entrySource]; const target = lines[entryTarget];
       if (!source || !target) continue;
-      const updates = new Map(entries.map(entry => [entry.index, note(entry.note, entry)]));
+      const updates = new Map(entries.map(entry => [entry.index, integerNoteAlpha(note(entry.note, entry))]));
       let nextNotes;
       const selectedIndices = new Set();
       if (entrySource === entryTarget) {

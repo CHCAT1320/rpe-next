@@ -1,4 +1,5 @@
 import { History } from './history.mjs';
+import { integerChartAlpha } from '../core/alpha-values.mjs';
 import { createChart, createLine } from '../core/chart.mjs';
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { selectionState, sameSelection, remapSelection, restoreSelection } from './selection-history.mjs';
@@ -6,7 +7,7 @@ import { selectionState, sameSelection, remapSelection, restoreSelection } from 
 export class EditorSession extends EventTarget {
   constructor(chart = createChart()) {
     super();
-    this.history = new History(chart);
+    this.history = new History(integerChartAlpha(chart));
     this.lineIndex = 0;
     this.selection = new Set();
     this.clipboard = [];
@@ -95,6 +96,7 @@ export class EditorSession extends EventTarget {
   selectionState() { return selectionState(this); }
 
   commit(label, chart, beforeSelection = this.selectionState()) {
+    chart = integerChartAlpha(chart, this.chart);
     if (this.collaboration) return this.collaboration.commit(label, chart, beforeSelection);
     if (this.history.commit(label, chart, { beforeSelection, afterSelection: this.selectionState() })) {
       const time = Number.isFinite(this.editSeconds) ? Math.max(0, this.editSeconds) : 0;

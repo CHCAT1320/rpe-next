@@ -1,4 +1,5 @@
 import { EditorSession } from '../application/session.mjs';
+import { FrameLimiter, validFpsLimit } from '../core/frame-timing.mjs';
 import { assertChart, createChart, diagnose, EVENT_TYPES, previewLimitations } from '../core/chart.mjs';
 import { beatValue, parseBeat, formatBeat, fromNumber, upperBound } from '../core/beat.mjs';
 import { TempoMap } from '../core/tempo.mjs';
@@ -47,7 +48,7 @@ import { AutoSaveClock } from '../application/autosave.mjs';
 import { ManualSaveQueue } from '../application/manual-save.mjs';
 import { SPECIAL_TRACKS, MAX_BASE_LAYERS } from '../core/editor-display.mjs';
 import { lineGroupName, isDefaultLineGroup, lineDisplayLabel } from '../core/line-groups.mjs';
-import { isTextEntry, isTypingText, releaseShortcutFocus } from './keyboard.mjs';
+import { isTextEntry, usesNativeTextShortcut, releaseShortcutFocus } from './keyboard.mjs';
 import { setRatioOptions, applyViewControls } from './view-controls.mjs';
 import { generateCurveNotes } from '../core/curve-notes.mjs';
 import { createEasingPicker } from './easing-picker.mjs';
@@ -57,12 +58,19 @@ import { TimelineActivity } from '../core/timeline-activity.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
 import { AudioAnalysis } from './audio-analysis.mjs';
 import { TrajectoryPanel } from './trajectory-panel.mjs';
+import { TextLinesPanel } from './text-lines.mjs';
 import { CollaborationPanel } from './collaboration.mjs';
+import { NoiseAreaEditor } from './noise-area.mjs';
 
 const element = selector => document.querySelector(selector);
 const displayFields = [
+  ['text-selection-drag', 'textSelectionDrag', false],
   ['event-cut-density', 'cutDensity', 4],
+  ['sample-auto-fit', 'sampleAutoFit', true],
+  ['pick-preview-noise-areas', 'pickPreviewNoiseAreas', true],
+  ['seamless-noise-areas', 'seamlessNoiseAreas', true],
   ['judgement-offset', 'judgementOffset', 92],
+  ['judgement-color', 'judgementColor', '#ffffff'],
   ['default-line-thickness', 'lineScale', 1.5],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
@@ -118,6 +126,10 @@ realtimePreview.showHitEffects = false;
 const skin = new RpeSkin(invalidate);
 const images = new ProjectImages(invalidate, message => status(message));
 const timeline = new Timeline(element('#notes'), element('#events'), () => session, editEvent, invalidate, error => reportError(error), openTimelineContextMenu);
+const noiseEditor = new NoiseAreaEditor(element('#noise-panel'), element('#noise-editor-canvas'), () => ({ session, tempo, timeline, preview, realtimePreview, previewVisible: preview.visible, seconds: chartSeconds, sampleAutoFit: element('#sample-auto-fit').checked }), {
+  commit: (label, chart) => session.commit(label, chart), invalidate, notify, activate: activatePane,
+  pause: () => playback.pause(), seek: beat => seekBeat(beat), wheel: event => previewWheel(event),
+});
 const audioAnalysis = new AudioAnalysis(element('#audio-analysis-overlay'), () => timeline, () => audio, () => persistEditor());
 let noteHoverTimer = null;
 let noteHoverKey = null;
@@ -178,11 +190,12 @@ const stopMultiLineScrollDrag = event => {
 timeline.multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
 timeline.multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
 timeline.multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
-const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible, error => reportError(error));
+const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible && !noiseEditor.active, error => reportError(error));
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
 });
 const trajectoryPanel = new TrajectoryPanel(element('#trajectory-editor'), () => ({ session, timeline, tempo, previewVisible: preview.visible }), { invalidate, notify, activate: activatePane });
+const textLinesPanel = new TextLinesPanel(element('#text-lines-editor'), () => ({ session, tempo, seconds: chartSeconds(), skin, noteSize: preview.noteSize }), { invalidate, notify, activate: activatePane });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => images.load(session.chart, assets, chartName) });
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
@@ -209,7 +222,7 @@ const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
   chart: session.chart, tempo, seconds: chartSeconds(), selected: session.lineIndex,
   layer: timeline.layer, extended: timeline.extended,
   start: timeline.timeAt(timeline.viewHeight()), end: timeline.timeAt(0),
-  visible: hasDocument && !atHome && !preview.visible && !dialogOpen(),
+  visible: hasDocument && !atHome && !preview.visible && !noiseEditor.active && !dialogOpen(),
 }), { select: index => selectOverviewLine(index) });
 function clipboardTargetLine() {
   return timeline.hoverArea === 'events'
@@ -223,6 +236,7 @@ const pasteGesture = new PasteGesture({
   valid: context => context.session === session && context.chart === session.chart && context.layer === timeline.layer && !atHome && !preview.visible && !dialogOpen() && !isTextEntry(document.activeElement),
 });
 window.addEventListener('blur', () => pasteGesture.cancel());
+document.addEventListener('focusin', event => { if (isTextEntry(event.target)) pasteGesture.cancel(); });
 let stripCache;
 function createStripCanvas(width, height) {
   const canvas = document.createElement('canvas'); const ratio = globalThis.devicePixelRatio || 1;
@@ -354,7 +368,7 @@ const advanceEditClock = timestamp => {
   editClockTick = timestamp;
 };
 const formatEditTime = seconds => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
-const currentBeat = () => tempo.beat(chartSeconds(), session.line?.bpmfactor ?? 1);
+const currentBeat = () => tempo.beat(chartSeconds(), noiseEditor.active ? 1 : session.line?.bpmfactor ?? 1);
 let collaborationJoining = false;
 const collaborationTool = document.createElement('button'); collaborationTool.id = 'collaboration-tool'; collaborationTool.textContent = '联机协作'; element('[data-panel="chart"] .action-grid').append(collaborationTool);
 const collaboration = new CollaborationPanel(element('#collaboration-panel'), () => ({
@@ -421,6 +435,10 @@ const pickPreviewLine = (renderer, event) => {
 };
 element('#preview').addEventListener('click', event => {
   if (!preview.visible) return;
+  const noiseIndex = preview.pickNoiseArea(event.clientX, event.clientY);
+  if (Number.isInteger(noiseIndex)) {
+    clearNoteSourceToast(); togglePreview(false, true); openNoisePanel(); noiseEditor.select(noiseIndex); noiseEditor.areaList.reveal(noiseIndex); return;
+  }
   const noteLine = preview.pickNote(event.clientX, event.clientY);
   if (Number.isInteger(noteLine)) { timeline.cancelPlacement(); session.selectLine(noteLine); clearNoteSourceToast(); invalidate(); return; }
   pickPreviewLine(preview, event);
@@ -543,7 +561,9 @@ function persistEditor() {
 function activatePane(name) {
   if (name !== 'multi') multiEdit.hide();
   if (name !== 'trajectory') trajectoryPanel.hide();
+  if (name !== 'text-lines') textLinesPanel.hide();
   activePaneName = name;
+  noiseEditor.syncChrome();
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
 }
@@ -554,6 +574,10 @@ for (const button of document.querySelectorAll('[data-pane]')) button.onclick = 
   if (pane === 'lines') linePanel.render();
 };
 function openMultiLinePanel() { activatePane('multi-line'); multiLinePanel.render(); }
+function openNoisePanel() { timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false; noiseEditor.open(); }
+element('#noise-areas-tool').addEventListener('click', openNoisePanel);
+element('#close-noise-editor').addEventListener('click', () => noiseEditor.close());
+element('#noise-tab').addEventListener('click', () => { activatePane('noise'); noiseEditor.render(); });
 element('#multi-line-tool').addEventListener('click', openMultiLinePanel);
 element('#multi-line-open').addEventListener('click', openMultiLinePanel);
 element('#multi-line-toggle').addEventListener('click', () => {
@@ -662,6 +686,7 @@ function updateLineInfo() {
 
 function renderSession() {
   const editor = element('.editor');
+  noiseEditor.syncChrome();
   editor.classList.toggle('multi-notes', session.multiLineActive && session.multiLineMode === 'notes');
   editor.classList.toggle('multi-events', session.multiLineActive && session.multiLineMode === 'events');
   const context = `${session.lineIndex}:${timeline.layer}`;
@@ -707,7 +732,7 @@ function renderSession() {
   element('#line-select').value = session.lineIndex;
   element('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
   element('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
-  element('#notes-only').disabled = session.multiLineActive;
+  element('#notes-only').disabled = session.multiLineActive || noiseEditor.active;
   element('#multi-line-count').textContent = session.multiLineActive ? session.multiLineIndices.length : 0;
   element('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
   element('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
@@ -733,12 +758,12 @@ function renderSession() {
   if (activePaneName === 'history') renderHistoryPanel();
   if (activePaneName === 'multi') multiEdit.sync();
   if (activePaneName === 'multi-line') multiLinePanel.render();
+  if (noiseEditor.active) noiseEditor.render();
   if (activePaneName === 'metadata') renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); });
   if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); });
   session.eventLayer = timeline.layer;
   renderProperties(session, reportError);
   if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify);
-  decorateBeatInputs();
   if (session.eventSelection.size) {
     timeline.eventPlacementType = session.eventSelection.values().next().value.split(':')[0];
   }
@@ -754,8 +779,10 @@ function renderSession() {
       : (session.multiLineActive && session.multiLineMode === 'notes'
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
-    if (multiEdit.committing) multiEdit.sync();
+    if (noiseEditor.active) noiseEditor.render();
+    else if (multiEdit.committing) multiEdit.sync();
     else if (activePaneName === 'collaboration') collaboration.renderState();
+    else if (textLinesPanel.active) textLinesPanel.sync();
     else if (trajectoryPanel.active && selectionCount !== 1) activatePane('trajectory');
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
@@ -781,6 +808,7 @@ session.addEventListener('change', renderSession);
 
 function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   assertChart(chart);
+  noiseEditor.reset();
   if (!collaborationJoining && collaboration.client.active) collaboration.client.leave();
   lineSwitcher.reset();
   playback.pause(); audio.clear();
@@ -817,6 +845,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
 }
 
 function guardReplace(action) {
+  noiseEditor.flush();
   if (session.history.dirty || assetDirty) confirmAction('切换谱面？', action);
   else action();
 }
@@ -834,6 +863,7 @@ async function loadCandidate(candidate, nextAssets) {
     const view = candidate.project.viewState;
     if (Number.isInteger(view.lineIndex) && session.chart.judgeLineList?.[view.lineIndex]) session.selectLine(view.lineIndex);
   }
+  if (session.chart === candidate.chart && candidate.chart.rpeNextLegacySource?.format === 'phigros-v3') notify(`官谱转换完成：${candidate.chart.judgeLineList.length} 条判定线，${candidate.chart.blockAreaList?.length ?? 0} 个噪域`, 'success');
 }
 
 async function loadMusic(bytes, name, updateMetadata = true) {
@@ -852,7 +882,7 @@ async function loadMusic(bytes, name, updateMetadata = true) {
 }
 
 function seekBeat(value, pause = true) {
-  playback.seek(tempo.seconds(value, session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
+  playback.seek(tempo.seconds(value, noiseEditor.active ? 1 : session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
   invalidate();
 }
 
@@ -863,6 +893,7 @@ async function togglePlayback() {
 }
 
 function save() {
+  noiseEditor.flush();
   const savingSession = session;
   return manualSaves.save(savingSession, () => {
     const document = session.chart; const snapshot = { ...document }; delete snapshot.chartTime;
@@ -915,7 +946,7 @@ element('#file-input').addEventListener('change', async event => {
   finally { event.target.value = ''; }
 });
 listen('#save', () => save());
-listen('#export', () => showExportDialog(session.chart, assets, chartName, name => status(`已发起下载：${name}`)));
+listen('#export', () => { noiseEditor.flush(); showExportDialog(session.chart, assets, chartName, name => status(`已发起下载：${name}`), libraryProject?.identifier ?? libraryProject?.info?.Path); });
 listen('#view-toggle', () => togglePreview());
 listen('#close-preview', () => togglePreview(false, true));
 listen('#background', () => element('#background-input').click());
@@ -969,29 +1000,6 @@ element('#offset').addEventListener('change', event => {
   session.commit('修改谱面延迟', { ...session.chart, META: { ...session.chart.META, offset: value } });
   playback.seek(chartPosition + value / 1000);
 });
-function nudgeBeatInput(input, direction) {
-  try {
-    const current = beatValue(parseBeat(input.value || '0'));
-    const next = Math.max(0, current + direction / Math.max(1, timeline.division));
-    input.value = formatBeat(fromNumber(next));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  } catch (error) { reportError(error); }
-}
-function decorateBeatInputs() {
-  for (const input of document.querySelectorAll('#properties input[aria-label$="拍"], #event-properties input[aria-label$="拍"]')) {
-    if (input.dataset.beatDecorated) continue;
-    input.dataset.beatDecorated = 'true';
-    const holder = input.parentElement;
-    const wrapper = document.createElement('span'); wrapper.className = 'beat-input-wrap';
-    const nudge = document.createElement('span'); nudge.className = 'beat-nudge';
-    for (const [direction, symbol] of [[1, '▴'], [-1, '▾']]) {
-      const button = document.createElement('button'); button.type = 'button'; button.textContent = symbol; button.title = direction < 0 ? '减少一格' : '增加一格';
-      button.dataset.beatNudge = String(direction); button.onclick = () => nudgeBeatInput(input, direction); nudge.append(button);
-    }
-    input.replaceWith(wrapper); wrapper.append(input, nudge);
-    input.addEventListener('wheel', event => { event.preventDefault(); nudgeBeatInput(input, event.deltaY < 0 ? 1 : -1); }, { passive: false });
-  }
-}
 element('#chart-info-toggle').addEventListener('click', event => {
   const info = element('#chart-info'); info.hidden = !info.hidden;
   event.currentTarget.setAttribute('aria-expanded', String(!info.hidden));
@@ -1061,6 +1069,7 @@ for (const button of document.querySelectorAll('[data-tool]')) button.onclick = 
   invalidate();
 };
 function travel(direction, silent = false) {
+  noiseEditor.cancelGesture(); noiseEditor.endSample(false);
   timeline.cancelPlacement();
   const stack = direction === 'undo' ? session.history.undoStack : session.history.redoStack;
   const command = stack.at(-1);
@@ -1072,10 +1081,14 @@ listen('#undo', () => travel('undo'));
 listen('#redo', () => travel('redo'));
 listen('#curve-notes', openCurvePanel);
 listen('#curve-trajectory', () => { curveEditorOpen = false; trajectoryPanel.open(); });
+listen('#text-lines-tool', () => {
+  if (noiseEditor.active) noiseEditor.close();
+  timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; textLinesPanel.open();
+});
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
-  if (session.multiLineActive) return;
+  if (session.multiLineActive || noiseEditor.active) return;
   timeline.cancelPlacement(); timeline.hoverArea = 'notes'; session.focus = 'notes';
   activatePane('notes');
   editorPreferences.notesOnly = !timeline.notesOnly;
@@ -1113,13 +1126,15 @@ element('#toolbar-mode').onclick = () => {
   applyDisplaySettings(); persistEditor();
 };
 function copySelection() {
+  if (noiseEditor.active) { noiseEditor.copy(); return; }
   const count = copyObjects(session);
   if (count) { clipboardHistory.remember(session); status(`已复制 ${count} 个物件`); }
   invalidate();
 }
-function deleteSelection() { deleteObjects(session); }
-function cutSelection() { if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
+function deleteSelection() { if (noiseEditor.active) { noiseEditor.remove(); return; } deleteObjects(session); }
+function cutSelection() { if (noiseEditor.active) { noiseEditor.copy(true); return; } if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
 function pasteSelection(mirror = false, keepTime = false) {
+  if (noiseEditor.active) { noiseEditor.action(keepTime ? 'KeepTimePaste' : 'Paste'); return; }
   timeline.clipboardMode = { mirror, keepTime };
   pasteObjects(session, clipboardBeat(timeline), { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() });
 }
@@ -1155,7 +1170,7 @@ function renderHistoryPanel() {
   }
 }
 listen('#history-panel', () => { activatePane('history'); renderHistoryPanel(); });
-listen('#clear-clipboard', () => { clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
+listen('#clear-clipboard', () => { noiseEditor.clipboard = null; clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
 const clipboardButton = document.createElement('button'); clipboardButton.id = 'clipboard-history'; clipboardButton.textContent = '剪贴板历史'; clipboardButton.title = '长按 Ctrl+V';
 element('[data-panel="chart"] .action-grid').append(clipboardButton);
 function renderClipboardPanel() {
@@ -1184,7 +1199,11 @@ function deleteDiagnosticIssue(issue) {
     notify('已删除检查项对应对象', 'success'); return;
   }
   const chart = structuredClone(session.chart);
-  if (issue.path.startsWith('notes[') && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].notes.splice(issue.index, 1);
+  if (issue.noiseArea !== undefined) {
+    if (issue.noiseTrack) chart.blockAreaList?.[issue.noiseArea]?.[issue.noiseTrack]?.splice(issue.index, 1);
+    else chart.blockAreaList?.splice(issue.noiseArea, 1);
+  }
+  else if (issue.path.startsWith('notes[') && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].notes.splice(issue.index, 1);
   else if (issue.path === 'father' && chart.judgeLineList?.[issue.line]) chart.judgeLineList[issue.line].father = -1;
   else if (issue.path.startsWith('BPMList[')) chart.BPMList.splice(issue.index, 1);
   else if (issue.line != null && issue.path.match(/^\w+Events\[/)) {
@@ -1209,7 +1228,7 @@ function renderDiagnostics() {
   }
   lastDiagnosticSignature = signature;
   const category = issue => {
-    const top = issue.path.startsWith('notes[') ? '音符' : issue.path.match(/Events\[/) ? '事件' : '其他';
+    const top = issue.noiseArea !== undefined ? '噪域' : issue.path.startsWith('notes[') ? '音符' : issue.path.match(/Events\[/) ? '事件' : '其他';
     const sub = issue.message.includes('超出') ? '超界' : issue.message.includes('重叠') ? '重叠' : issue.message.includes('时长') ? '时长' : issue.message.includes('父线') ? '父线' : '其他';
     return [top, sub];
   };
@@ -1227,8 +1246,8 @@ function renderDiagnostics() {
         const subsummary = document.createElement('summary'); subsummary.textContent = `${sub}（${grouped.length}）`; subgroup.append(subsummary);
         for (const issue of grouped) {
           const row = document.createElement('div'); row.className = `diagnose-item ${severity}`;
-          const locate = document.createElement('button'); locate.type = 'button'; locate.textContent = `Line ${issue.line} · ${issue.beat} 拍 · ${issue.message}`;
-          locate.onclick = () => { session.selectLine(issue.line); seekBeat(issue.beat); notify(`已定位到 Line ${issue.line} · ${issue.beat} 拍`, 'success', 1800); };
+          const locate = document.createElement('button'); locate.type = 'button'; locate.textContent = `${issue.noiseArea !== undefined ? '噪域 ' + issue.noiseArea : 'Line ' + issue.line} · ${issue.beat} 拍 · ${issue.message}`;
+          locate.onclick = () => { if (issue.noiseArea !== undefined) { openNoisePanel(); noiseEditor.select(issue.noiseArea, issue.noiseTrack ? { type: issue.noiseTrack, index: issue.index } : null); } else session.selectLine(issue.line); seekBeat(issue.beat); };
           const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '删除'; remove.disabled = !issue.path.includes('[') && issue.path !== 'father'; remove.onclick = () => deleteDiagnosticIssue(issue);
           row.append(locate, remove); subgroup.append(row);
         }
@@ -1306,7 +1325,7 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || isTypingText(event.target)) return;
+  if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || usesNativeTextShortcut(event)) return;
   event.preventDefault();
   if (event.repeat) return;
   lineInfoVisible = !lineInfoVisible;
@@ -1314,7 +1333,7 @@ window.addEventListener('keydown', event => {
 }, true);
 window.addEventListener('blur', () => { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); });
 window.addEventListener('keydown', event => {
-  if (atHome || !hasDocument || dialogOpen() || isTextEntry(event.target) || !shortcutMatches(event, preferences.hotkeys.Pause)) return;
+  if (atHome || !hasDocument || dialogOpen() || usesNativeTextShortcut(event) || isTextEntry(event.target) || !shortcutMatches(event, preferences.hotkeys.Pause)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   playbackSpaceHeld = true;
   if (!event.repeat) togglePlayback().catch(reportError);
@@ -1326,14 +1345,17 @@ window.addEventListener('keyup', event => {
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
 window.addEventListener('keydown', async event => {
   const target = event.target;
-  if (atHome || !hasDocument || dialogOpen() || isTypingText(target)) return;
-  if (isTextEntry(target) && event.key.toLowerCase() === 'v' && (event.ctrlKey || event.metaKey)) return;
+  if (atHome || !hasDocument || dialogOpen() || usesNativeTextShortcut(event)) return;
   if (batchControls.active) { event.preventDefault(); return; }
   const area = timeline.hoverArea ?? session.focus;
   const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
-  const hasSelection = Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
+  const hasSelection = noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
   const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
-  if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
+  if (noiseEditor.active && (!preview.visible || noiseEditor.sampleMode)) {
+    try { if (noiseEditor.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; } }
+    catch (error) { event.preventDefault(); reportError(error); return; }
+  }
+    if (action || ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) releaseShortcutFocus(target);
   if (pasteGesture.pending && action !== 'Paste') pasteGesture.cancel();
     if (action === 'Paste' && clipboardHistory.enabled && !preview.visible && shortcutMatches(event, preferences.hotkeys.ClipboardHistory ?? DEFAULT_HOTKEYS.ClipboardHistory)) {
     pasteGesture.down(event, { session, chart: session.chart, lineIndex: session.lineIndex, targetLineIndex: clipboardTargetLine(), layer: timeline.layer, beat: clipboardBeat(timeline) }); return;
@@ -1409,7 +1431,7 @@ markerResizeObserver.observe(element('.stage'));
 markerResizeObserver.observe(element('.scrubber-wrap'));
 let lastPaint = 0;
 let lastInfoTick = 0;
-let lastFrameTime = 0;
+const frameLimiter = new FrameLimiter();
 let frameSampleStart = 0;
 let frameSampleCount = 0;
 let measuredFps = 0;
@@ -1419,8 +1441,7 @@ function frame(timestamp) {
   audio.update();
   batchControls.sync();
   lineSwitcher.draw(timestamp);
-  if (!atHome) timeline.autoScroll(elapsed);
-  frameSampleCount++;
+  if (!atHome) { if (noiseEditor.active) noiseEditor.autoScroll(elapsed); else timeline.autoScroll(elapsed); }
   if (timestamp - frameSampleStart >= 500) { measuredFps = frameSampleCount * 1000 / (timestamp - frameSampleStart); frameSampleStart = timestamp; frameSampleCount = 0; }
   advanceEditClock(timestamp);
   if (hasDocument && !atHome && timestamp - lastInfoTick > 500) {
@@ -1433,14 +1454,14 @@ function frame(timestamp) {
   if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
-  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active) && timestamp - lastFrameTime >= 1000 / preferences.settings.fpsLimit) {
-    lastFrameTime = timestamp;
+  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
+    frameSampleCount++;
     const start = performance.now();
     const beat = currentBeat();
     session.editSeconds = Math.max(0, chartSeconds());
     updateLineInfo();
     if (audio.playing) timeline.origin = beat;
-    if (!preview.visible) {
+    if (!preview.visible && !noiseEditor.active) {
       timeline.draw(beat);
       multiEdit.drawTimeline();
       selectionOverlay.draw();
@@ -1448,18 +1469,37 @@ function frame(timestamp) {
       updateLayerButtons();
       audioAnalysis.draw(offsetSeconds());
     }
+    if (noiseEditor.active) noiseEditor.draw();
     preview.duration = realtimePreview.duration = audio.duration;
+    preview.selectedNoiseArea = realtimePreview.selectedNoiseArea = noiseEditor.active ? noiseEditor.selected : -1;
     const viewSession = timeline.getSession();
     const trajectoryView = trajectoryPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
-    const viewChart = trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
-    const viewSeconds = trajectoryView?.seconds ?? chartSeconds();
+    const noiseView = noiseEditor.active ? noiseEditor.previewState() : null;
+    const textView = textLinesPanel.view();
+    const viewChart = noiseView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
+    const viewSeconds = noiseView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds();
+    const previewAllLines = preview.allLines; const previewEffects = preview.showHitEffects;
+    const previewNumbers = preview.lineNumbers; const previewArrows = preview.lineArrows;
+    if (textView) { preview.allLines = true; preview.showHitEffects = false; preview.lineNumbers = false; preview.lineArrows = false; }
     preview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+    preview.allLines = previewAllLines; preview.showHitEffects = previewEffects;
+    preview.lineNumbers = previewNumbers; preview.lineArrows = previewArrows;
     if (!preview.visible) {
       const visible = realtimePreview.visible;
-      if (trajectoryView) realtimePreview.visible = true;
+      if (trajectoryView || textView || noiseEditor.sampleMode) realtimePreview.visible = true;
+      element('#realtime-preview').hidden = !realtimePreview.visible;
+      const opacity = realtimePreview.opacity;
+      const allLines = realtimePreview.allLines;
+      const lineNumbers = realtimePreview.lineNumbers; const lineArrows = realtimePreview.lineArrows;
+      if (textView) { realtimePreview.allLines = true; realtimePreview.lineNumbers = false; realtimePreview.lineArrows = false; }
+      if (noiseEditor.sampleMode) realtimePreview.opacity = 1;
       realtimePreview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+      realtimePreview.opacity = opacity;
+      realtimePreview.allLines = allLines;
+      realtimePreview.lineNumbers = lineNumbers; realtimePreview.lineArrows = lineArrows;
       realtimePreview.visible = visible;
     }
+    noiseEditor.drawSample();
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
     element('#play').dataset.playing = String(audio.playing);
     element('#play').title = audio.playing ? '暂停' : '播放';
@@ -1526,6 +1566,7 @@ function applyPreferences(next) {
 
 function applyMigratedPreferences(next) {
   editorPreferences = { ...editorPreferences, volume: next.settings.volume, hitVolume: next.settings.hitVolume, gridCount: next.settings.gridCount, realtimeAlpha: next.settings.realtimeAlpha,
+    fpsLimit: next.settings.fpsLimit,
     lineScale: next.settings.lineScale,
     ratioWidth: next.settings.ratioWidth, ratioHeight: next.settings.ratioHeight, barWidth: next.settings.barWidth, barAlpha: next.settings.barAlpha,
     autoSave: next.settings.autoSave, autoSaveSeconds: next.settings.autoSaveSeconds, autoSaveLimit: next.settings.autoSaveLimit, autoplayView: next.settings.autoplayView, highlight: next.settings.highlight, showGameUI: next.settings.showGameUI };
@@ -1561,6 +1602,7 @@ element('#directory-input').addEventListener('change', async event => {
 });
 listen('#library', () => {
   if (atHome) return;
+  noiseEditor.flush();
   playback.pause();
   if (!session.history.dirty && !assetDirty) { setHome(true); return; }
   choose('返回主界面前保存修改？', '保存会更新谱面库及资源；不保存会丢弃本次未保存修改。', ['保存并返回', '不保存并返回'], value => value, async value => {
@@ -1583,6 +1625,12 @@ readPreferences().then(saved => {
 }).catch(error => status(`无法读取偏好设置：${error.message}`));
 
 function applyDisplaySettings() {
+  const fpsLimit = editorPreferences.fpsLimit ?? preferences.settings.fpsLimit;
+  element('#fps-unlimited').checked = !fpsLimit;
+  element('#fps-limit').disabled = !fpsLimit;
+  if (fpsLimit) element('#fps-limit').value = fpsLimit;
+  element('#fps-limit').setCustomValidity('');
+  element('#fps-limit-error').hidden = true;
   for (const [id, key, fallback] of displayFields) {
     const control = element(`#${id}`); const value = editorPreferences[key] ?? preferences.settings[key] ?? fallback;
     if (control.type === 'checkbox') control.checked = value; else control.value = value;
@@ -1592,12 +1640,16 @@ function applyDisplaySettings() {
   setRatioOptions(element('#preview-ratio'), ratioWidth, ratioHeight);
   preview.aspectRatio = realtimePreview.aspectRatio = ratioWidth / ratioHeight;
   applyViewControls({ ...editorPreferences, showGameUI: editorPreferences.showGameUI ?? preferences.settings.showGameUI }, timeline, [preview, realtimePreview]);
-  for (const renderer of [preview, realtimePreview]) for (const key of ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines']) renderer[key] = editorPreferences[key] ?? true;
+  for (const renderer of [preview, realtimePreview]) for (const key of ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'pickPreviewNoiseAreas']) renderer[key] = editorPreferences[key] ?? true;
+  for (const renderer of [preview, realtimePreview]) {
+    renderer.noisePreview.seamless = editorPreferences.seamlessNoiseAreas ?? true;
+  }
   const toolbarMode = editorPreferences.toolbarMode ?? 'icons';
   element('.editor-toolbar').classList.remove('mode-compact', 'mode-icons', 'mode-wide');
   element('.editor-toolbar').classList.add(`mode-${toolbarMode}`);
   element('#toolbar-mode').title = `工具栏：${toolbarMode === 'icons' ? '图标' : toolbarMode === 'wide' ? '完整' : '紧凑'}（点击切换）`;
   timeline.barWidth = Number(element('#bar-width').value); timeline.barAlpha = Number(element('#bar-alpha').value); timeline.judgementOffset = Number(element('#judgement-offset').value);
+  timeline.judgementColor = element('#judgement-color').value;
   timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventValueThreshold = Number(element('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element('#event-curve-threshold').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
   timeline.seamlessEvents = element('#seamless-events').checked;
   session.cutDensity = Number(element('#event-cut-density').value);
@@ -1614,9 +1666,27 @@ function applyDisplaySettings() {
   rotateTip();
   invalidate();
 }
+function applyFpsLimit() {
+  const input = element('#fps-limit');
+  const unlimited = element('#fps-unlimited').checked;
+  input.disabled = unlimited;
+  const value = unlimited ? 0 : Number(input.value);
+  const valid = unlimited || input.value.trim() && value > 10 && validFpsLimit(value);
+  input.setCustomValidity(valid ? '' : '帧率上限必须是大于 10 的有限数字');
+  element('#fps-limit-error').hidden = Boolean(valid);
+  if (!valid) return;
+  editorPreferences.fpsLimit = value;
+  persistEditor(); invalidate();
+}
+document.addEventListener('dragstart', event => {
+  if (!editorPreferences.textSelectionDrag && isTextEntry(event.target)) event.preventDefault();
+}, true);
+element('#fps-limit').addEventListener('input', applyFpsLimit);
+element('#fps-unlimited').addEventListener('change', applyFpsLimit);
 for (const [id, key] of displayFields) element(`#${id}`).addEventListener(element(`#${id}`).type === 'number' ? 'change' : 'input', event => {
   const control = event.target;
   if (control.type === 'checkbox') editorPreferences[key] = control.checked;
+  else if (control.type === 'color') editorPreferences[key] = control.value;
   else if (control.value.trim() && control.validity.valid && Number.isFinite(Number(control.value))) editorPreferences[key] = Number(control.value);
   else return;
   applyDisplaySettings(); persistEditor();

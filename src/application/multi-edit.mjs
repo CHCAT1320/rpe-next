@@ -1,5 +1,6 @@
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { assertChart } from '../core/chart.mjs';
+import { integerAlphaEvent, integerNoteAlpha } from '../core/alpha-values.mjs';
 import { easing } from '../core/easing.mjs';
 import { compileExpression, compileBatchScript } from '../core/batch-script.mjs';
 import { alignShaderParameters } from '../core/shader-events.mjs';
@@ -80,6 +81,8 @@ function writeField(item, field, value) {
 }
 
 function validateChange(change, lineCount, snapshot) {
+  if (change.kind === 'notes') change.after = integerNoteAlpha(change.after);
+  else if (change.type === 'alphaEvents') change.after = integerAlphaEvent(change.after);
   const { after, kind, type } = change;
   if (!Number.isInteger(change.lineIndex) || change.lineIndex < 0 || change.lineIndex >= lineCount) throw new Error(`目标线 ${change.lineIndex} 不存在`);
   if (kind === 'notes') {
