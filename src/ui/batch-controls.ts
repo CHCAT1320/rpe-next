@@ -5,6 +5,7 @@ import { snapTime } from '../core/edit-grid.ts';
 import type { Chart } from '../core/types.ts';
 import type { EditorSession } from '../application/session.ts';
 import type { Timeline } from './timeline.ts';
+import { usesNativeTextShortcut } from './keyboard.ts';
 
 /** The two editing areas the control balls drive; also the keys of {@link configurations}. */
 export type BatchArea = 'notes' | 'events';
@@ -79,7 +80,7 @@ export class BatchControls {
       stage.append(host); this.groups.set(area, { host, hint, signature: '' });
     }
     window.addEventListener('keydown', event => {
-      if (!this.active) return;
+      if (!this.active || usesNativeTextShortcut(event)) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); this.cancel(); return; }
       if (['1', '2'].includes(event.key) && this.active.kind === 'note-scale') { event.preventDefault(); this.anchorMode = Number(event.key); this.update(); }
     }, true);

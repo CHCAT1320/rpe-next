@@ -1,4 +1,5 @@
 import { mediaType } from './files.ts';
+import { pcmWave } from './pcm-wave.ts';
 
 /**
  * The audio graph slice this transport drives.
@@ -36,9 +37,21 @@ export interface BufferSourceLike {
   start(when?: number, offset?: number): void;
 }
 
-/** The decoded sample buffer slice used here. */
+/**
+ * The decoded sample buffer slice used here.
+ *
+ * Only `duration` is guaranteed: the transport itself never reads samples, so the lightweight
+ * doubles in the tests carry no more. The three optional members are what `pcmWave` needs when it
+ * re-encodes the decoded samples as a playable WAV, so they are declared here and checked by
+ * `pcmWave`'s caller before use.
+ */
 export interface AudioBufferLike {
   duration: number;
+  /** Frames per channel; present on a real `AudioBuffer`. */
+  length?: number;
+  numberOfChannels?: number;
+  sampleRate?: number;
+  getChannelData?(channel: number): Float32Array;
 }
 
 /** The `MediaElementAudioSourceNode` slice used here. */
@@ -82,6 +95,26 @@ interface MediaStart {
   media: MediaElementLike;
   revision: number;
   cancel?: (() => void) | null;
+}
+
+/**
+ * Points a media element at a URL and resolves once its metadata is available.
+ *
+ * Extracted so the initial object URL and the PCM-encoded replacement can both go through the same
+ * timeout/error handshake. `timeout` is referenced by `finish` before its own initialiser runs, but
+ * only ever after the first `await`/callback, by which point the binding is initialised.
+ */
+function loadMediaSource(media: MediaElementLike, url: string, name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const finish = (error?: unknown): void => {
+      clearTimeout(timeout); media.onloadedmetadata = null; media.onerror = null;
+      if (error) reject(error); else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error(`读取音乐 ${name} 超时，请检查文件或重新导入`)), 15000);
+    media.onloadedmetadata = () => finish();
+    media.onerror = () => finish(new Error(`无法解码音乐 ${name}；请检查文件完整性或转为 WAV/FLAC/MP3/OGG`));
+    media.src = url;
+  });
 }
 
 export class AudioTransport {
@@ -142,20 +175,30 @@ export class AudioTransport {
     let decoded: AudioBufferLike | null = null;
     if (typeof Audio !== 'undefined') {
       const media = new Audio() as MediaElementLike; media.preload = 'auto';
-      const url = URL.createObjectURL(new Blob([bytes], { type: mediaType(name) }));
+      let url = URL.createObjectURL(new Blob([bytes], { type: mediaType(name) }));
       try {
-        await new Promise<void>((resolve, reject) => {
-          const finish = (error?: unknown) => {
-            clearTimeout(timeout); media.onloadedmetadata = null; media.onerror = null;
-            if (error) reject(error); else resolve();
-          };
-          const timeout = setTimeout(() => finish(new Error(`读取音乐 ${name} 超时，请检查文件或重新导入`)), 15000);
-          media.onloadedmetadata = () => finish();
-          media.onerror = () => finish(new Error(`无法解码音乐 ${name}；请检查文件完整性或转为 WAV/FLAC/MP3/OGG`));
-          media.src = url;
-        });
+        await loadMediaSource(media, url, name);
         if (typeof context.decodeAudioData === 'function') {
           try { decoded = await context.decodeAudioData(bytes.slice(0)); } catch { decoded = null; }
+        }
+        if (decoded && revision === this.loadRevision) {
+          let pcmUrl: string | undefined;
+          try {
+            // `AudioBufferLike` declares the sample accessors as optional because the transport never
+            // reads samples itself, while `pcmWave` needs the real `AudioBuffer` shape. Every buffer a
+            // real `decodeAudioData` hands back is a full `AudioBuffer`, so this binding narrows the
+            // declared slice back to it; a stand-in that is not simply makes `pcmWave` throw, which
+            // the `catch` below turns into the original-media fallback.
+            const decodedBuffer: AudioBuffer = decoded as AudioBuffer;
+            const wave = await pcmWave(decodedBuffer, () => revision !== this.loadRevision);
+            if (wave) {
+              pcmUrl = URL.createObjectURL(wave);
+              await loadMediaSource(media, pcmUrl, name);
+              URL.revokeObjectURL(url); url = pcmUrl;
+            }
+          } catch {
+            if (pcmUrl) { URL.revokeObjectURL(pcmUrl); await loadMediaSource(media, url, name); }
+          }
         }
         if (revision !== this.loadRevision) { media.removeAttribute('src'); media.load(); URL.revokeObjectURL(url); return false; }
         this.releaseMedia(); this.media = media; this.mediaUrl = url;
@@ -249,9 +292,13 @@ export class AudioTransport {
 
   pause(): void {
     this.playRevision++;
-    this.position = Math.min(this.time, this.duration);
-    this.playing = false;
+    const position = this.time;
+    // `usesMedia` already proves `media` is present, but it is a getter and does not narrow the
+    // field, so the two reads below assert the same fact it just checked (as `time`/`clockReady` do).
+    const usePausedMediaTime = this.playing && this.usesMedia && this.position >= 0 && !this.mediaStart && !this.media!.seeking;
     this.stopSource();
+    this.position = Math.min(usePausedMediaTime ? this.media!.currentTime : position, this.duration);
+    this.playing = false;
   }
 
   stopSource(): void {

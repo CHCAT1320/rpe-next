@@ -6,7 +6,28 @@ import { LineRuntime } from '../src/core/scene.ts';
 import { TempoMap } from '../src/core/tempo.ts';
 import { lineGuides, pickGuide } from '../src/core/preview-guides.ts';
 import type { LineGuide } from '../src/core/preview-guides.ts';
+import type { PreviewViewport } from '../src/core/editor-display.ts';
 import { Preview } from '../src/ui/preview.ts';
+import { normalizeEditorPreferences } from '../src/platform/editor-preferences.ts';
+
+test('噪域点击默认开启、可持久关闭，命中坐标遵循预览范围且编辑背景不穿透', () => {
+  // `Preview`'s hit test only reads the box's `left`/`top`, so the canvas goes through the same
+  // `previewCanvas` bridge as the other cases rather than widening the double to a full element.
+  const preview = new Preview(previewCanvas(canvasAt(10, 20)));
+  // The viewport double is the four members `pick`/`pickNoiseArea` read; `PreviewViewport` also
+  // declares `scale`, which the hit tests never touch.
+  preview.viewport = { left: 50, top: 40, width: 900, height: 520 } as unknown as PreviewViewport;
+  // `NoisePreview.pick` is declared without parameter types (it is being annotated in parallel), so
+  // the double states the two coordinates it compares rather than relying on contextual inference.
+  preview.noisePreview.pick = (horizontal: number, vertical: number) => horizontal === 500 && vertical === 300 ? 7 : null;
+  assert.equal(preview.pickNoiseArea(510, 320), null);
+  preview.visible = true;
+  assert.equal(preview.pickNoiseArea(510, 320), 7);
+  assert.equal(preview.pickNoiseArea(0, 320), null);
+  preview.pickPreviewNoiseAreas = false;
+  assert.equal(preview.pickNoiseArea(510, 320), null);
+  for (const pickPreviewNoiseAreas of [true, false]) assert.deepEqual(normalizeEditorPreferences({ pickPreviewNoiseAreas }), { pickPreviewNoiseAreas });
+});
 
 /** One recorded 2D-context call, as the recording proxy below stores it. */
 interface RecordedCall {

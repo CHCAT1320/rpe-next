@@ -2,10 +2,12 @@
 // expressed as data: one table of clamped numeric ranges and one list of boolean flags. Adding a
 // preference means adding a row here, and unknown keys in stored data are dropped rather than
 // copied through, which keeps a preference file written by an older or newer build harmless.
+import { validFpsLimit } from '../core/frame-timing.ts';
+
 const ranges: Record<string, [minimum: number, maximum: number]> = { scale: [20, 2000], division: [1, 100], gridCount: [2, 100], volume: [0, 1], hitVolume: [0, 1], realtimeAlpha: [0, 1], ratioWidth: [1, 100], ratioHeight: [1, 100], barWidth: [0.5, 10], barAlpha: [0.1, 2], judgementOffset: [42, 240], eventValueSize: [8, 28], eventValueThreshold: [10, 180], eventCurveThreshold: [8, 180], eventOpacity: [0.05, 1], eventBarWidth: [0.35, 1], multiLineWidth: [30, 2400], multiLineEventWidth: [30, 2400], scrollSpeed: [0.1, 100], autoSaveSeconds: [1, 3600], autoSaveLimit: [1, 100] };
 Object.assign(ranges, { cameraX: [-1000000, 1000000], viewDivisor: [0.1, 100], backgroundBlur: [0, 30], cutDensity: [0.1, 128] });
 Object.assign(ranges, { analysisAlpha: [0.02, 1], analysisWidth: [0.2, 1], lineScale: [0.1, 10] });
-const flags = ['snapX', 'realtime', 'hitEnabled', 'allLines', 'preservePitch', 'autoSave', 'autoplayView', 'highlight', 'seamlessEvents', 'notesOnly', 'showGameUI', 'lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'tipsEnabled', 'successNotifications', 'clipboardHistory', 'lineSwitcher', 'analysisEnabled', 'noteSourceHover'] as const;
+const flags = ['snapX', 'realtime', 'hitEnabled', 'allLines', 'preservePitch', 'autoSave', 'autoplayView', 'highlight', 'seamlessEvents', 'seamlessNoiseAreas', 'notesOnly', 'showGameUI', 'lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'pickPreviewNoiseAreas', 'tipsEnabled', 'successNotifications', 'clipboardHistory', 'lineSwitcher', 'analysisEnabled', 'noteSourceHover', 'sampleAutoFit'] as const;
 const toolbarModes = ['compact', 'icons', 'wide'] as const;
 /** The waveform/spectrum choice is a string, so it is validated against its own list. */
 const analysisModes = ['waveform', 'spectrum'] as const;
@@ -26,7 +28,14 @@ export interface EditorPreferences {
    * boolean. It is validated against `analysisModes` on read, exactly like `toolbarMode`.
    */
   analysisMode?: AnalysisMode;
-  [key: string]: number | boolean | ToolbarMode | AnalysisMode | undefined;
+  /**
+   * The frame-rate cap in FPS, or `0` for unlimited. Validated by {@link validFpsLimit} rather than
+   * clamped, because an out-of-range cap is meaningless instead of merely extreme.
+   */
+  fpsLimit?: number;
+  /** The colour of the bottom judgement line in the editing area; a `#rrggbb` string. */
+  judgementColor?: string;
+  [key: string]: number | boolean | string | ToolbarMode | AnalysisMode | undefined;
 }
 
 /** The storage surface this module needs, so tests can pass a stub. */
@@ -44,6 +53,15 @@ export function normalizeEditorPreferences(value: unknown): EditorPreferences {
   const result: EditorPreferences = {};
   if (!value || typeof value !== 'object') return result;
   const source = value as Record<string, unknown>;
+  // The frame-rate cap is not clamped: an unusable value means "no preference recorded" rather than
+  // an extreme one, so `validFpsLimit` decides. The `typeof` test is what lets the helper take a
+  // `number` while the stored value is still `unknown`; `Number.isFinite` inside it would reject a
+  // non-number anyway, so the guard adds no behaviour of its own.
+  if (typeof source.fpsLimit === 'number' && validFpsLimit(source.fpsLimit)) result.fpsLimit = source.fpsLimit;
+  if (typeof source.textSelectionDrag === 'boolean') result.textSelectionDrag = source.textSelectionDrag;
+  // A stored colour is only kept when it is a plain six-digit hex; the lower-case form is what the
+  // `<input type="color">` element reports, so the two compare equal on the next read.
+  if (typeof source.judgementColor === 'string' && /^#[0-9a-f]{6}$/i.test(source.judgementColor)) result.judgementColor = source.judgementColor.toLowerCase();
   for (const [key, [minimum, maximum]] of Object.entries(ranges)) {
     const entry = source[key];
     if (Number.isFinite(entry)) result[key] = Math.max(minimum, Math.min(maximum, entry as number));

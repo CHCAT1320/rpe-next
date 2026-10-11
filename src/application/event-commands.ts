@@ -1,4 +1,5 @@
 import { EVENT_TYPES, assertChart, createEvent } from '../core/chart.ts';
+import { integerAlphaEvent } from '../core/alpha-values.ts';
 import { beatValue, fromNumber } from '../core/beat.ts';
 import { trajectoryHasRotation } from '../core/curve-trajectory.ts';
 import { EventTrack } from '../core/events.ts';
@@ -94,7 +95,7 @@ export function chartWithEventLists(chart: Chart, lineIndex: number, eventLayer:
     if (type === 'paintEvents') continue;
     if (EVENT_TYPES.includes(type as EventType)) {
       while (line.eventLayers.length <= eventLayer) line.eventLayers.push({});
-      line.eventLayers[eventLayer] = { ...(line.eventLayers[eventLayer] as ShaderEventLayer), [type]: events };
+      line.eventLayers[eventLayer] = { ...(line.eventLayers[eventLayer] as ShaderEventLayer), [type]: type === 'alphaEvents' ? events.map(integerAlphaEvent) : events };
     }
     else line.extended[type] = events;
   }

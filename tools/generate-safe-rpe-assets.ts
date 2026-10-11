@@ -7,10 +7,17 @@ import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 
 const outputIndex = process.argv.indexOf('--output');
-const root = outputIndex >= 0 ? process.argv[outputIndex + 1] : fileURLToPath(new URL('../', import.meta.url));
+const checkoutRoot = fileURLToPath(new URL('../', import.meta.url));
+// `--output <dir>` names the directory standing in for the checkout's `public/`, so a run against a
+// scratch tree writes to `<dir>/assets/rpe` while a normal run targets `public/assets/rpe` here.
+// Both paths therefore share this one asset root, and every manifest lookup below goes through it.
+const publicRoot = outputIndex >= 0 ? process.argv[outputIndex + 1] : join(checkoutRoot, 'public');
 const notesOnly = process.argv.includes('--notes-only');
-const textureRoot = join(root, 'public', 'assets', 'rpe', 'Texture');
-const soundRoot = join(root, 'public', 'assets', 'rpe', 'SE');
+const effectsOnly = process.argv.includes('--effects-only');
+if (notesOnly && effectsOnly) throw new Error('Choose either --notes-only or --effects-only');
+const assetRoot = join(publicRoot, 'assets', 'rpe');
+const textureRoot = join(assetRoot, 'Texture');
+const soundRoot = join(assetRoot, 'SE');
 mkdirSync(textureRoot, { recursive: true });
 
 /** An RGBA pixel buffer plus its dimensions, as produced by {@link canvas}. */
@@ -77,7 +84,7 @@ const holdBody = (width: number, height: number, color: Color): Image => canvas(
   rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.06, -1, canvasWidth * 0.94, canvasHeight + 1, 0, [255, 255, 255], 0.7);
   rounded(pixels, canvasWidth, canvasHeight, canvasWidth * 0.12, -1, canvasWidth * 0.88, canvasHeight + 1, 0, color, 0.9);
 });
-const noteAssets = {
+const noteAssets = effectsOnly ? {} : {
   Tap2: head(1089, 100, [35, 194, 235], 84), Tap2HL: head(1089, 200, [35, 194, 235], 84, true),
   Drag2: head(1089, 100, [255, 198, 45], 76), DragHL: head(1089, 200, [255, 198, 45], 76, true),
   Flick2: head(1089, 200, [239, 93, 194], 152), Flick2HL: head(1089, 300, [239, 93, 194], 152, true),
@@ -86,28 +93,40 @@ const noteAssets = {
 };
 for (const [name, image] of Object.entries(noteAssets)) writePng(join(textureRoot, `${name}.png`), image);
 if (notesOnly) {
-  const manifestFile = join(root, 'public', 'assets', 'rpe', 'manifest.json');
+  const manifestFile = join(assetRoot, 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
   for (const entry of manifest.files) {
     if (!Object.keys(noteAssets).some(name => entry.path === `Texture/${name}.png`)) continue;
-    const bytes = readFileSync(join(root, 'public', 'assets', 'rpe', entry.path));
+    const bytes = readFileSync(join(assetRoot, entry.path));
     entry.bytes = bytes.length;
     entry.sha256 = createHash('sha256').update(bytes).digest('hex');
   }
   writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
   process.exit(0);
 }
-const effectSizes = [24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24];
 for (let frame = 1; !notesOnly && frame <= 31; frame++) {
-  const width = frame >= 25 && frame <= 30 ? 259 : frame === 31 ? 169 : 255; const height = frame === 31 ? 169 : 256; const progress = (frame - 1) / 30; const image = canvas(width, height, (pixels, w, h) => {
+  const width = 256; const height = 256; const progress = (frame - 1) / 30; const image = canvas(width, height, (pixels, w, h) => {
     const centerX = w / 2; const centerY = h / 2; const radius = 14 + progress * Math.min(w, h) * 0.42; const ringWidth = Math.max(3, 18 * (1 - progress));
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const distance = Math.hypot(x - centerX, y - centerY); const ring = clamp(1 - Math.abs(distance - radius) / ringWidth); const glow = clamp(1 - distance / (radius + 36)) * 0.16; if (ring > 0 || glow > 0) blend(pixels, (y * w + x) * 4, 255, 220 - Math.round(progress * 50), 120 + Math.round(progress * 90), Math.max(ring * (0.85 - progress * 0.35), glow)); }
+    const glowRadius = Math.min(radius + 36, Math.min(w, h) / 2 - 2);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const distance = Math.hypot(x - centerX, y - centerY); const ring = clamp(1 - Math.abs(distance - radius) / ringWidth); const glow = clamp(1 - distance / glowRadius) * 0.16; if (ring > 0 || glow > 0) blend(pixels, (y * w + x) * 4, 255, 220 - Math.round(progress * 50), 120 + Math.round(progress * 90), Math.max(ring * (0.85 - progress * 0.35), glow)); }
     for (let ray = 0; ray < 12; ray++) { const angle = ray * Math.PI / 6 + progress * 0.5; const distance = 24 + progress * 72; diamond(pixels, w, h, centerX + Math.cos(angle) * distance, centerY + Math.sin(angle) * distance, 10 * (1 - progress * 0.5), [255, 239, 172], 0.55 * (1 - progress * 0.6)); }
   });
   writePng(join(textureRoot, `img-${frame}.png`), image);
+}
+if (effectsOnly) {
+  const manifestFile = join(assetRoot, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+  for (const entry of manifest.files) {
+    if (!/^Texture\/img-(?:[1-9]|[12]\d|3[01])\.png$/.test(entry.path)) continue;
+    const bytes = readFileSync(join(assetRoot, entry.path));
+    entry.bytes = bytes.length;
+    entry.sha256 = createHash('sha256').update(bytes).digest('hex');
+  }
+  writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+  process.exit(0);
 }
 const wav = (name: string, duration: number, tone: (time: number, duration: number) => number): void => { const sampleRate = 44100; const count = Math.round(sampleRate * duration); const samples = new Int16Array(count); for (let index = 0; index < count; index++) { const time = index / sampleRate; const value = tone(time, duration); samples[index] = Math.max(-32767, Math.min(32767, Math.round(value * 28000))); } const data = Buffer.alloc(44 + samples.byteLength); data.write('RIFF', 0); data.writeUInt32LE(36 + samples.byteLength, 4); data.write('WAVE', 8); data.write('fmt ', 12); data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(1, 22); data.writeUInt32LE(sampleRate, 24); data.writeUInt32LE(sampleRate * 2, 28); data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34); data.write('data', 36); data.writeUInt32LE(samples.byteLength, 40); for (let index = 0; index < samples.length; index++) data.writeInt16LE(samples[index], 44 + index * 2); const folder = mkdtempSync(join(tmpdir(), 'rpe-safe-')); const input = join(folder, `${name}.wav`); const output = join(soundRoot, `${name}.ogg`); writeFileSync(input, data); execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-i', input, '-c:a', 'libvorbis', '-q:a', '4', output]); };
 wav('tap', 0.09, (time, duration) => Math.sin(2 * Math.PI * (920 - 280 * time / duration) * time) * Math.exp(-time * 34));
 wav('drag', 0.14, (time, duration) => (Math.sin(2 * Math.PI * (340 + 520 * time / duration) * time) * 0.7 + Math.sin(2 * Math.PI * 1170 * time) * 0.18) * Math.exp(-time * 17));
 wav('flick', 0.13, (time, duration) => (Math.sin(2 * Math.PI * (1250 - 650 * time / duration) * time) + Math.sin(2 * Math.PI * 2100 * time) * 0.22) * Math.exp(-time * 23));
-const manifestFile = join(root, 'public', 'assets', 'rpe', 'manifest.json'); const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')); manifest.source = 'Generated replacement assets for public distribution; local builds may use the original RPE resources.'; const replaced = new Set([...Object.keys(noteAssets).map(name => `Texture/${name}.png`), ...Array.from({ length: 31 }, (unused, index) => `Texture/img-${index + 1}.png`), 'SE/tap.ogg', 'SE/drag.ogg', 'SE/flick.ogg']); for (const entry of manifest.files) if (replaced.has(entry.path)) { const bytes = readFileSync(join(root, 'public', 'assets', 'rpe', entry.path)); entry.bytes = bytes.length; entry.sha256 = createHash('sha256').update(bytes).digest('hex'); } writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+const manifestFile = join(assetRoot, 'manifest.json'); const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')); manifest.source = 'Generated replacement assets for public distribution; local builds may use the original RPE resources.'; const replaced = new Set([...Object.keys(noteAssets).map(name => `Texture/${name}.png`), ...Array.from({ length: 31 }, (unused, index) => `Texture/img-${index + 1}.png`), 'SE/tap.ogg', 'SE/drag.ogg', 'SE/flick.ogg']); for (const entry of manifest.files) if (replaced.has(entry.path)) { const bytes = readFileSync(join(assetRoot, entry.path)); entry.bytes = bytes.length; entry.sha256 = createHash('sha256').update(bytes).digest('hex'); } writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);

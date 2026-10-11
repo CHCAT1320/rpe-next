@@ -1,13 +1,15 @@
-import { serializeChart } from '../core/chart.ts';
+import { serializeChart, stringifyPreservingNumbers, EVENT_TYPES, EXTENDED_TYPES } from '../core/chart.ts';
 import { parseDocument } from '../core/formats.ts';
-import { readZip, writeZip } from './archive.ts';
+import { readZip, writeZip, crc32 } from './archive.ts';
 import { decodeLegacy, parseInfo } from './legacy-text.ts';
 import { serializeShaderEvent } from '../core/shader-events.ts';
 import { expandTrajectory } from '../application/trajectory-commands.ts';
 import { TempoMap } from '../core/tempo.ts';
 import { beatValue } from '../core/beat.ts';
+import { NOISE_TRACKS } from '../core/noise-areas.ts';
+import { integerChartAlpha } from '../core/alpha-values.ts';
 import type { ArchiveEntries } from './archive.ts';
-import type { Chart, TrajectorySplit } from '../core/types.ts';
+import type { Chart, ChartEvent, EventLayer, NoiseArea, TrajectorySplit } from '../core/types.ts';
 
 /** A parsed chart together with the archive path it was found at. */
 export interface ChartCandidate {
@@ -48,6 +50,12 @@ export async function openFiles(fileList: ArrayLike<File> & Iterable<File>): Pro
   }
   if (!candidates.length) throw new Error(errors.join('\n') || '找不到 RPE JSON 谱面');
   attachExternalEffects(candidates, assets);
+  for (const candidate of candidates) if (candidate.chart.rpeNextLegacySource?.format === 'phigros-v3') {
+    const references = resourceReferences(candidate.chart, assets, candidate.name);
+    // A name that reaches here always has at least one path segment, so `at(-1)` is present; the
+    // fallback keeps the empty-name case total without changing the value for a real path.
+    candidate.chart.META = { ...candidate.chart.META, name: (candidate.name.replaceAll('\\', '/').split('/').at(-1) ?? candidate.name).replace(/\.json$/i, ''), ...references };
+  }
   return { candidates, assets };
 }
 
@@ -83,18 +91,31 @@ export function attachExternalEffects(candidates: ChartCandidate[], assets: Arch
  * silently attach the wrong audio.
  */
 export function assetBytes(assets: ArchiveEntries, name: string, chartName = ''): Uint8Array | null {
+  // `assetPath` returns `null` only when no key matched, which is exactly the "no bytes" case; reading
+  // through the resolved key keeps the two paths sharing one lookup.
+  const path = assetPath(assets, name, chartName);
+  return path === null ? null : assets.get(path) ?? null;
+}
+
+/**
+ * Resolves a chart-relative asset name to the archive key that actually holds it, or `null`.
+ *
+ * Split out from {@link assetBytes} because export has to write the *name* it resolved rather than
+ * the bytes, so both the read and the write paths go through the same lookup.
+ */
+function assetPath(assets: ArchiveEntries, name: string, chartName = ''): string | null {
   if (!name) return null;
   const chartPath = chartName.replaceAll('\\', '/');
   const directory = chartPath.includes('/') ? chartPath.slice(0, chartPath.lastIndexOf('/') + 1) : '';
-  const direct = assets.get(directory + name) ?? assets.get(name);
-  if (direct) return direct;
+  if (assets.has(directory + name)) return directory + name;
+  if (assets.has(name)) return name;
   const normalized = normalizePath(name);
   for (const target of [normalizePath(directory + name), normalized]) {
     const exact = [...assets].filter(([path]) => normalizePath(path) === target);
-    if (exact.length === 1) return exact[0][1];
+    if (exact.length === 1) return exact[0][0];
   }
   const matches = [...assets].filter(([path]) => normalizePath(path).split('/').at(-1) === normalized.split('/').at(-1));
-  return matches.length === 1 ? matches[0][1] : null;
+  return matches.length === 1 ? matches[0][0] : null;
 }
 
 /** Saves a blob to disk through a temporary anchor, revoking the object URL once it is claimed. */
@@ -111,7 +132,52 @@ export function download(blob: Blob, name: string): void {
 }
 
 export function exportChart(chart: Chart, name: string): void {
-  download(new Blob([serializeChart(chart)], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
+  download(new Blob([serializeChart(orderedExportChart(chart))], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
+}
+
+/**
+ * Normalises a chart for export: integral alpha, tracks in beat order, shader vars in beat order.
+ *
+ * RPE reads each track in file order and lets a later event win a tie, so an export that preserved
+ * the editor's arbitrary edit order could change how a chart plays. Sorting by start beat restores
+ * the order the game would have produced from a freshly authored file.
+ */
+function orderedExportChart(chart: Chart): Chart {
+  chart = integerChartAlpha(chart);
+  const startBeat = (event: ChartEvent | undefined): number => {
+    const time = event?.startTime ?? event?.start;
+    return Array.isArray(time) ? beatValue(time) : Number.isFinite(time) ? Number(time) : 0;
+  };
+  const ordered = (events: ChartEvent[]): ChartEvent[] => [...events].sort((left, right) => startBeat(left) - startBeat(right));
+  // A shader event's `vars` may hold nested effect lists, which are tracks in their own right.
+  const shader = (event: ChartEvent): ChartEvent => {
+    if (!event?.vars) return event;
+    const vars = event.vars as Record<string, unknown>;
+    return { ...event, vars: Object.fromEntries(Object.entries(vars).map(([name, value]) => [name,
+      Array.isArray(value) && value.length && value.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry) && ('startTime' in entry || 'start' in entry)) ? ordered(value as ChartEvent[]) : value])) };
+  };
+  const effects = (events: ChartEvent[]): ChartEvent[] => ordered(events).map(shader);
+  const orderedLayer = (layer: EventLayer | undefined): EventLayer | undefined => {
+    if (!layer) return layer;
+    const output: EventLayer = { ...layer };
+    for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {
+      const track = layer[type];
+      if (Array.isArray(track)) output[type] = type === 'paintEvents' ? effects(track) : ordered(track);
+    }
+    return output;
+  };
+  // The open-ended `Chart` bag is read member by member below, so it is narrowed once here.
+  const document = chart as Chart & { effects?: ChartEvent[]; shaderEvents?: ChartEvent[] };
+  return { ...chart, judgeLineList: (chart.judgeLineList ?? []).map(line => ({ ...line,
+    eventLayers: line.eventLayers?.map(orderedLayer) as EventLayer[], extended: orderedLayer(line.extended) as EventLayer })),
+    // The spread of a `NoiseArea` and the reordered track map still carries every required field, so
+    // the callback's return type is annotated rather than cast: the literal is checked against
+    // `NoiseArea` directly, which is what the open-ended `blockAreaList` entry needs.
+    ...(Array.isArray(chart.blockAreaList) ? { blockAreaList: (chart.blockAreaList as NoiseArea[]).map((area): NoiseArea => ({ ...area,
+      ...Object.fromEntries(NOISE_TRACKS.filter(([type]) => Array.isArray(area[type])).map(([type]) => [type, ordered(area[type] as ChartEvent[])])) })) } : {}),
+    ...(Array.isArray(document.effects) ? { effects: effects(document.effects) } : {}),
+    ...(Array.isArray(document.shaderEvents) ? { shaderEvents: effects(document.shaderEvents) } : {}),
+    ...(Array.isArray(chart.META?.effects) ? { META: { ...chart.META, effects: effects(chart.META.effects as ChartEvent[]) } } : {}) };
 }
 
 /**
@@ -119,10 +185,14 @@ export function exportChart(chart: Chart, name: string): void {
  *
  * Every whole-curve trajectory on the X track is expanded into the ordinary per-event fragments those
  * readers understand, and the trajectory event itself is dropped. `splitSettings` is merged over each
- * trajectory's own recorded split by `trajectorySplitSettings`.
+ * trajectory's own recorded split by `trajectorySplitSettings`. Noise areas have no legacy
+ * representation at all, so a chart that still carries them is refused rather than silently stripped.
  */
 export function legacyChart(chart: Chart, splitSettings: Partial<TrajectorySplit> = {}): Chart {
+  if (chart.blockAreaList?.length) throw new Error('原 RPE 不支持噪域，请在导出窗口明确选择移除噪域后导出');
   const next = structuredClone(chart);
+  delete next.blockAreaList;
+  delete next.noiseAreaOptions;
   if (next.META.RPEVersion >= 200) next.META = { ...next.META, RPEVersion: 170 };
   const tempo = new TempoMap(next.BPMList);
   for (const line of next.judgeLineList ?? []) {
@@ -136,7 +206,7 @@ export function legacyChart(chart: Chart, splitSettings: Partial<TrajectorySplit
       for (const event of trajectories) for (const [type, fragments] of expandTrajectory(event, tempo, line.bpmfactor ?? 1, splitSettings)) layer[type] = [...(layer[type] ?? []), ...fragments].sort((left, right) => beatValue(left.startTime) - beatValue(right.startTime));
     }
   }
-  return next;
+  return orderedExportChart(next);
 }
 
 export function exportLegacyChart(chart: Chart, name: string): void {
@@ -165,21 +235,32 @@ function matchingInfo(assets: ArchiveEntries, chartName: string): [string, Uint8
 }
 
 /**
+ * The `info.txt` an export should read, preferring an exact name match over a lone candidate.
+ *
+ * An archive can hold several; `info.txt` is the conventional one, and a single unrelated match is
+ * still accepted because a PEZ authored by another tool may name it differently.
+ */
+function primaryInfo(assets: ArchiveEntries, chartName: string): [string, Uint8Array] | null {
+  const matches = matchingInfo(assets, chartName);
+  return matches.find(([name]) => name.toLowerCase() === 'info.txt') ?? (matches.length === 1 ? matches[0] : null);
+}
+
+/**
  * Determines which archive entries a chart uses for its song and illustration.
  *
  * Preference order is the chart's own metadata, then the sibling `info.txt`, then inference from
  * the files sitting next to the chart. Inference only accepts an unambiguous candidate.
  */
 export function resourceReferences(chart: Chart, assets: ArchiveEntries, chartName: string, fallback: Record<string, string> = {}): ResourceReferences {
-  const matches = matchingInfo(assets, chartName);
-  const info = matches.length === 1 ? parseInfo(decodeLegacy(matches[0][1])) : fallback;
+  const match = primaryInfo(assets, chartName);
+  const info = match ? parseInfo(decodeLegacy(match[1])) : fallback;
   const normalizedChart = normalizePath(chartName);
   const directory = normalizedChart.split('/').slice(0, -1).join('/');
   const stem = normalizedChart.split('/').at(-1)!.replace(/\.[^.]+$/, '');
   const infoReference = (key: string): string => {
     const value = info[key];
-    if (!value || matches.length !== 1) return value;
-    const infoDirectory = matches[0][0].replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    if (!value || !match) return value;
+    const infoDirectory = match[0].replaceAll('\\', '/').split('/').slice(0, -1).join('/');
     return normalizePath(infoDirectory) === directory ? value : (infoDirectory ? infoDirectory + '/' : '') + value;
   };
   const infer = (extensions: RegExp): string => {
@@ -199,12 +280,48 @@ export function mediaType(name: string): string {
 }
 
 /**
+ * Renders the `info.txt` an exported PEZ carries.
+ *
+ * The `Path` field names the folder the game installs the chart into, so it is sanitised against the
+ * characters Windows forbids and the reserved device names; when the caller's identifier or the
+ * source `info.txt` offers nothing usable, a CRC of the chart's name stands in, which is stable for
+ * the same chart and unlikely to collide with a sibling.
+ */
+function packageInfo(chart: Chart, assets: ArchiveEntries, chartName: string, outputName: string, identifier: string | undefined): Uint8Array {
+  const match = primaryInfo(assets, chartName);
+  const info: Record<string, string> = match ? parseInfo(decodeLegacy(match[1])) : {};
+  const meta = chart.META;
+  const references = resourceReferences(chart, assets, chartName);
+  const singleLine = (value: unknown): string => String(value ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  const candidate = String(identifier || info.Path || meta.id || '').trim();
+  const path = /^(?!\.{1,2}$)[^<>:"/\\|?*\x00-\x1f]{1,80}$/.test(candidate) && !/[. ]$/.test(candidate)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(candidate)
+    ? candidate : String(crc32(new TextEncoder().encode(`${meta.name ?? ''}\n${chartName}`)));
+  const fields = { Name: meta.name ?? info.Name ?? '', Path: path,
+    Song: assetPath(assets, references.song, chartName) ?? '', Picture: assetPath(assets, references.background, chartName) ?? '',
+    Chart: outputName, Level: meta.level ?? info.Level ?? '', Composer: meta.composer ?? info.Composer ?? '',
+    Charter: meta.charter ?? info.Charter ?? '', Illustration: meta.illustration ?? info.Illustration ?? '' };
+  return new TextEncoder().encode('#\n' + Object.entries(fields).map(([key, value]) => `${key}: ${singleLine(value)}\n`).join(''));
+}
+
+/** The knobs the export dialog passes down; `compact` and `removeNoiseAreas` are the two that matter. */
+export interface PackageOptions {
+  /** Whether to write the JSON without indentation. Defaults to compact. */
+  compact?: boolean;
+  /** Whether a 原 RPE export should drop the noise areas it cannot represent. */
+  removeNoiseAreas?: boolean;
+  /** The folder name the game should install the chart into. */
+  identifier?: string;
+}
+
+/**
  * Builds the entry map for an exported PEZ.
  *
  * A chart converted from another format is written beside its original rather than over it, so the
  * source document survives the round trip; the sibling `info.txt` is repointed at the new name.
  */
-export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: string): ArchiveEntries {
+export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: string, options: PackageOptions = {}): ArchiveEntries {
+  chart = orderedExportChart(chart);
   const output: ArchiveEntries = new Map(assets);
   let outputName = chartName;
   if (chart.rpeNextLegacySource) {
@@ -213,15 +330,25 @@ export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: 
     let suffix = 1;
     while ([...output.keys()].some(name => normalizePath(name) === normalizePath(outputName))) outputName = `${stem}.rpe-${suffix++}.json`;
   }
-  output.set(outputName, new TextEncoder().encode(serializeChart(chart)));
-  const effects = [chart.effects, chart.shaderEvents, chart.META?.effects].filter(Array.isArray).flat();
+  output.set(outputName, new TextEncoder().encode(serializeChart(chart, { compact: options.compact !== false })));
+  const effects: unknown[] = [chart.effects, chart.shaderEvents, chart.META?.effects].filter(Array.isArray).flat();
   for (const [lineIndex, line] of (chart.judgeLineList ?? []).entries()) for (const event of line.extended?.paintEvents ?? []) effects.push(serializeShaderEvent(event, lineIndex));
+  effects.sort((left, right) => {
+    // Each entry is either a raw event or an already-serialised shader record; both shapes are probed
+    // here rather than assumed, which is what the original's untyped reads did.
+    const start = (event: unknown): number => {
+      const record = event as { startTime?: unknown; start?: unknown } | null | undefined;
+      const value = record?.startTime ?? record?.start;
+      return Array.isArray(value) ? beatValue(value) : typeof value === 'number' && Number.isFinite(value) ? value : 0;
+    };
+    return start(left) - start(right);
+  });
   if (effects.length || Array.isArray(chart.effects)) {
     const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
     const path = directory ? `${directory}/extra.json` : 'extra.json';
     const existing = [...output.keys()].find(name => normalizePath(name) === normalizePath(path));
-    const extra = existing ? JSON.parse(decodeLegacy(output.get(existing)!)) as Record<string, unknown> : {};
-    output.set(existing ?? path, new TextEncoder().encode(JSON.stringify({ ...extra, effects }, null, 2)));
+    const extra = existing ? JSON.parse(decodeLegacy(output.get(existing) as Uint8Array)) as Record<string, unknown> : {};
+    output.set(existing ?? path, new TextEncoder().encode(stringifyPreservingNumbers({ ...extra, effects }, options.compact === false ? 2 : 0)));
   }
   if (outputName !== chartName) {
     for (const [name, bytes] of matchingInfo(assets, chartName)) {
@@ -231,6 +358,8 @@ export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: 
       output.set(name, new TextEncoder().encode(info.replace(/^(Chart:[ \t]*)[^\r\n]*/m, (match, prefix: string) => prefix + reference)));
     }
   }
+  for (const name of output.keys()) if (name.toLowerCase() === 'info.txt') output.delete(name);
+  output.set('info.txt', packageInfo(chart, assets, chartName, outputName, options.identifier));
   return output;
 }
 
@@ -245,7 +374,7 @@ export interface ChartExportResult {
 }
 
 /**
- * The four export combinations the dialog offers.
+ * The export combinations the dialog offers.
  *
  * `compatibility: 'rpe'` rewrites the chart through `legacyChart` so a pre-0.8.0 reader can open it;
  * `'next'` keeps whole-curve trajectories. It lives here rather than in the dialog because it is this
@@ -257,6 +386,17 @@ export interface ChartExportOptions {
   format: 'json' | 'pez';
   name: string;
   split: Partial<TrajectorySplit>;
+  /** Whether to write the JSON without indentation. Defaults to compact. */
+  compact?: boolean;
+  /**
+   * Whether a 原 RPE export may drop the noise areas that reader cannot represent.
+   *
+   * Off by default, so `legacyChart` refuses the export and the user is told to opt in rather than
+   * silently losing the areas.
+   */
+  removeNoiseAreas?: boolean;
+  /** The folder name the game should install the chart into. */
+  identifier?: string;
 }
 
 export function createChartExport(chart: Chart, assets: ArchiveEntries, chartName: string, options: Partial<ChartExportOptions> = {}): ChartExportResult {
@@ -264,10 +404,11 @@ export function createChartExport(chart: Chart, assets: ArchiveEntries, chartNam
   if (!['json', 'pez'].includes(format) || !['next', 'rpe'].includes(compatibility)) throw new Error('导出格式无效');
   // `chartTime` is a scratch field some callers hang off the document; it is optional here so it can
   // be deleted, which is what the original did before serializing.
-  const snapshot: Chart & { chartTime?: unknown } = compatibility === 'rpe' ? legacyChart(chart, split) : { ...chart };
+  const source: Chart & { chartTime?: unknown } = compatibility === 'rpe' && options.removeNoiseAreas ? { ...chart, blockAreaList: [] } : chart;
+  const snapshot: Chart & { chartTime?: unknown } = compatibility === 'rpe' ? legacyChart(source, split) : orderedExportChart(chart);
   delete snapshot.chartTime;
   const stem = String(name).trim().replace(/\.(json|pez|pec|zip)$/i, '');
   if (!stem) throw new Error('请输入导出文件名');
-  const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName)) : new Blob([serializeChart(snapshot)], { type: 'application/json' });
+  const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName, options)) : new Blob([serializeChart(snapshot, { compact: options.compact !== false })], { type: 'application/json' });
   return { blob, name: stem + '.' + format };
 }

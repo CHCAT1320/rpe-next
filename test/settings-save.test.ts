@@ -89,6 +89,11 @@ function previewCanvas(double: unknown): HTMLCanvasElement {
   return bridged;
 }
 
+test('编辑区域判定线颜色只接受六位十六进制颜色', () => {
+  assert.deepEqual(normalizeEditorPreferences({ judgementColor: '#ABCDEF' }), { judgementColor: '#abcdef' });
+  for (const judgementColor of ['red', '#fff', '', null, 123]) assert.deepEqual(normalizeEditorPreferences({ judgementColor }), {});
+});
+
 test('默认热键全部有名称，允许区域、长短按和选择状态复用', () => {
   assert.deepEqual(Object.keys(HOTKEY_LABELS).sort(), Object.keys(DEFAULT_HOTKEYS).sort());
   const result = validateHotkeys(DEFAULT_HOTKEYS);

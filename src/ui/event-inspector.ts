@@ -5,6 +5,7 @@ import { captureSelection, editCapturedSelection, commitSelectionEdit } from '..
 
 import { EASING_NAMES, createEasingPicker } from './easing-picker.ts';
 import { numericWheel } from './numeric-wheel.ts';
+import { beatInputControl } from './beat-input.ts';
 import { EVENT_WHEEL_STEPS } from '../core/note-editing.ts';
 import { renderShaderInspector } from './shader-inspector.ts';
 import { canCutEvent } from '../application/event-tools.ts';
@@ -32,10 +33,11 @@ interface EventPatch {
   easingType?: number;
 }
 
-const galleryState = { open: false };
-
 /** The event transform {@link applyEventTransform} hands to the batch helpers. */
 type EventFieldTransform = (event: ChartEvent) => ChartEvent;
+
+/** Whether the easing gallery is open; shared across renders of the inspector. */
+const galleryState = { open: false };
 
 function inspectorEntries(session: EditorSession): EventInspectorEntry[] {
   if (session.multiLineActive && session.multiLineMode === 'events') {
@@ -56,6 +58,8 @@ function applyEventTransform(session: EditorSession, label: string, transform: E
 }
 
 export function renderEventInspector(session: EditorSession, tempo: TempoMap, currentBeat: () => number, reportError: (error: unknown) => void, notify: Notify = () => {}): void {
+  // A field being edited owns the panel: re-rendering here would rebuild the input under the caret.
+  if (session.liveEventEdit) return;
   const container = document.querySelector('#event-properties') as HTMLElement; container.replaceChildren();
   const entries: EventInspectorEntry[] = inspectorEntries(session); const event = entries[0]?.event; const eventType = entries[0]?.type;
   (document.querySelector('#event-selection-count') as HTMLElement).textContent = `${entries.length} 已选`;
@@ -76,7 +80,7 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     } else if (kind === 'number') {
       value = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(value)) return;
-      if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) value = Math.max(0, Math.min(255, value));
+      if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) value = Math.trunc(Math.max(0, Math.min(255, value)));
       if (key === 'easingLeft' || key === 'easingRight') value = Math.max(0, Math.min(1, value));
       if (key === 'linkgroup') value = Math.max(0, Math.round(value));
     } else value = input.value;
@@ -102,13 +106,19 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     input.value = kind === 'beat' ? formatBeat(event[key] as Beat) : kind === 'array' ? (event[key] as number[]).join(', ') : typeof shown === 'string' || typeof shown === 'number' ? String(shown) : String(key === 'easingRight' ? 1 : 0);
     input.onfocus = () => { session.liveEventEdit = true; };
     input.onblur = () => { session.liveEventEdit = false; queueMicrotask(() => { if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify); }); };
-    input.oninput = () => { if (kind !== 'number' || input.value.trim()) applyField(input, key, title, kind, true); };
+    // `oninput` is declared with a plain `Event`, which carries no `isComposing`; the DOM delivers an
+    // `InputEvent` here, so the assertion names that already-true fact and nothing more. An IME
+    // composition is still in flight in that case, and committing mid-composition would fight it.
+    input.oninput = event => { if (!(event as InputEvent).isComposing && (kind !== 'number' || input.value.trim())) applyField(input, key, title, kind, true); };
     input.onchange = () => applyField(input, key, title, kind);
     if (kind === 'number') {
       const step = key === 'easingLeft' || key === 'easingRight' ? 0.05 : key === 'linkgroup' ? 1 : session.eventWheelSteps?.[eventType] ?? EVENT_WHEEL_STEPS[eventType] ?? 1;
       input.step = String(step); numericWheel(input, step);
     }
-    label.append(input); container.append(label);
+    // `session.division` is optional until `renderSession` attaches it; `?? 0` keeps the read a
+    // number and hands the "no grid yet" case to `beatInputControl`'s own `division() || 4` fallback,
+    // which is exactly what an `undefined` return did before.
+    label.append(kind === 'beat' ? beatInputControl(input, () => session.division ?? 0, reportError) : input); container.append(label);
   }
   const lockLabel = document.createElement('label'); lockLabel.className = 'field'; lockLabel.append('钩定（首尾同步）');
   const lock = document.createElement('input'); lock.type = 'checkbox'; lock.checked = Boolean(event.inst); lock.setAttribute('aria-label', '钩定');

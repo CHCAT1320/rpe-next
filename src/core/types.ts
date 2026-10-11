@@ -140,6 +140,22 @@ export interface ChartEvent {
    * the same curve, marking the axis to read. Absent on real events, which are the X reading.
    */
   trajectoryAxis?: 'x' | 'y' | 'rotation';
+  /**
+   * The pivot a 噪域 rotation or scale event turns/scales about.
+   *
+   * Spelled out rather than reusing `Point` so this module keeps its place at the bottom of the import
+   * graph — `editor-display.ts` imports these types, so importing `Point` back would close a cycle.
+   */
+  anchor?: { x: number; y: number };
+  /**
+   * The value a 噪域 transform event accumulates *from*, when it differs from its own `start`.
+   *
+   * A zero-length event marked `transformStep` contributes a step rather than a ramp, and the pair of
+   * fields records the value the step was measured against so the accumulation stays exact.
+   */
+  transformStart?: number;
+  transformEnd?: number;
+  transformStep?: boolean;
   [key: string]: unknown;
 }
 
@@ -219,12 +235,81 @@ export interface BpmEntry {
   [key: string]: unknown;
 }
 
+/** A point in chart coordinates. */
+export interface NoisePoint { x: number; y: number }
+
+/**
+ * One activation window of a 噪域.
+ *
+ * `readyFlash` is the seconds-long warning flash before the window opens; the format tolerates a
+ * boolean there, which `readyFlashSeconds` in `noise-areas.ts` normalises to `0.5` or `0`.
+ */
+export interface NoiseInterval {
+  startTime: Beat;
+  endTime: Beat;
+  readyFlash?: number | boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * One 噪域 transform event.
+ *
+ * It is a {@link ChartEvent} whose values are always numbers — the looser `EventValue` union on the
+ * base type exists for the colour and text tracks, which a transform track never carries.
+ */
+export interface NoiseEvent extends ChartEvent {
+  start: number;
+  end: number;
+  /** The pivot the rotation or scale turns/scales about; present only on the anchored tracks. */
+  anchor?: NoisePoint;
+  /** The value this event accumulates from, when it differs from its own `start`. */
+  transformStart?: number;
+  transformEnd?: number;
+  /** Marks a zero-length event that contributes a step rather than a ramp. */
+  transformStep?: boolean;
+}
+
+/**
+ * One 噪域: a rectangle plus the six tracks that move, rotate and scale it over time.
+ *
+ * Declared here rather than in `noise-areas.ts` because {@link Chart} carries the list and this module
+ * sits at the bottom of the import graph — importing back from `noise-areas.ts` would close a cycle.
+ * That module re-exports these names so its own importers are unaffected.
+ */
+export interface NoiseArea {
+  Name: string;
+  bottomLeft: NoisePoint;
+  topRight: NoisePoint;
+  appearTime: Beat;
+  disappearTime: Beat;
+  activeIntervals: NoiseInterval[];
+  isInvert: boolean;
+  moveXEvents: NoiseEvent[];
+  moveYEvents: NoiseEvent[];
+  rotateEvents: NoiseEvent[];
+  scaleXEvents: NoiseEvent[];
+  scaleYEvents: NoiseEvent[];
+  /** Where the area sits along the editor's own horizontal strip; an editor-only field. */
+  editorPositionX?: number;
+  [key: string]: unknown;
+}
+
 /** A complete RPE chart document. */
 export interface Chart {
   META: ChartMeta;
   BPMList: BpmEntry[];
   judgeLineGroup: string[];
   judgeLineList: JudgeLine[];
+  /**
+   * The 噪域 areas this document carries, present only on charts that use the feature.
+   *
+   * Declared here rather than left to the open-ended index signature below because `diagnose`,
+   * `serializeChart`, the export path and the whole 噪域 editor all read it as an array; through the
+   * index signature it would read as `unknown` at every one of those sites.
+   */
+  blockAreaList?: NoiseArea[];
+  /** Options the 噪域 feature carries; the triple-inversion toggle is the only one so far. */
+  noiseAreaOptions?: { ignoreTripleInversion?: boolean };
   /**
    * Present when the document was imported from another format, so re-export can preserve it.
    *

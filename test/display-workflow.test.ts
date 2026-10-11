@@ -65,11 +65,35 @@ interface PointerDouble {
   shiftKey?: boolean;
   clientX: number;
   clientY: number;
+  pointerId?: number;
 }
 
 /** Bridges the pointer double to the real event type the timeline handlers declare. */
 function pointerEvent(double: PointerDouble): PointerEvent {
   return double as unknown as PointerEvent;
+}
+
+/**
+ * The pointer double the event grid's own handlers are driven with.
+ *
+ * `EventInteraction` declares its private `PointerLike` view, which also requires `ctrlKey` and
+ * `shiftKey`; this test supplies neither because the drag path under test reads neither.
+ */
+interface InteractionPointDouble {
+  button: number;
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+  preventDefault(): void;
+}
+
+/** `EventInteraction`'s declared `PointerLike` parameter, named once so the double can be bridged. */
+type InteractionPointer = Parameters<Timeline['eventInteraction']['down']>[0];
+
+/** `EventInteraction` declares `ctrlKey`/`shiftKey`; this double omits both, so it is bridged here. */
+function interactionPointer(double: InteractionPointDouble): InteractionPointer {
+  const bridged: InteractionPointer = double as unknown as InteractionPointer;
+  return bridged;
 }
 
 /** The 2D-context double `RpeSkin.hold` draws into; only `drawImage` is observed. */
@@ -258,6 +282,44 @@ test('Shift 框选和左拖轨迹生效，右键保留给上下文菜单；Y 缩
   timeline.down(pointerEvent({ button: 2, clientX: 50, clientY: 400 })); timeline.up(pointerEvent({ button: 2, clientX: 400, clientY: 450 })); assert.equal(session.selection.size, 1);
   timeline.scale = 333;
   for (const bpm of [60, 120, 240]) { timeline.tempo = new TempoMap([{ bpm, startTime: [0, 0, 1] }]); assert.equal(timeline.vertical(0) - timeline.vertical(bpm / 60), 333); }
+});
+
+test('事件编辑区左拖轨迹选择事件，拖动过程中不触发会话级重绘', () => {
+  const chart = createChart();
+  chart.judgeLineList[0].eventLayers[0] = { moveXEvents: [createEvent(0, 10, 0.5, 0.8)] };
+  const session = new EditorSession(chart);
+  const timeline = new Timeline(timelineSurface(canvas()), timelineSurface(canvas()), () => session, () => {}, () => {});
+  timeline.eventRects = [{ type: 'moveXEvents', index: 0, lineIndex: 0, x: 110, y: 350, width: 60, height: 100 }];
+  let changes = 0; session.addEventListener('change', () => changes++);
+  const interaction = timeline.eventInteraction;
+  const point = (clientX: number, clientY: number): InteractionPointDouble => ({ clientX, clientY, button: 0, pointerId: 1, preventDefault() {} });
+  interaction.down(interactionPointer(point(50, 500)));
+  const initialChanges = changes;
+  interaction.move(interactionPointer(point(120, 430)));
+  interaction.move(interactionPointer(point(140, 380)));
+  for (let index = 0; index < 500; index++) interaction.move(interactionPointer(point(140 + index % 2, 380)));
+  assert.equal(changes, initialChanges);
+  assert.deepEqual([...session.eventSelection], ['moveXEvents:0']);
+  assert.equal(session.multiSelectionIntent, 'events');
+  interaction.up(interactionPointer(point(140, 380)));
+  assert.equal(changes, initialChanges + 1);
+});
+
+test('音符划线实时选择但只在结束时通知面板，单物件仍保留多选意图', () => {
+  const session = new EditorSession(); session.insertNotes([createNote(1, 0.5, 0)]); session.selection.clear();
+  const timeline = new Timeline(timelineSurface(canvas()), timelineSurface(canvas()), () => timelineSession(session), () => {}, () => {});
+  let changes = 0; session.addEventListener('change', () => changes++);
+  const point = (clientX: number, clientY: number): PointerDouble => ({ clientX, clientY, button: 0, pointerId: 1 });
+  const vertical = timeline.vertical(0.5);
+  timeline.down(pointerEvent(point(50, vertical))); const initialChanges = changes;
+  timeline.move(pointerEvent(point(250, vertical)));
+  for (let index = 0; index < 500; index++) timeline.move(pointerEvent(point(250 + index % 2, vertical)));
+  assert.deepEqual([...session.selection], [0]);
+  assert.equal(session.multiSelectionIntent, 'notes');
+  assert.equal(changes, initialChanges);
+  timeline.up(pointerEvent(point(250, vertical)));
+  assert.equal(changes, initialChanges + 1);
+  assert.equal(timeline.drag, null);
 });
 
 test('自动保存固定间隔而非输入防抖，并隔离并发写入', async () => {

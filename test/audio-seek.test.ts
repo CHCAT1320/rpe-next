@@ -76,6 +76,19 @@ interface ContextDouble extends AudioContextLike {
 }
 
 /**
+ * The object URL the transport cached for the loaded media.
+ *
+ * `AudioTransport.mediaUrl` is optional because it is only set once a load has installed a media
+ * element; every caller here reads it immediately after a successful `load`, which is exactly when
+ * it exists. Asserting that keeps the `fetch` argument a `string`.
+ */
+function mediaUrlOf(audio: AudioTransport): string {
+  const url = audio.mediaUrl;
+  assert.ok(url);
+  return url;
+}
+
+/**
  * The real transport as `HitSounds` sees it.
  *
  * `HitSounds` is typed against its own structural `HitSoundTransport` slice, which is not exported
@@ -119,14 +132,73 @@ test('载入音乐优先保存解码样本；解码器不支持时仍可回退�
   globalThis.Audio = LoadedMedia as unknown as typeof Audio;
   const { audio, context } = setup(); audio.media = null;
   context.createMediaElementSource = () => ({ connect() {}, disconnect() {} });
-  const buffer: AudioBufferLike = { duration: 99.8 }; context.decodeAudioData = async () => buffer;
+  // The decoded buffer is re-encoded as a PCM WAV and cached, so the double carries the sample
+  // accessors `pcmWave` reads; `AudioBufferLike` declares them optional and the transport itself
+  // never touches them.
+  const buffer: AudioBufferLike = { duration: 99.8, length: 4, numberOfChannels: 1, sampleRate: 48000, getChannelData: () => new Float32Array([0, 0.25, -0.5, 1]) };
+  context.decodeAudioData = async () => buffer;
   try {
     assert.equal(await audio.load(new ArrayBuffer(4), 'vbr.mp3'), true);
     assert.equal(audio.buffer, buffer); assert.equal(audio.usesMedia, false); assert.equal(audio.duration, 99.8);
+    const cached = await (await fetch(mediaUrlOf(audio))).arrayBuffer();
+    assert.equal(new TextDecoder().decode(cached.slice(0, 4)), 'RIFF');
+    assert.equal(new DataView(cached).getFloat32(48, true), 0.25);
     context.decodeAudioData = async () => { throw new Error('仅原生媒体支持此格式'); };
     assert.equal(await audio.load(new ArrayBuffer(4), 'native-only.m4a'), true);
     assert.equal(audio.buffer, null); assert.equal(audio.usesMedia, true);
     audio.clear();
+  } finally { globalThis.Audio = original; }
+});
+
+test('浏览器不支持 PCM 媒体时回退原音乐，保持解码样本可用', async () => {
+  const original = globalThis.Audio;
+  // The transport builds its element through the `Audio` global, so the instance it ends up holding
+  // is only reachable from inside this class; the constructor records it for the assertion below.
+  let created: LoadedMedia | undefined;
+  class LoadedMedia extends SeekingMedia {
+    loads = 0;
+    constructor() { super(); created = this; }
+    // The second `src` assignment is the PCM replacement; making it fail is what drives the fallback
+    // back to the original object URL, so `loads` reaches 3. `SeekingMedia` never declares `src`, so
+    // this is a new member rather than an override of the parent.
+    set src(value: string) { void value; this.loads++; queueMicrotask(() => this.loads === 2 ? this.onerror?.() : this.onloadedmetadata?.()); }
+    override removeAttribute(): void {} override load(): void {}
+  }
+  globalThis.Audio = LoadedMedia as unknown as typeof Audio;
+  const { audio, context } = setup(); audio.media = null;
+  context.createMediaElementSource = () => ({ connect() {}, disconnect() {} });
+  const buffer: AudioBufferLike = { duration: 1, length: 1, numberOfChannels: 1, sampleRate: 48000, getChannelData: () => new Float32Array(1) };
+  context.decodeAudioData = async () => buffer;
+  try {
+    assert.equal(await audio.load(new Uint8Array([1, 2, 3]).buffer, 'music.mp3'), true);
+    assert.equal(audio.buffer, buffer);
+    assert.equal(created?.loads, 3);
+    assert.deepEqual(new Uint8Array(await (await fetch(mediaUrlOf(audio))).arrayBuffer()), new Uint8Array([1, 2, 3]));
+    audio.clear();
+  } finally { globalThis.Audio = original; }
+});
+
+test('PCM 转换途中清空音乐，不会把已取消的音乐重新装入', async () => {
+  const original = globalThis.Audio;
+  class LoadedMedia extends SeekingMedia {
+    set src(value: string) { void value; queueMicrotask(() => this.onloadedmetadata?.()); }
+    override removeAttribute(): void {} override load(): void {}
+  }
+  globalThis.Audio = LoadedMedia as unknown as typeof Audio;
+  const { audio, context } = setup(); audio.media = null;
+  // Resolved by the first `getChannelData` call, so the test can clear the transport while the PCM
+  // encoder is still running.
+  let beganEncoding: () => void = () => {};
+  const encoding = new Promise<void>(resolve => { beganEncoding = resolve; });
+  context.createMediaElementSource = () => { throw new Error('已取消的音乐不应连接音频输出'); };
+  context.decodeAudioData = async () => ({ duration: 2, length: 96000, numberOfChannels: 1, sampleRate: 48000,
+    getChannelData: () => { beganEncoding(); return new Float32Array(96000); },
+  });
+  try {
+    const loaded = audio.load(new ArrayBuffer(4), 'music.ogg');
+    await encoding; audio.clear();
+    assert.equal(await loaded, false);
+    assert.equal(audio.media, null); assert.equal(audio.buffer, null);
   } finally { globalThis.Audio = original; }
 });
 
@@ -202,6 +274,36 @@ test('保调倍速切换保留音乐秒位置；原生倍速调整不反复触�
   audio.setPreservePitch(false); assert.equal(audio.usesMedia, false); assert.equal(audio.time, 12);
   context.currentTime = 2; assert.equal(audio.time, 12.75);
   audio.setRate(1); assert.equal(audio.time, 12.75);
+});
+
+test('保调倍速暂停记录媒体真正停止的位置，连续续播不触发额外定位', async () => {
+  const { audio, media: element } = setup(); audio.buffer = { duration: 100 }; audio.setRate(1.5);
+  // `setup` installs the `SeekingMedia` double on the transport through `mediaElement`, but the
+  // transport's own field is the narrower `MediaElementLike` slice; the double itself is what this
+  // test drives (`current`, `finishSeek`, `seeks`), so it is kept alongside.
+  element.pause = () => { if (!element.paused) element.current += 0.0003; element.paused = true; };
+  audio.seek(10); element.finishSeek();
+  const seeks = element.seeks;
+  for (let index = 0; index < 20; index++) {
+    await audio.play();
+    element.current += 0.8;
+    audio.pause();
+    assert.equal(audio.time, element.currentTime);
+    assert.equal(element.seeks, seeks);
+  }
+  await audio.play();
+  assert.equal(element.seeks, seeks);
+});
+
+test('保调倍速暂停待定位的音频时保留目标时间，不能读取旧播放头', async () => {
+  const { audio, media } = setup(); audio.buffer = { duration: 100 }; audio.setRate(0.75);
+  media.current = 4;
+  audio.seek(30); const playing = audio.play(); await Promise.resolve();
+  audio.pause(); await playing;
+  assert.equal(audio.time, 30);
+  media.finishSeek();
+  await audio.play();
+  assert.equal(audio.time, 30);
 });
 
 test('媒体负时间预滚不会预先调度越过音乐起点的打击音', async () => {

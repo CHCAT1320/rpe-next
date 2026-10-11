@@ -9,6 +9,9 @@ import { lineGuides, mergeGuides, pickGuide, formatLineNumbers } from '../core/p
 import { ShaderRuntime } from '../core/shader.ts';
 import { ShaderPipeline } from './shader-pipeline.ts';
 import { PreviewBackground, textureInViewport } from './preview-background.ts';
+// 0.10.2 draws the chart's noise areas into the preview through this renderer, alongside the
+// background and the guides this file already drew.
+import { NoisePreview } from './noise-preview.ts';
 import type { Chart, Color, Note, NoteType } from '../core/types.ts';
 import type { HitEntry } from '../core/hit-effects.ts';
 import type { LineState, SceneSampler } from '../core/scene.ts';
@@ -172,6 +175,13 @@ export class Preview {
   shaderRuntime: ShaderRuntime;
   shaderPipeline: ShaderPipeline;
   backgroundFrame: PreviewBackground;
+  /**
+   * The noise-area renderer 0.10.2 added, built with the preview and driven from `draw`.
+   *
+   * Required rather than optional: `app.ts` writes `noisePreview.seamless` from the saved
+   * preferences and `pickNoiseArea` queries its hit list, and the constructor always assigns it.
+   */
+  noisePreview: NoisePreview;
   overlayCanvas: HTMLCanvasElement | null;
   shaderCanvas: HTMLCanvasElement | null;
   /** Assigned by `app.ts` after construction; the guard in `draw` tolerates its absence. */
@@ -207,6 +217,13 @@ export class Preview {
   declare lineTint: boolean;
   declare mergeLineNumbers: boolean;
   declare pickPreviewLines: boolean;
+  /**
+   * The noise-area click toggle 0.10.2 added, written from the saved preferences by `app.ts`.
+   *
+   * Declared like its neighbours so the constructor emits no initializer: `pickNoiseArea` tests
+   * `=== false`, so a preview that was never configured still picks, exactly as before.
+   */
+  declare pickPreviewNoiseAreas: boolean;
   declare highlight: boolean;
   /**
    * The view settings `view-controls.ts` and `app.ts` push in. `draw` guards each read with `??`, so
@@ -238,6 +255,13 @@ export class Preview {
   guides?: LineGuide[];
   viewport?: PreviewViewport;
   selectedLine?: number;
+  /**
+   * The noise area `noise-area.ts` has focused, or `-1` for none.
+   *
+   * Written by `app.ts` on every editor tick and read by `draw` / `drawGuides`; `-1` is the
+   * "nothing selected" value the noise editor itself uses, so the field stays a plain number.
+   */
+  selectedNoiseArea?: number;
   simultaneous?: Set<Note>;
   completionTimes?: number[];
   passes?: RenderPass[];
@@ -245,6 +269,7 @@ export class Preview {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas; this.scene = new SceneRuntime(); this.shaderRuntime = new ShaderRuntime(() => this.invalidate?.()); this.shaderPipeline = new ShaderPipeline(() => this.invalidate?.());
     this.backgroundFrame = new PreviewBackground();
+    this.noisePreview = new NoisePreview();
     this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
     this.noteHitAreas = [];
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
@@ -289,6 +314,7 @@ export class Preview {
       context.globalAlpha = 1;
     } else this.backgroundFrame.clear();
     const states = this.scene.sample(seconds);
+    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea);
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.viewport = viewport; this.selectedLine = selectedLine;
     this.guides = lineGuides(states as GuideState[], chart.judgeLineList, order, width, height, scale);
@@ -442,6 +468,23 @@ export class Preview {
   }
 
   /**
+   * Maps a click to the noise area under it, or `null` for empty space.
+   *
+   * 0.10.2's addition. The same viewport test as `pick` guards it, and `pickPreviewNoiseAreas`
+   * keeps the same `=== false` reading: unset (a preview that was never configured) still picks.
+   * `noisePreview.pick` is the only place the drawn areas are queried, so a preview with no noise
+   * areas has an empty hit list and returns `null` without this method needing a guard.
+   */
+  pickNoiseArea(clientX: number, clientY: number): number | null {
+    if (!this.visible || this.pickPreviewNoiseAreas === false || !this.viewport) return null;
+    const rectangle = this.canvas.getBoundingClientRect();
+    const point = { x: clientX - rectangle.left, y: clientY - rectangle.top };
+    const view = this.viewport;
+    if (point.x < view.left || point.x > view.left + view.width || point.y < view.top || point.y > view.top + view.height) return null;
+    return this.noisePreview.pick(point.x, point.y);
+  }
+
+  /**
    * Maps a click to the judge line of the note under it, or `null` for empty space.
    *
    * The areas are tested newest-first, so the note drawn on top wins, and the distance is measured to
@@ -462,6 +505,9 @@ export class Preview {
   }
 
   drawGuides(context: CanvasRenderingContext2D, scale: number, selectedLine: number): void {
+    // 0.10.2 draws the noise-area markers before the line guides. The guard below is only about the
+    // line numbers/arrows, so this call has to stay above it.
+    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
     if (!this.lineNumbers && !this.lineArrows) return;
     for (const group of mergeGuides(this.guides ?? [], scale, this.mergeLineNumbers)) {
       context.save(); context.translate(group.x, group.y); context.rotate(group.rotation * Math.PI / 180);

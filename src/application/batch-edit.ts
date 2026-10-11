@@ -1,4 +1,5 @@
 import { assertChart, noteIsAbove } from '../core/chart.ts';
+import { integerNoteAlpha } from '../core/alpha-values.ts';
 import { beatValue, fromNumber } from '../core/beat.ts';
 import { snapPosition, verticalGrid } from '../core/edit-grid.ts';
 import { alignShaderParameters } from '../core/shader-events.ts';
@@ -159,7 +160,7 @@ export function editCapturedSelection(snapshot: SelectionSnapshot, { note = (val
       const entryTarget = ((entrySource + lineOffset) % count + count) % count;
       const source = lines[entrySource]; const target = lines[entryTarget];
       if (!source || !target) continue;
-      const updates = new Map<number, Note>(entries.map(entry => [entry.index, note(entry.note, entry)]));
+      const updates = new Map<number, Note>(entries.map(entry => [entry.index, integerNoteAlpha(note(entry.note, entry))]));
       let nextNotes: Note[];
       const selectedIndices = new Set<number>();
       if (entrySource === entryTarget) {

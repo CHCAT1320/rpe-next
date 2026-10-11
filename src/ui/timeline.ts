@@ -418,6 +418,13 @@ export class Timeline {
   eventValueThreshold?: number;
   eventValueFontSize?: number;
   /**
+   * The colour of the judgement line, written by `app.ts` from the `judgement-color` control.
+   *
+   * Optional and read through `?? '#ffffff'`, which is both the control's default and the colour the
+   * grid used to hard-code, so an unset value draws exactly the line the editor always drew.
+   */
+  judgementColor?: string;
+  /**
    * Pixels between the bottom of the pane and the judgement line.
    *
    * The vertical mapping used to subtract a hard-coded 42 in every one of its call sites; 0.8.0 made
@@ -486,7 +493,7 @@ export class Timeline {
     notesCanvas.addEventListener('pointerleave', () => { if (!this.drag) this.cursor = null; this.onNoteHover?.(null); changed(); });
     notesCanvas.addEventListener('pointerdown', event => this.down(event));
     notesCanvas.addEventListener('pointerup', event => this.up(event));
-    notesCanvas.addEventListener('pointercancel', () => { this.drag = null; changed(); });
+    notesCanvas.addEventListener('pointercancel', () => { const tracing = this.drag?.kind === 'stroke' && this.drag.tracing; this.drag = null; if (tracing) this.getSession().notify(); changed(); });
   }
 
   /**
@@ -799,7 +806,14 @@ export class Timeline {
     return undefined;
   }
 
-  move(event: PointerEvent): void {
+  /**
+   * Tracks the pointer while a gesture is in flight.
+   *
+   * `up` replays its own pointer event through here for a finished stroke, and that event is typed as
+   * the structural {@link GesturePointerLike} rather than a `PointerEvent`; only the two client
+   * coordinates are ever read, so the parameter is the same structural shape `point` takes.
+   */
+  move(event: CanvasPointerLike): void {
     const cursor = this.point(event);
     this.cursor = cursor;
     this.cursorLineIndex = this.lineIndexAt(cursor.x, this.notesCanvas.clientWidth, 'notes');
@@ -824,13 +838,19 @@ export class Timeline {
       }
       if (drag.kind === 'stroke' && (drag.tracing || Math.hypot(cursor.x - drag.start.x, cursor.y - drag.start.y) > 3)) {
         drag.tracing = true;
+        // 0.10.2 records which area the gesture started in, so the multi-line selection follows the
+        // stroke rather than whatever pane happens to be focused.
+        this.getSession().multiSelectionIntent = 'notes';
         const points: CanvasPoint[] = drag.points ?? []; drag.points = points; points.push(cursor);
         const lineIndex = this.cursorLineIndex ?? this.getSession().lineIndex;
+        // 0.10.2 widened the hit box to the note's own drawn width and gave it a 7px vertical margin,
+        // replacing the fixed 34px half-width and the bare start/end beats.
         for (const entry of this.visible(lineIndex)) if (strokeIntersects(previous, cursor, {
-          left: this.noteHorizontal(entry.item.positionX, lineIndex) - 34 * this.renderNoteScale, right: this.noteHorizontal(entry.item.positionX, lineIndex) + 34 * this.renderNoteScale,
-          top: this.vertical(entry.end), bottom: this.vertical(entry.start),
+          left: this.noteHorizontal(entry.item.positionX, lineIndex) - this.noteWidth(entry.item) / 2, right: this.noteHorizontal(entry.item.positionX, lineIndex) + this.noteWidth(entry.item) / 2,
+          top: this.vertical(entry.end) - 7, bottom: this.vertical(entry.start) + 7,
         })) drag.remove ? this.getSession().selection.delete(entry.index) : this.getSession().selection.add(entry.index);
-        this.getSession().notify();
+        // 0.10.2 moved the redraw out of this branch: the move handler notifies once at the end, and
+        // `up` notifies for the finished stroke, so the selection update is no longer double-drawn.
       }
     }
     const hover = !this.drag ? this.hit(this.cursor) : null;
@@ -908,6 +928,9 @@ export class Timeline {
   up(event: GesturePointerLike): void {
     const started = this.drag;
     if (!started) return;
+    // 0.10.2 replays the last pointer position through `move` so a stroke that was never moved
+    // (a click-and-release, or a cancelled pointer) still records its final point and selection.
+    if (started.kind === 'stroke') this.move(event);
     const active: MoveDrag = started;
     if (active.kind === 'multi-pan') { this.drag = null; this.changed(); return; }
     if (active.kind === 'stroke' && !active.remove && !active.tracing && this.previewPick?.(event)) { this.drag = null; this.changed(); return; }
@@ -960,6 +983,7 @@ export class Timeline {
       }
     }
     this.drag = null;
+    if (drag.kind === 'stroke' && drag.tracing) session.notify();
     this.changed();
   }
 
@@ -1006,7 +1030,7 @@ export class Timeline {
       context.beginPath(); context.moveTo(0, vertical); context.lineTo(width, vertical); context.stroke();
       if (tick % this.division === 0) { context.fillStyle = '#dddddd'; context.fillText(String(beat), 5, vertical - 4); }
     }
-    context.strokeStyle = '#ffd76a';
+    context.strokeStyle = this.judgementColor ?? '#ffffff';
     context.beginPath(); context.moveTo(0, this.vertical(playBeat, height)); context.lineTo(width, this.vertical(playBeat, height)); context.stroke();
     context.lineWidth = 1;
   }
@@ -1034,7 +1058,7 @@ export class Timeline {
     }
     const playSeconds = this.tempo.seconds(playBeat, this.factor);
     const playLineBeat = this.tempo.beat(playSeconds, factor);
-    context.strokeStyle = '#ffd76a';
+    context.strokeStyle = this.judgementColor ?? '#ffffff';
     context.beginPath(); context.moveTo(left, this.verticalForLine(playLineBeat, lineIndex, height)); context.lineTo(left + width, this.verticalForLine(playLineBeat, lineIndex, height)); context.stroke();
     context.restore(); context.lineWidth = 1;
   }

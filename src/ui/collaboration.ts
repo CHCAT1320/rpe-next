@@ -7,7 +7,12 @@ import { CollaborationClient } from '../application/collaboration-client.ts';
 import type { CollaborationMember } from '../application/collaboration-client.ts';
 import { parseInvitation, COLLAB_ID } from '../core/collaboration.ts';
 import { eventListAt } from '../application/event-commands.ts';
-import { isTypingText } from './keyboard.ts';
+// 0.10.2 replaced the `isTypingText` test at the `/` shortcut with the pair below: `isTextEntry`
+// widens the fields that own the keystroke, and `usesNativeTextShortcut` also yields to a composing
+// IME, so the chat shortcut no longer steals a key the browser is already handling.
+import { isTextEntry, usesNativeTextShortcut } from './keyboard.ts';
+// `event.target` is `EventTarget | null`, which shares no member with the optional-only
+// `ShortcutTarget`; the same cast `keyboard.ts` uses at its own call sites names the probed shape.
 import type { ShortcutTarget } from './keyboard.ts';
 import { download } from '../platform/files.ts';
 import { collaborationMarkerPosition, collaborationLabelBackground } from './collaboration-display.ts';
@@ -328,7 +333,7 @@ export class CollaborationPanel {
           this.chatInput.value = ''; this.closeChat();
         } catch (error) { this.notify((error as Error).message, 'warning'); }
       }
-    } else if (event.key === '/' && !isTypingText(event.target as ShortcutTarget | null) && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    } else if (event.key === '/' && !isTextEntry(event.target as ShortcutTarget | null) && !usesNativeTextShortcut(event) && !event.ctrlKey && !event.altKey && !event.metaKey) {
       event.preventDefault(); event.stopImmediatePropagation(); this.openChat();
     }
   }

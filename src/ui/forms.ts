@@ -95,6 +95,19 @@ export function editBpm(session: MetadataFormSession): void {
   };
 }
 
+/**
+ * The chart's per-chart noise options, as the metadata form reads and rewrites them.
+ *
+ * `Chart` reaches this field through its open-ended index signature, so it types as `unknown`; the
+ * real value is the object `assertChart` validates, whose only known key is the boolean
+ * `ignoreTripleInversion`. Anything that is not an object reads as the empty bag, which is what the
+ * original's optional chain did for a missing field.
+ */
+function storedNoiseAreaOptions(chart: EditorSession['chart']): Record<string, unknown> {
+  const stored: unknown = chart.noiseAreaOptions;
+  return stored && typeof stored === 'object' && !Array.isArray(stored) ? stored as Record<string, unknown> : {};
+}
+
 export function renderMetadataPanel(session: MetadataFormSession, host: HTMLElement, onCommit?: () => void): void {
   host.replaceChildren();
   const fields = new Map<string, HTMLInputElement>();
@@ -102,8 +115,12 @@ export function renderMetadataPanel(session: MetadataFormSession, host: HTMLElem
     const { label, input } = metadataField(key, title, session.chart.META[key]);
     label.append(input); fields.set(key, input); host.append(label);
   }
+  const compatibility = document.createElement('label'); compatibility.className = 'field'; compatibility.append('噪域：三次及以上反转无效');
+  const noiseAreaOptions = storedNoiseAreaOptions(session.chart);
+  const ignoreTripleInversion = document.createElement('input'); ignoreTripleInversion.type = 'checkbox'; ignoreTripleInversion.setAttribute('aria-label', '噪域：三次及以上反转无效'); ignoreTripleInversion.checked = noiseAreaOptions.ignoreTripleInversion === true; compatibility.append(ignoreTripleInversion); host.append(compatibility);
+  const compatibilityHint = document.createElement('p'); compatibilityHint.className = 'hint'; compatibilityHint.textContent = '仅作用于此谱面。各状态层分别计算反转，激活层显示在未激活层上方。开启后，同一状态层中，同一点被两个或更多反转块覆盖时保留该层普通噪域的覆盖；关闭时按奇偶次数反转。官谱导入默认开启。'; host.append(compatibilityHint);
   const apply = document.createElement('button'); apply.className = 'wide-button'; apply.textContent = '应用谱面信息';
-  apply.onclick = () => { try { const next = { ...session.chart, META: readMetadata(fields, session) }; assertChart(next); session.commit('谱面信息', next); onCommit?.(); } catch (error) { apply.textContent = error instanceof Error ? error.message : String(error); } };
+  apply.onclick = () => { try { const next = { ...session.chart, META: readMetadata(fields, session), noiseAreaOptions: { ...noiseAreaOptions, ignoreTripleInversion: ignoreTripleInversion.checked } }; assertChart(next); session.commit('谱面信息', next); onCommit?.(); } catch (error) { apply.textContent = error instanceof Error ? error.message : String(error); } };
   host.append(apply);
 }
 

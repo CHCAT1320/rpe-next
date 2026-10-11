@@ -1,4 +1,6 @@
 import { createChart, createLine, createNote, createEvent, assertChart } from './chart.ts';
+import { convertOfficialNoiseAreas } from './official-noise.ts';
+import { NOISE_VERSION } from './noise-areas.ts';
 import type { AnyEventType, Chart, ChartEvent, EventLayer, JudgeLine, NoteType } from './types.ts';
 
 // The document handed to this converter comes straight out of `JSON.parse`, and its shape is only
@@ -49,6 +51,12 @@ export function parseOfficialChart(original: unknown): Chart {
   const baseBpm = source.judgeLineList[0].bpm;
   chart.BPMList = [{ bpm: baseBpm, startTime: [0, 0, 1] }];
   chart.META.offset = (source.offset ?? 0) * 1000;
+  // `Chart` carries an open-ended index signature, so a value written back into `blockAreaList`
+  // reads as `unknown`; the local keeps the array the converter just built.
+  const blockAreaList = convertOfficialNoiseAreas(source.blockAreaList, baseBpm, source.offset ?? 0);
+  chart.blockAreaList = blockAreaList;
+  chart.noiseAreaOptions = { ignoreTripleInversion: true };
+  if (blockAreaList.length) chart.META.RPEVersion = NOISE_VERSION;
   chart.rpeNextLegacySource = { format: 'phigros-v3', document: original };
   const beat = (ticks: number): number => Math.max(-100, Math.floor(ticks + 0.1)) / 32;
   chart.judgeLineList = source.judgeLineList.map((lineSource, index): JudgeLine => {

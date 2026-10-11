@@ -1,5 +1,6 @@
 import { beatValue, fromNumber } from '../core/beat.ts';
 import { assertChart } from '../core/chart.ts';
+import { integerAlphaEvent, integerNoteAlpha } from '../core/alpha-values.ts';
 import { easing } from '../core/easing.ts';
 import { compileExpression, compileBatchScript } from '../core/batch-script.ts';
 import { alignShaderParameters } from '../core/shader-events.ts';
@@ -211,6 +212,8 @@ function writeField(item: Note | ChartEvent, field: string, value: number): void
 }
 
 function validateChange(change: BatchChange, lineCount: number, snapshot: SelectionSnapshot): void {
+  if (change.kind === 'notes') change.after = integerNoteAlpha(change.after as Note) as Note & ChartEvent;
+  else if (change.type === 'alphaEvents') change.after = integerAlphaEvent(change.after as ChartEvent) as Note & ChartEvent;
   const { kind, type } = change;
   // The item carried by a change is a Note on the `notes` kind and a ChartEvent otherwise; the cast
   // keeps the two halves of the original mixed-shape body reading exactly the same fields as before.

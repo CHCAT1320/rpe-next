@@ -45,6 +45,25 @@ export function isTypingText(target: ShortcutTarget | null | undefined): boolean
 }
 
 /**
+ * Whether the browser's own handling of this keystroke must win over the editor's shortcuts.
+ *
+ * A composing keystroke (an IME mid-word, or the legacy `keyCode === 229` that reports one) and any
+ * key aimed at a text field belong to the browser. Within a number input the editing keys and the
+ * characters that can appear in a number stay native too, and so does anything held with a modifier,
+ * since those are copy/paste/select-all rather than editor commands.
+ */
+export function usesNativeTextShortcut(event: KeyboardEvent): boolean {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return true;
+  if (isTypingText(event.target as ShortcutTarget | null)) return true;
+  if (!isTextEntry(event.target as ShortcutTarget | null)) return false;
+  // `ShortcutTarget.closest` is the structural view this module uses everywhere else; the cast names
+  // only that one member, and the optional call below is the same guard the original had.
+  if ((event.target as ShortcutTarget | null)?.closest?.('input')?.type !== 'number') return true;
+  if (event.ctrlKey || event.metaKey || event.altKey) return true;
+  return /^[0-9eE.,+-]$/.test(event.key) || ['Backspace', 'Delete', 'Insert', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Tab', 'Enter', 'Escape', 'Dead', 'Process'].includes(event.key);
+}
+
+/**
  * Drops focus from a control so the next keystroke reaches the global handler.
  *
  * Text fields are left alone — blurring one mid-edit would discard what the user is typing.

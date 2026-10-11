@@ -1,4 +1,5 @@
 import { History } from './history.ts';
+import { integerChartAlpha } from '../core/alpha-values.ts';
 import type { SelectionState } from './selection-history.ts';
 import { createChart, createLine } from '../core/chart.ts';
 import type { AnyEventType, Chart, ChartEvent, JudgeLine, Note } from '../core/types.ts';
@@ -80,7 +81,7 @@ export class EditorSession extends EventTarget {
 
   constructor(chart: Chart = createChart()) {
     super();
-    this.history = new History(chart);
+    this.history = new History(integerChartAlpha(chart));
     this.lineIndex = 0;
     this.selection = new Set();
     this.clipboard = [];
@@ -169,8 +170,10 @@ export class EditorSession extends EventTarget {
   selectionState(): SelectionState { return selectionState(this); }
 
   commit(label: string, chart: Chart, beforeSelection: SelectionState = this.selectionState()): void {
-    if (this.collaboration) return this.collaboration.commit(label, chart, beforeSelection);
-    if (this.history.commit(label, chart, { beforeSelection, afterSelection: this.selectionState() })) {
+    // Alpha values are stored as integers; normalise before the history entry is recorded.
+    const normalized = integerChartAlpha(chart, this.chart);
+    if (this.collaboration) return this.collaboration.commit(label, normalized, beforeSelection);
+    if (this.history.commit(label, normalized, { beforeSelection, afterSelection: this.selectionState() })) {
       const time = Number.isFinite(this.editSeconds) ? Math.max(0, this.editSeconds) : 0;
       this.recentEdits.push({ start: time, end: time, label });
       if (this.recentEdits.length > 50) this.recentEdits.shift();
