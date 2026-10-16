@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EditorSession } from '../src/application/session.ts';
 import { EditorPlayback } from '../src/application/playback.ts';
+import type { PlaybackWheelSettings } from '../src/application/playback.ts';
 import { Timeline } from '../src/ui/timeline.ts';
 import type { TimelineSession } from '../src/ui/timeline.ts';
 import { TempoMap } from '../src/core/tempo.ts';
@@ -103,8 +104,20 @@ interface SoundsDouble {
   prepare(): Promise<void>;
 }
 
-/** The `{ scrollSpeed, scrollAcceleration }` bag the wheel handler reads; both are required by `PlaybackWheelSettings`. */
-interface WheelSettingsDouble { scrollSpeed: number; scrollAcceleration: boolean; }
+/**
+ * The wheel settings `EditorPlayback.wheel` reads.
+ *
+ * `PlaybackWheelSettings` is a `Pick` of the migrated settings, so it requires all three fields.
+ * `scrollAcceleration` and `wheelStopAtAudioStart` are optional here because most of the cases below
+ * predate them and lean on the playback layer's own defaults, so the bag is completed with those
+ * defaults where it is handed over.
+ */
+interface WheelSettingsDouble { scrollSpeed: number; scrollAcceleration?: boolean; wheelStopAtAudioStart?: boolean; }
+
+/** Completes a partial wheel bag with the defaults `PlaybackWheelSettings` requires. */
+function wheelSettings(settings: WheelSettingsDouble): PlaybackWheelSettings {
+  return { scrollAcceleration: false, wheelStopAtAudioStart: true, ...settings };
+}
 
 /** A storage stub for the preference round-trip; `PreferenceStorage` is the module's own contract. */
 function storageDouble(): PreferenceStorage & { value: string | undefined } {
@@ -121,15 +134,37 @@ test('滚轮向上暂停并定位真实时间，继续从新位置播放；准�
   let visible = 0;
   const playback = new EditorPlayback(audio, sounds, () => { visible = audio.time; });
   const settings: WheelSettingsDouble = { scrollSpeed: 5, scrollAcceleration: false };
-  playback.wheel({ deltaY: -100 }, settings, 0);
+  playback.wheel({ deltaY: -100 }, wheelSettings(settings), 0);
   assert.equal(audio.playing, false); assert.equal(visible, 10.06);
   const chart = createChart();
   const request = playback.toggle(chart); resolvePreparation?.(); await request;
   assert.equal(audio.time, 10.06); assert.equal(audio.playing, true);
   playback.pause(); const delayed = playback.toggle(chart);
-  playback.wheel({ deltaY: 100 }, settings, 1); resolvePreparation?.(); await delayed;
+  playback.wheel({ deltaY: 100 }, wheelSettings(settings), 1); resolvePreparation?.(); await delayed;
   assert.equal(audio.playing, false); assert.equal(audio.time, 10);
   assert.ok(Math.abs(wheelSeconds(-100, 120, 5, 2, false, 0, true) - 0.6) < 1e-10);
+});
+
+test('滚轮起点默认限制到音频零秒，延迟允许有限负拍，关闭后可越界且偏好持久化', () => {
+  const audio: TransportDouble = { time: 0.01, duration: 120, rate: 1, playing: false, pause() {}, seek(seconds: number) { this.time = seconds; }, async play() { this.playing = true; } };
+  // `PlaybackSounds` requires `prepare`, and this case never reaches it; a resolved promise keeps the
+  // shape honest without pretending the scheduler was exercised.
+  const playback = new EditorPlayback(audio, { stop() {}, prepare: () => Promise.resolve() }, () => {});
+  const tempo = new TempoMap([{ startTime: [0, 0, 1], bpm: 120 }]); const settings: WheelSettingsDouble = { scrollSpeed: 5 };
+  assert.equal(migratePreferences().settings.wheelStopAtAudioStart, true);
+  for (const offset of [0, 0.5, -0.3]) {
+    audio.time = 0.01; playback.wheel({ deltaY: 100 }, wheelSettings(settings), 1);
+    assert.equal(audio.time, 0); assert.ok(Math.abs(tempo.beat(audio.time - offset) + offset * 2) < 1e-9);
+    playback.wheel({ deltaY: 100, altKey: true }, wheelSettings(settings), 2); assert.equal(audio.time, 0);
+  }
+  playback.wheel({ deltaY: 100 }, wheelSettings({ ...settings, wheelStopAtAudioStart: false }), 3);
+  assert.ok(audio.time < 0);
+  playback.wheel({ deltaY: 100 }, wheelSettings({ ...settings, wheelStopAtAudioStart: true }), 4); assert.equal(audio.time, 0);
+  for (const wheelStopAtAudioStart of [true, false]) {
+    const storage = storageDouble();
+    writeEditorPreferences({ wheelStopAtAudioStart }, storage);
+    assert.deepEqual(readEditorPreferences(storage), { wheelStopAtAudioStart });
+  }
 });
 
 test('第二次空格能取消仍在准备的播放，按键重复不会产生隐式恢复', async () => {

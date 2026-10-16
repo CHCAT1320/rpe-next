@@ -12,7 +12,8 @@ import { PreviewBackground, textureInViewport } from './preview-background.ts';
 // 0.10.2 draws the chart's noise areas into the preview through this renderer, alongside the
 // background and the guides this file already drew.
 import { NoisePreview } from './noise-preview.ts';
-import type { Chart, Color, Note, NoteType } from '../core/types.ts';
+import { noiseLayers } from '../core/noise-skin.mjs';
+import type { Chart, Color, Note, NoiseLayer, NoteType } from '../core/types.ts';
 import type { HitEntry } from '../core/hit-effects.ts';
 import type { LineState, SceneSampler } from '../core/scene.ts';
 import type { RenderPass } from '../core/game-ui.ts';
@@ -154,6 +155,8 @@ type ShaderPass = Omit<ShaderEffectRecord, 'shader'> & { shader: string; sourceN
  */
 export interface NoteHitArea {
   lineIndex: number;
+  /** The note's position in that line's `notes` array, so a click can name the exact note. */
+  noteIndex: number;
   x1: number;
   y1: number;
   x2: number;
@@ -226,6 +229,13 @@ export class Preview {
   declare pickPreviewNoiseAreas: boolean;
   declare highlight: boolean;
   /**
+   * Draw every judge line fully opaque, ignoring its own fade animation.
+   *
+   * Set by the noise-tracking sampler around a frame it is capturing, so the line being traced is
+   * never hidden by an alpha animation. Unset means normal opacity.
+   */
+  forceLineOpacity?: boolean | undefined;
+  /**
    * The view settings `view-controls.ts` and `app.ts` push in. `draw` guards each read with `??`, so
    * they start unset and are declared optional rather than assigned a default the old code did not
    * have — a default stored here would be indistinguishable from a value the editor chose.
@@ -294,7 +304,11 @@ export class Preview {
     const divisor = this.viewDivisor ?? 1;
     const scale = viewport.scale / divisor;
     context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
-    if (this.applyShaders) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
+    // `noiseLayers` lives in un-migrated JavaScript, so its result is `any`; the annotation states
+    // the shape `core/noise-skin.mjs` actually returns (the chart's layers, or one default layer).
+    const skinScene = (noiseLayers(chart) as NoiseLayer[]).some(layer => this.noisePreview.usesSkin(layer));
+    // Screen-sampling skins preserve scene alpha, so supply the same opaque base as shaders.
+    if (this.applyShaders || skinScene) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
     // The image store reports a decoded record or `null`; the fallback keeps the previous one, which
     // is what makes this a `PreviewImage` rather than the store's own `DecodedImage`. `images` is a
     // fully optional dependency here: the tests install a bare `{ background }` literal before a
@@ -314,10 +328,12 @@ export class Preview {
       context.globalAlpha = 1;
     } else this.backgroundFrame.clear();
     const states = this.scene.sample(seconds);
-    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea);
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.viewport = viewport; this.selectedLine = selectedLine;
-    this.guides = lineGuides(states as GuideState[], chart.judgeLineList, order, width, height, scale);
+    // A forced line opacity also flattens the guide states to full alpha, so the numbers and arrows
+    // drawn for a hidden line stay readable while the tracking sampler captures it. `?? {}` mirrors
+    // the original spread of a possibly-`undefined` state.
+    this.guides = lineGuides(this.forceLineOpacity ? states.map(state => ({ ...(state ?? {}), alpha: 255 })) as GuideState[] : states as GuideState[], chart.judgeLineList, order, width, height, scale);
     // `visibleNotes` reports hit entries, whose `note` is what the loop below reads. `sample` leaves
     // an out-of-range index `undefined`, which the call already tolerates: `radius` is only read
     // from `states` at that index, and the `undefined` state itself is passed straight through.
@@ -326,7 +342,7 @@ export class Preview {
     // rather than accumulated across frames.
     this.noteHitAreas = [];
     for (const pass of this.passes ?? []) for (const index of pass.kind === 'line' ? [pass.index ?? 0] : order) {
-      if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || chart.judgeLineList[index].attachUI || (states[index]?.alpha ?? 0) <= 0 || states[index]?.scaleX === 0 || states[index]?.scaleY === 0)) continue;
+      if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || !this.forceLineOpacity && (chart.judgeLineList[index].attachUI || (states[index]?.alpha ?? 0) <= 0) || states[index]?.scaleX === 0 || states[index]?.scaleY === 0)) continue;
       const runtime = this.scene.lines[index];
       const state = states[index];
       if (!runtime || !state) continue;
@@ -346,7 +362,9 @@ export class Preview {
       context.translate(width / 2 + state.x * scale, height / 2 - state.y * scale);
       context.rotate(state.rotation * Math.PI / 180);
       if (pass.kind === 'line') {
-        const lineState: TintedLineState = this.lineTint && index === selectedLine ? { ...state, color: [0, 200, 0] } : state;
+        // A forced line opacity draws every line fully opaque, which is what the noise-tracking
+        // sampler needs so the line it is tracing is never hidden by its own fade animation.
+        const lineState: TintedLineState = { ...state, ...(this.forceLineOpacity ? { alpha: 255 } : {}), ...(this.lineTint && index === selectedLine ? { color: [0, 200, 0] } : {}) };
         this.drawLine(context, runtime.line, lineState, scale);
       } else for (const entry of visibleNotes.get(index) ?? []) {
         const note = entry.note;
@@ -362,10 +380,12 @@ export class Preview {
         const worldY = -state.y + position.x * Math.sin(rotation) - position.y * Math.cos(rotation);
         const screenX = width / 2 + worldX * scale;
         const screenY = height / 2 + worldY * scale;
-        const tail = Number.isFinite(position.tail) ? position.tail : position.y;
+        // Only a hold has a real tail; for every other type the tail is the note's own position, so a
+        // stale `tail` on a tap cannot stretch its hit capsule.
+        const tail = note.type === 2 && Number.isFinite(position.tail) ? position.tail : position.y;
         const tailWorldX = state.x + position.x * Math.cos(rotation) + tail * Math.sin(rotation);
         const tailWorldY = -state.y + position.x * Math.sin(rotation) - tail * Math.cos(rotation);
-        this.noteHitAreas.push({ lineIndex: index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
+        this.noteHitAreas.push({ lineIndex: index, noteIndex: entry.index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
         context.save();
         context.globalAlpha = clamp(position.alpha);
         // `Note` indexes unknown keys, so a chart-supplied per-note tint has no declared type. The
@@ -423,38 +443,31 @@ export class Preview {
       }
     }
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
-    const globalShader = shaderEffects.some(effect => effect.global);
-    if (!shaderEffects.length && this.showGameUI) drawGameUi(context, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
-    if (!shaderEffects.length) this.drawGuides(context, scale, selectedLine);
-    if (globalShader) {
-      if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
-      this.drawGuides(context, scale, selectedLine);
+    const localEffects = shaderEffects.filter(effect => !effect.global);
+    const globalEffects = shaderEffects.filter(effect => effect.global);
+    // `active` reports each effect's shader name and the source it was authored under; both are
+    // read here, so the callback is bound to the effect record rather than the pipeline's
+    // narrower `ShaderPass` view. The shader canvas is only null before the first layout, and
+    // `render` re-checks the target through `ensure`, so the original passed it straight through;
+    // the assertion is erased at runtime.
+    const shaderEffect = (effect: typeof shaderEffects[number]): string => this.shaderRuntime.source(effect.shader, effect.sourceName);
+    const renderShaders = (effects: typeof shaderEffects): boolean => effects.length > 0 && this.shaderPipeline.render(this.canvas, this.shaderCanvas as HTMLCanvasElement, effects, seconds, shaderEffect, viewport);
+    // Scene → local effects → game UI → noise layers → global effects. Local effects run on their own
+    // pass and are composited back before the UI is drawn, so the UI and noise layers stay unshaded.
+    if (renderShaders(localEffects)) {
+      context.clearRect(viewport.left, viewport.top, viewport.width, viewport.height);
+      context.drawImage(this.shaderCanvas as HTMLCanvasElement, 0, 0, width, height);
     }
+    if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
+    this.drawGuides(context, scale, selectedLine);
+    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea, viewport);
+    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
     context.restore();
-    let shaderRendered = false;
-    if (shaderEffects.length) {
-      // `active` reports each effect's shader name and the source it was authored under; both are
-      // read here, so the callback is bound to the effect record rather than the pipeline's
-      // narrower `ShaderPass` view. The shader canvas is only null before the first layout, and
-      // `render` re-checks the target through `ensure`, so the original passed it straight through;
-      // the assertion is erased at runtime.
-      const shaderEffect = (effect: typeof shaderEffects[number]): string => this.shaderRuntime.source(effect.shader, effect.sourceName);
-      shaderRendered = this.shaderPipeline.render(this.canvas, this.shaderCanvas as HTMLCanvasElement, shaderEffects, seconds, shaderEffect, viewport);
-      if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
-    } else if (this.shaderCanvas) this.shaderCanvas.style.visibility = 'hidden';
+    const shaderRendered = renderShaders(globalEffects);
+    if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
+    if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
     if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : String(clamp(this.opacity));
     for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer) layer.style.opacity = String(clamp(this.opacity));
-    if (!shaderRendered && shaderEffects.length && !globalShader) {
-      context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
-      if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
-      this.drawGuides(context, scale, selectedLine); context.restore();
-    }
-    if (shaderRendered && !globalShader && this.overlayCanvas) {
-      const overlay = prepareCanvas(this.overlayCanvas); const overlayContext = overlay.context; overlayContext.clearRect(0, 0, overlay.width, overlay.height);
-      if (this.showGameUI) drawGameUi(overlayContext, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
-      this.drawGuides(overlayContext, scale, selectedLine);
-      this.overlayCanvas.style.visibility = 'visible';
-    } else if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
     this.images?.trim?.();
   }
 
@@ -492,6 +505,17 @@ export class Preview {
    * clickable.
    */
   pickNote(clientX: number, clientY: number): number | null {
+    return this.pickNoteTarget(clientX, clientY)?.lineIndex ?? null;
+  }
+
+  /**
+   * Maps a click to the note under it, reporting both its line and its index within that line.
+   *
+   * The areas are tested newest-first, so the note drawn on top wins, and the distance is measured to
+   * the head-to-tail segment rather than to the head alone, which is what makes a hold note's length
+   * clickable.
+   */
+  pickNoteTarget(clientX: number, clientY: number): { lineIndex: number; noteIndex: number } | null {
     if (!this.visible || !this.noteHitAreas?.length) return null;
     const rectangle = this.canvas.getBoundingClientRect();
     const point = { x: clientX - rectangle.left, y: clientY - rectangle.top };
@@ -501,13 +525,15 @@ export class Preview {
       const amount = length ? Math.max(0, Math.min(1, ((point.x - area.x1) * dx + (point.y - area.y1) * dy) / length)) : 0;
       return Math.hypot(point.x - (area.x1 + amount * dx), point.y - (area.y1 + amount * dy));
     };
-    return this.noteHitAreas.slice().reverse().find(area => distanceToSegment(area) <= area.radius)?.lineIndex ?? null;
+    // The preview viewport is the only region notes are drawn into, so a click outside it is empty
+    // space even when a stale hit area happens to sit under the pointer.
+    const view = this.viewport;
+    if (view && (point.x < view.left || point.x > view.left + view.width || point.y < view.top || point.y > view.top + view.height)) return null;
+    const area = this.noteHitAreas.slice().reverse().find(entry => distanceToSegment(entry) <= entry.radius);
+    return area ? { lineIndex: area.lineIndex, noteIndex: area.noteIndex } : null;
   }
 
   drawGuides(context: CanvasRenderingContext2D, scale: number, selectedLine: number): void {
-    // 0.10.2 draws the noise-area markers before the line guides. The guard below is only about the
-    // line numbers/arrows, so this call has to stay above it.
-    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
     if (!this.lineNumbers && !this.lineArrows) return;
     for (const group of mergeGuides(this.guides ?? [], scale, this.mergeLineNumbers)) {
       context.save(); context.translate(group.x, group.y); context.rotate(group.rotation * Math.PI / 180);

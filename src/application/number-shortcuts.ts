@@ -1,12 +1,12 @@
 import { noteIsAbove } from '../core/chart.ts';
-import { selectedEvents, transformEvents } from './event-commands.ts';
+import { selectedEventEntries, transformEvents } from './event-commands.ts';
 import type { EventEditSession } from './event-commands.ts';
 import type { ChartEvent, Note } from '../core/types.ts';
 
 /**
  * The subset of {@link EditorSession} the number shortcuts touch.
  *
- * Extends {@link EventEditSession} so the event branch can call `selectedEvents`/`transformEvents`
+ * Extends {@link EventEditSession} so the event branch can call `selectedEventEntries`/`transformEvents`
  * directly; the note branch additionally needs `transformSelection`, which the session provides.
  */
 export interface NumberShortcutSession extends EventEditSession {
@@ -28,8 +28,9 @@ export function applyNumberShortcut(session: NumberShortcutSession, action: stri
       : { ...note, above: noteIsAbove(note) ? note.type === 2 ? 0 : 2 : 1 });
     return true;
   }
-  if (session.focus !== 'events' || session.eventSelection.size !== 1) return false;
-  const entry = selectedEvents(session)[0]; if (!entry) return false;
+  if (session.focus !== 'events') return false;
+  const entries = selectedEventEntries(session); if (entries.length !== 1) return false;
+  const entry = entries[0];
   if (entry.type === 'alphaEvents') {
     const value = action === 'NumberMirror' ? 0 : 255;
     transformEvents(session, '快捷填充透明度尾值', (event: ChartEvent) => ({ ...event, end: value, ...(event.inst ? { start: value } : {}) }));

@@ -75,9 +75,11 @@ export class EditorSession extends EventTarget {
    * `commit` and `travel` both test it first.
    *
    * Typed structurally rather than imported: the client is still plain JavaScript, so importing it
-   * would pull an untyped module into the type graph for the sake of two method signatures.
+   * would pull an untyped module into the type graph for the sake of two method signatures. The third
+   * argument is `unknown` because the client reads only the `recordHistory` flag off it, while
+   * `commit` below forwards a selection snapshot.
    */
-  collaboration?: { commit(label: string, chart: Chart, beforeSelection?: SelectionState): void; travel(direction: 'undo' | 'redo'): void } | null;
+  collaboration?: { commit(label: string, chart: Chart, options?: unknown): void; travel(direction: 'undo' | 'redo'): void } | null;
 
   constructor(chart: Chart = createChart()) {
     super();
@@ -168,6 +170,22 @@ export class EditorSession extends EventTarget {
   notify(): void { this.dispatchEvent(new Event('change')); }
 
   selectionState(): SelectionState { return selectionState(this); }
+
+  replaceMusicResource(name: string): void {
+    const previous = this.chart.META.song;
+    const replacements = new Map<Chart, Chart>();
+    const replace = (chart: Chart): Chart => {
+      if (!chart || chart.META.song !== previous) return chart;
+      if (!replacements.has(chart)) replacements.set(chart, { ...chart, META: { ...chart.META, song: name } });
+      return replacements.get(chart) as Chart;
+    };
+    if (this.collaboration) return this.collaboration.commit('更换音乐资源', replace(this.chart), { recordHistory: false });
+    this.history.document = replace(this.chart);
+    for (const command of [...this.history.undoStack, ...this.history.redoStack]) {
+      command.before = replace(command.before); command.after = replace(command.after);
+    }
+    this.notify();
+  }
 
   commit(label: string, chart: Chart, beforeSelection: SelectionState = this.selectionState()): void {
     // Alpha values are stored as integers; normalise before the history entry is recorded.

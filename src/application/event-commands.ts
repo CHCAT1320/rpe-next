@@ -42,6 +42,9 @@ export interface EventEditSession extends EventListSource {
   multiLineActive: boolean;
   multiLineMode: string;
   multiEventSelection: Map<number, Set<string>>;
+  /** Lines a multi-line gesture applies to; used by {@link selectAllEvents}. */
+  targetLineIndices: number[];
+  multiSelectionIntent: 'notes' | 'events' | null;
   shaderAutoAlign?: boolean;
   line?: { bpmfactor?: number };
   selection: Set<number>;
@@ -86,6 +89,53 @@ export function selectedEvents(session: EventEditSession): EventSelectionEntry[]
   }).filter(entry => entry.event);
 }
 
+/**
+ * The per-line selection maps the multi-line tools operate on.
+ *
+ * When multi-line event mode is active the session keeps one key set per line; otherwise there is a
+ * single implicit entry for the current line, so every caller can iterate uniformly.
+ */
+export function eventSelections(session: EventEditSession): Map<number, Set<string>> {
+  return session.multiLineActive && session.multiLineMode === 'events'
+    ? session.multiEventSelection : new Map([[session.lineIndex, session.eventSelection]]);
+}
+
+/** A selection entry that also records which line it belongs to. */
+export interface SelectedEventEntry extends EventSelectionEntry {
+  lineIndex: number;
+}
+
+export function selectedEventEntries(session: EventEditSession): SelectedEventEntry[] {
+  return [...eventSelections(session)].flatMap(([lineIndex, keys]) => [...keys].map(key => {
+    const [type, indexText] = key.split(':'); const index = Number(indexText);
+    return { type: type as AnyEventType, index, lineIndex, event: eventListAt(session, lineIndex, type as AnyEventType)[index] };
+  })).filter(entry => entry.event);
+}
+
+/** Selects one event, optionally toggling it or replacing the whole selection. */
+export function selectEvent(session: EventEditSession, lineIndex: number, type: AnyEventType, index: number, { toggle = false, replace = false }: { toggle?: boolean; replace?: boolean } = {}): void {
+  const key = eventKey(type, index);
+  const selections = eventSelections(session);
+  const selected = new Set(selections.get(lineIndex) ?? []);
+  if (toggle) { if (selected.has(key)) selected.delete(key); else selected.add(key); }
+  else if (replace || !selected.has(key)) { selections.clear(); selected.clear(); selected.add(key); }
+  if (selected.size) selections.set(lineIndex, selected); else selections.delete(lineIndex);
+  session.eventSelection = new Set(selections.get(session.lineIndex) ?? []);
+  session.focus = 'events'; session.selection.clear();
+}
+
+/** Selects every event of the given tracks, across all targeted lines in multi-line event mode. */
+export function selectAllEvents(session: EventEditSession, types: AnyEventType[]): void {
+  const selections = eventSelections(session); selections.clear();
+  const lines = session.multiLineActive && session.multiLineMode === 'events' ? session.targetLineIndices : [session.lineIndex];
+  for (const lineIndex of lines) {
+    const keys = types.flatMap(type => eventListAt(session, lineIndex, type).map((event, index) => eventKey(type, index)));
+    if (keys.length) selections.set(lineIndex, new Set(keys));
+  }
+  session.eventSelection = new Set(selections.get(session.lineIndex) ?? []);
+  session.multiSelectionIntent = 'events'; session.selection.clear();
+}
+
 export function chartWithEventLists(chart: Chart, lineIndex: number, eventLayer: number, updates: EventListUpdates): Chart {
   const source = chart.judgeLineList[lineIndex];
   if (!source) throw new Error('请先添加判定线');
@@ -113,11 +163,19 @@ export function commitEventLists(session: EventEditSession, label: string, updat
   session.commit(label, chart, beforeSelection);
 }
 
-export function transformEvents(session: EventEditSession, label: string, transform: EventTransform): void {
+/**
+ * Builds the updated tracks for one line without committing them.
+ *
+ * Split out of {@link transformEvents} so a multi-line transform can fold every line's result into
+ * a single chart and commit once.
+ */
+function transformedEventLists(session: EventEditSession, lineIndex: number, selection: Set<string>, transform: EventTransform): EventListUpdates {
   const updates: EventListUpdates = new Map();
   const linked = new Map<string, ChartEvent>();
-  for (const { type, index, event } of selectedEvents(session)) {
-    if (!updates.has(type)) updates.set(type, [...eventList(session, type)]);
+  for (const key of selection) {
+    const [typeText, indexText] = key.split(':'); const type = typeText as AnyEventType; const index = Number(indexText);
+    const event = eventListAt(session, lineIndex, type)[index]; if (!event) continue;
+    if (!updates.has(type)) updates.set(type, [...eventListAt(session, lineIndex, type)]);
     let next = transform(event, type);
     if (type === 'paintEvents' && session.shaderAutoAlign !== false && beatValue(next.startTime) !== beatValue(event.startTime)) next = alignShaderParameters(next);
     updates.get(type)![index] = next;
@@ -125,39 +183,43 @@ export function transformEvents(session: EventEditSession, label: string, transf
     if (link > 0 && type !== 'paintEvents') linked.set(`${type}:${link}`, next);
   }
   for (const [group, next] of linked) {
-    const [type, linkText] = group.split(':'); const link = Number(linkText);
-    const events = updates.get(type as AnyEventType) ?? [...eventList(session, type as AnyEventType)];
+    const [typeText, linkText] = group.split(':'); const type = typeText as AnyEventType; const link = Number(linkText);
+    const events = updates.get(type) ?? [...eventListAt(session, lineIndex, type)];
     for (let index = 0; index < events.length; index++) {
       const event = events[index];
-      if (Number(event.linkgroup ?? 0) !== link || session.eventSelection.has(eventKey(type as AnyEventType, index))) continue;
+      if (Number(event.linkgroup ?? 0) !== link || selection.has(eventKey(type, index))) continue;
       events[index] = { ...event, start: structuredClone(next.start), end: structuredClone(next.end), easingType: next.easingType,
         easingLeft: next.easingLeft, easingRight: next.easingRight, bezier: next.bezier, bezierPoints: structuredClone(next.bezierPoints) };
     }
-    updates.set(type as AnyEventType, events);
+    updates.set(type, events);
   }
-  if (updates.size) commitEventLists(session, label, updates);
+  return updates;
+}
+
+export function transformEvents(session: EventEditSession, label: string, transform: EventTransform): void {
+  let chart = session.chart;
+  for (const [lineIndex, selection] of eventSelections(session)) {
+    const updates = transformedEventLists(session, lineIndex, selection, transform);
+    if (updates.size) chart = chartWithEventLists(chart, lineIndex, session.eventLayer, updates);
+  }
+  if (chart === session.chart) return;
+  assertChart(chart);
+  const beforeSelection = session.selectionState();
+  if (session.multiLineActive && session.multiLineMode === 'events') session.eventSelection = new Set(session.multiEventSelection.get(session.lineIndex) ?? []);
+  session.focus = 'events'; session.selection.clear();
+  session.commit(label, chart, beforeSelection);
 }
 
 export function insertEvent(session: EventEditSession, type: AnyEventType, event: ChartEvent): void {
-  const events = eventList(session, type);
-  if (session.multiLineActive && session.multiLineMode === 'events') {
-    const updates: EventListUpdates = new Map([[type, [...events, event]]]);
-    commitEventLists(session, '添加事件', updates, [eventKey(type, events.length)]);
-    return;
-  }
-  commitEventLists(session, '添加事件', new Map([[type, [...events, event]]]), [eventKey(type, events.length)]);
+  insertEventAt(session, session.lineIndex, type, event);
 }
 
 export function insertEventAt(session: EventEditSession, lineIndex: number, type: AnyEventType, event: ChartEvent): void {
   const events = eventListAt(session, lineIndex, type);
   const chart = chartWithEventLists(session.chart, lineIndex, session.eventLayer, new Map([[type, [...events, event]]]));
-  const key = eventKey(type, events.length);
+  assertChart(chart);
   const beforeSelection = session.selectionState();
-  session.focus = 'events'; session.selection.clear();
-  if (session.multiLineActive && session.multiLineMode === 'events') {
-    session.multiEventSelection.set(lineIndex, new Set([key]));
-    if (lineIndex === session.lineIndex) session.eventSelection = new Set([key]);
-  } else session.eventSelection = new Set([key]);
+  selectEvent(session, lineIndex, type, events.length, { replace: true });
   session.commit('添加事件', chart, beforeSelection);
 }
 
@@ -190,9 +252,22 @@ export function placedEvent(session: EventEditSession, type: AnyEventType, first
 }
 
 export function deleteEvents(session: EventEditSession): void {
-  const updates: EventListUpdates = new Map();
-  for (const { type } of selectedEvents(session)) updates.set(type, eventList(session, type).filter((event, index) => !session.eventSelection.has(eventKey(type, index))));
-  if (updates.size) commitEventLists(session, '删除事件', updates, []);
+  let chart = session.chart;
+  const entries = selectedEventEntries(session);
+  for (const [lineIndex, selection] of eventSelections(session)) {
+    const updates: EventListUpdates = new Map();
+    for (const { type } of entries.filter(entry => entry.lineIndex === lineIndex)) {
+      if (!updates.has(type)) updates.set(type, eventListAt(session, lineIndex, type).filter((event, index) => !selection.has(eventKey(type, index))));
+    }
+    if (updates.size) chart = chartWithEventLists(chart, lineIndex, session.eventLayer, updates);
+  }
+  if (chart === session.chart) return;
+  assertChart(chart);
+  const beforeSelection = session.selectionState();
+  session.eventSelection.clear();
+  if (session.multiLineActive && session.multiLineMode === 'events') session.multiEventSelection.clear();
+  session.focus = 'events'; session.selection.clear();
+  session.commit('删除事件', chart, beforeSelection);
 }
 
 export function copyEvents(session: EventEditSession): void { session.eventClipboard = structuredClone(selectedEvents(session).map(({ type, event }) => ({ type, event }))); }

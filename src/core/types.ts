@@ -291,7 +291,29 @@ export interface NoiseArea {
   scaleYEvents: NoiseEvent[];
   /** Where the area sits along the editor's own horizontal strip; an editor-only field. */
   editorPositionX?: number;
+  /**
+   * The 噪域层 this area belongs to.
+   *
+   * Absent means the default layer, which is what charts written before layers existed rely on; the
+   * layer helpers in `core/noise-skin.ts` apply that fallback.
+   */
+  layerId?: string;
   [key: string]: unknown;
+}
+
+/** One 噪域层's skin settings, as validated by `core/noise-skin.ts`. */
+export interface NoiseSkinSettings {
+  channel?: 'normal' | 'low';
+  parameters?: Record<string, number | number[]>;
+}
+
+/** A 噪域层: a named group of areas sharing one skin and its parameter overrides. */
+export interface NoiseLayer extends NoiseSkinSettings {
+  id: string;
+  name: string;
+  skin?: string;
+  /** Remembered parameter sets, keyed by skin path. */
+  skinPresets?: Record<string, NoiseSkinSettings>;
 }
 
 /** A complete RPE chart document. */
@@ -308,6 +330,13 @@ export interface Chart {
    * index signature it would read as `unknown` at every one of those sites.
    */
   blockAreaList?: NoiseArea[];
+  /**
+   * The 噪域层 the document groups its areas into, present only once the user has split them.
+   *
+   * Absent means every area belongs to the single default layer, so the reader must go through the
+   * `noiseLayers` helper rather than reading this directly.
+   */
+  noiseAreaLayers?: NoiseLayer[];
   /** Options the 噪域 feature carries; the triple-inversion toggle is the only one so far. */
   noiseAreaOptions?: { ignoreTripleInversion?: boolean };
   /**

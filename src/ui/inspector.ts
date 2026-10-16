@@ -67,6 +67,7 @@ export function renderProperties(session: EditorSession, reportError: (error: un
     // attributes rather than being narrowed once here.
     const input = document.createElement(kind === 'select' ? 'select' : 'input');
     input.setAttribute('aria-label', labelText);
+    input.dataset.rpenField = key; label.dataset.rpenField = key;
     if (kind === 'select') for (const [value, title] of Object.entries(options ?? {})) {
       const option = document.createElement('option'); option.value = value; option.textContent = String(title); input.append(option);
     }

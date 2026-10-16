@@ -11,6 +11,7 @@ import { reorderLine, deleteLine, duplicateLine } from '../src/application/line-
 import { TempoMap } from '../src/core/tempo.ts';
 import { Timeline } from '../src/ui/timeline.ts';
 import { Preview } from '../src/ui/preview.ts';
+import type { ShaderPass } from '../src/ui/shader-pipeline.ts';
 import { packageEntries } from '../src/platform/files.ts';
 import type { ArchiveEntries } from '../src/platform/archive.ts';
 import type { AnyEventType, Beat } from '../src/core/types.ts';
@@ -325,21 +326,86 @@ test('首尾相接的 shader 保持完整宽度，只有真正重叠时分栏且
   assert.deepEqual([...layout.values()], [{ lane: 0, count: 2 }, { lane: 1, count: 2 }, { lane: 0, count: 1 }]);
 });
 
-test('shader 使用相同的不透明背景底色，成功时替换原画面、失败及结束时恢复', () => {
+test('shader 使用相同的不透明底色，第一层写回场景，第二层替换最终画面', () => {
   globalThis.devicePixelRatio = 1;
   const chart = createChart(); chart.effects = [effect()];
   const context = recordingContext(); const surface = canvas(context); const preview = new Preview(canvasSurface(surface));
   // `Preview.images` is the full project store, of which this test installs only the background.
   preview.visible = true; preview.images = previewImages({ background: { naturalWidth: 1350, naturalHeight: 900 } });
   preview.shaderRuntime.load = () => Promise.resolve(); preview.shaderPipeline.render = () => true;
+  // The local pass composites its result back over the scene, so the pipeline needs a real canvas.
+  preview.shaderCanvas = canvas(recordingContext()) as unknown as HTMLCanvasElement;
   const tempo = new TempoMap(chart.BPMList); preview.draw(chart, tempo, 0, 0);
   const fill = context.calls.findIndex(call => call.method === 'fillRect' && call.color === '#111');
   const background = context.calls.findIndex(call => call.method === 'drawImage');
   assert.ok(fill >= 0 && fill < background); assert.equal(context.calls[fill].alpha, 1);
-  assert.equal(context.calls[background].alpha, 0.35); assert.equal(surface.style.opacity, '0');
-  preview.shaderPipeline.render = () => false; preview.draw(chart, tempo, 0, 0); assert.equal(surface.style.opacity, '1');
-  preview.shaderPipeline.render = () => true; preview.draw(chart, tempo, 3, 0); assert.equal(surface.style.opacity, '1');
+  // A local effect is composited into the scene, so the scene canvas itself stays visible.
+  assert.equal(context.calls[background].alpha, 0.35); assert.equal(surface.style.opacity, '1');
+  assert.ok(context.calls.some(call => call.method === 'drawImage' && call.args[0] === preview.shaderCanvas));
+  // A global effect replaces the finished frame, so the scene canvas is hidden behind the shader one.
+  const globalChart = { ...chart, effects: [{ ...(chart.effects as EffectDouble[])[0], global: true }] };
+  preview.draw(globalChart, tempo, 0, 0); assert.equal(surface.style.opacity, '0');
+  preview.shaderPipeline.render = () => false; preview.draw(globalChart, tempo, 0, 0); assert.equal(surface.style.opacity, '1');
+  preview.shaderPipeline.render = () => true; preview.draw(globalChart, tempo, 3, 0); assert.equal(surface.style.opacity, '1');
   context.calls.length = 0; preview.applyShaders = false; preview.draw(chart, tempo, 0, 0);
+  assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
+});
+
+test('场景、第一层 shader、UI、全部噪域、第二层 shader 依次合成，阶段优先于 order', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); chart.META.name = 'stage-ui';
+  // The global effect is ordered first, yet must still composite last: stage wins over `order`.
+  chart.effects = [{ ...effect('noise'), global: true, order: -100 }, { ...effect('grayscale'), order: 100 }];
+  const context = recordingContext(); const preview = new Preview(canvasSurface(canvas(context))); const sequence: string[] = [];
+  const tempo = new TempoMap(chart.BPMList);
+  preview.visible = true; preview.showGameUI = true; preview.shaderCanvas = canvas(recordingContext()) as unknown as HTMLCanvasElement; preview.shaderRuntime.load = () => Promise.resolve();
+  // `ShaderPipeline.render` is generic over its narrow `ShaderPass` view, which does not carry the
+  // `global` flag the staging logic branches on; the stub names the wider record the renderer hands
+  // over, and `ShaderPass` keeps it assignable to the declared generic signature.
+  preview.shaderPipeline.render = (_source, _target, passes: (ShaderPass & { global?: boolean })[]) => {
+    if (!passes[0]!.global) {
+      // The local pass runs while the scene is painted but before the UI is drawn.
+      assert.ok(context.calls.some(call => call.method === 'fillRect' && call.color !== '#111'));
+      assert.ok(!context.calls.some(call => call.method === 'fillText' && call.args[0] === 'stage-ui'));
+      sequence.push('first');
+    } else { assert.deepEqual(sequence, ['first', 'noise']); sequence.push('second'); }
+    return true;
+  };
+  preview.noisePreview.draw = () => {
+    // Noise layers see the composited local pass and the UI, both of which precede them.
+    assert.ok(context.calls.some(call => call.method === 'drawImage' && call.args[0] === preview.shaderCanvas));
+    assert.ok(context.calls.some(call => call.method === 'fillText' && call.args[0] === 'stage-ui'));
+    sequence.push('noise');
+  };
+  preview.draw(chart, tempo, 0, 0);
+  assert.deepEqual(sequence, ['first', 'noise', 'second']);
+  sequence.length = 0; context.calls.length = 0;
+  preview.shaderPipeline.render = () => false;
+  preview.noisePreview.draw = () => {
+    assert.ok(context.calls.some(call => call.method === 'fillText' && call.args[0] === 'stage-ui'));
+    sequence.push('noise');
+  };
+  preview.draw(chart, tempo, 0, 0);
+  assert.deepEqual(sequence, ['noise']); assert.equal(preview.canvas.style.opacity, '1');
+});
+
+test('编辑背景预览给可见皮肤提供不透明场景，隐藏皮肤或简易渲染时恢复透明底', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); chart.noiseAreaLayers = [{ id: 'default', name: '默认层' }, { id: 'water', name: '水面', skin: 'shader/Water' }];
+  const context = recordingContext(); const preview = new Preview(canvasSurface(canvas(context)));
+  preview.visible = true; preview.applyShaders = false; preview.noisePreview.draw = () => {};
+  const tempo = new TempoMap(chart.BPMList);
+  preview.draw(chart, tempo, 0, 0);
+  // A skin samples the scene, so it needs an opaque base to sample from.
+  assert.ok(context.calls.some(call => call.method === 'fillRect' && call.color === '#111' && call.alpha === 1));
+  context.calls.length = 0; preview.noisePreview.hiddenLayers = new Set(['water']);
+  preview.draw(chart, tempo, 0, 0);
+  assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
+  context.calls.length = 0; preview.noisePreview.hiddenLayers.clear(); preview.noisePreview.simpleLayers = new Set(['water']);
+  preview.draw(chart, tempo, 0, 0);
+  assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
+  context.calls.length = 0; preview.noisePreview.simpleLayers.clear(); preview.noisePreview.forceSimple = true;
+  preview.draw(chart, tempo, 0, 0);
   assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
 });
 

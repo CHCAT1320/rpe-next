@@ -122,10 +122,10 @@ export class LineRuntime {
     const controls = Object.fromEntries(Object.entries(CONTROL_FIELDS)
       .map(([property, name]) => [property, new ControlCurve(line[name] as CurvePoint[] | undefined, property as ControlProperty)]));
     this.controls = controls as unknown as LineControls;
-    this.notes = (line.notes ?? []).map(note => {
+    this.notes = (line.notes ?? []).map((note, index) => {
       const start = tempo.seconds(note.startTime, factor);
       const end = tempo.seconds(note.endTime, factor);
-      return { note, start, end, floor: this.floor(start) + (note.yOffset ?? 0), tail: this.floor(end) + (note.yOffset ?? 0) };
+      return { note, index, start, end, floor: this.floor(start) + (note.yOffset ?? 0), tail: this.floor(end) + (note.yOffset ?? 0) };
     });
     this.minSpeed = this.notes.reduce((minimum, entry) => Math.min(minimum, Math.abs(entry.note.speed ?? 1) || 1), 1);
     this.hitTimes = [...this.notes].sort((left, right) => left.start - right.start);

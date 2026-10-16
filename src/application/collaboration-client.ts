@@ -26,6 +26,7 @@ export interface QueuedOperation {
   operation: string;
   label: string;
   changes: ChartChange[];
+  recordHistory?: boolean;
   sent?: boolean;
   travel?: { direction: 'undo' | 'redo'; entry: { label: string; changes: ChartChange[] } };
 }
@@ -176,14 +177,22 @@ export class CollaborationClient extends EventTarget {
     if (!local) restoreSelection(session, remapSelection(source, shared, selection));
     this.syncHistory(); session.notify();
   }
-  commit(label: string, chart: Chart): void {
+  /**
+   * Applies an edit and queues it for the room.
+   *
+   * The third argument is used two ways by callers: `session.commit` forwards the selection snapshot
+   * it was handed, while `replaceMusicResource` passes the history flag. Only the flag is read here,
+   * so a snapshot falls back to recording history — the same result the default produces.
+   */
+  commit(label: string, chart: Chart, options: { recordHistory?: boolean } | SelectionState = {}): void {
+    const recordHistory = 'recordHistory' in options ? options.recordHistory ?? true : true;
     try {
       if (!this.ready) throw new Error('联机尚未就绪或房主离线，编辑暂停');
       const next = identifyChart(chart); const changes = chartChanges(this.session!.chart, next); if (!changes.length) return;
       for (const change of changes) for (const id of changeResources(change)) {
         const owner = this.locks.get(id); if (owner && owner !== this.id) throw new Error(`该物件由 ${this.members.find(member => member.id === owner)?.name ?? '其他用户'} 编辑中`);
       }
-      const operation: QueuedOperation = { type: 'edit', operation: crypto.randomUUID(), label, changes };
+      const operation: QueuedOperation = { type: 'edit', operation: crypto.randomUUID(), label, changes, recordHistory };
       this.queue.push(operation); this.setChart(next, true); this.flush(); this.changed();
     } catch (error) { this.notify((error as Error).message, 'warning'); this.session!.notify(); }
   }
@@ -251,7 +260,7 @@ export class CollaborationClient extends EventTarget {
           if (own.travel) {
             const { direction, entry } = own.travel;
             (direction === 'undo' ? this.undo : this.redo).pop(); (direction === 'undo' ? this.redo : this.undo).push(entry);
-          } else { this.undo.push({ label: own.label, changes: own.changes }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
+          } else if (own.recordHistory !== false) { this.undo.push({ label: own.label, changes: own.changes }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
         }
         const member = this.members.find(member => member.id === message.id); if (member) member.stats = message.stats;
         this.rebase();

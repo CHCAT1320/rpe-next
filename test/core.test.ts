@@ -2,13 +2,76 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { beatValue, fromNumber, parseBeat } from '../src/core/beat.ts';
 import { TempoMap } from '../src/core/tempo.ts';
-import { createChart, createNote, createEvent, parseChart, serializeChart, assertChart } from '../src/core/chart.ts';
+import { diagnose, createChart, createNote, createEvent, parseChart, serializeChart, assertChart } from '../src/core/chart.ts';
 import { easing, bezier } from '../src/core/easing.ts';
 import { EventTrack, SpeedIntegral } from '../src/core/events.ts';
 import { IntervalIndex } from '../src/core/interval-index.ts';
 import { EditorSession } from '../src/application/session.ts';
 import { readZip, writeZip, crc32 } from '../src/platform/archive.ts';
-import type { Note } from '../src/core/types.ts';
+import type { Note, NoteType } from '../src/core/types.ts';
+
+test('音符重叠只报告 Tap/Hold 组合或 Flick/Flick，不报告 Drag 或 Flick 混合', () => {
+  const chart = createChart();
+  const notes = [createNote(1, 1, 0), createNote(4, 1, 0), createNote(3, 1, 0), createNote(2, 1, 0), createNote(4, 1, 0), createNote(3, 1, 0)];
+  chart.judgeLineList[0].notes = notes;
+  const overlaps = diagnose(chart).filter(issue => issue.message === '同位置同时音符重叠');
+  assert.equal(overlaps.length, 2);
+  assert.deepEqual(overlaps.map(issue => issue.index), [3, 5]);
+});
+
+test('fake 音符不参与重叠判定', () => {
+  const chart = createChart();
+  const fakeTap = createNote(1, 1, 0); fakeTap.isFake = 1;
+  const fakeFlick = createNote(3, 1, 0); fakeFlick.isFake = true;
+  chart.judgeLineList[0].notes = [fakeTap, fakeFlick, createNote(1, 1, 0)];
+  assert.equal(diagnose(chart).filter(issue => issue.message === '同位置同时音符重叠').length, 0);
+});
+
+test('音符重叠分类覆盖全部类型组合，保持输入顺序和原音符索引', () => {
+  const types: NoteType[] = [1, 2, 3, 4];
+  for (const first of types) for (const second of types) {
+    const chart = createChart();
+    chart.judgeLineList[0].notes = [createNote(first, 1, 0), createNote(second, 1, 0)];
+    const expected = first <= 2 && second <= 2 || first === 3 && second === 3;
+    const overlaps = diagnose(chart).filter(issue => issue.message === '同位置同时音符重叠');
+    assert.deepEqual(overlaps.map(issue => issue.index), expected ? [1] : [], `${first}/${second}`);
+  }
+  const chart = createChart();
+  chart.judgeLineList[0].notes = ([3, 1, 4, 3, 2, 1, 3] as NoteType[]).map(type => createNote(type, 1, 0));
+  assert.deepEqual(diagnose(chart).filter(issue => issue.message === '同位置同时音符重叠').map(issue => issue.index), [3, 4, 5, 6]);
+});
+
+test('重叠分类按线、拍数、横坐标及朝向隔离，假音符和 Drag 仍检查其他错误', () => {
+  const chart = createChart(); const line = chart.judgeLineList[0];
+  line.notes = [createNote(1, 0.5, 0), createNote(1, 1, 0), createNote(1, 0.5, 20),
+    { ...createNote(1, 0.5, 0), above: 0 }, { ...createNote(1, 0.5, 0), isFake: 1 },
+    { ...createNote(1, 0.5, 0), isFake: true },
+    // A string `isFake` is not a legal `Note`, but the chart is untrusted JSON and the coercion of
+    // `'1'` is exactly what this case covers, so the value is bridged rather than typed away.
+    { ...createNote(1, 0.5, 0), isFake: '1' } as unknown as Note,
+    { ...createNote(1, 0.5, 0), startTime: [0, 2, 4] },
+    { ...createNote(2, 1, 700), endTime: [0, 0, 1], isFake: true },
+    { ...createNote(4, 1, 700), endTime: [0, 0, 1] }];
+  chart.judgeLineList.push({ ...line, notes: [createNote(1, 0.5, 0)] });
+  const issues = diagnose(chart);
+  assert.deepEqual(issues.filter(issue => issue.message === '同位置同时音符重叠').map(issue => [issue.line, issue.index]), [[0, 7]]);
+  for (const index of [8, 9]) {
+    assert.ok(issues.some(issue => issue.index === index && issue.message === '结束拍早于开始拍'));
+    assert.ok(issues.some(issue => issue.index === index && issue.message === '音符超出标准横向范围'));
+  }
+});
+
+test('密集同位置 Drag 不参与重叠，其他类别每个后续音符只报告一次', () => {
+  const chart = createChart(); const notes = chart.judgeLineList[0].notes;
+  for (let index = 0; index < 30000; index++) notes.push(createNote(4, 1, 0));
+  notes.push(createNote(3, 1, 0), createNote(1, 1, 0));
+  for (let index = 0; index < 10000; index++) notes.push(createNote(index % 2 ? 2 : 3, 1, 0));
+  const overlaps = diagnose(chart).filter(issue => issue.message === '同位置同时音符重叠');
+  assert.equal(overlaps.length, 10000);
+  // The filter above guarantees at least one match, so the ends of the list are present.
+  assert.equal(overlaps[0]!.index, 30002);
+  assert.equal(overlaps.at(-1)!.index, notes.length - 1);
+});
 
 test('拍数负数、分母和三元表示', () => {
   assert.deepEqual(fromNumber(-0.25), [-1, 3, 4]);

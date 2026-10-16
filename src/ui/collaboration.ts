@@ -16,6 +16,7 @@ import { isTextEntry, usesNativeTextShortcut } from './keyboard.ts';
 import type { ShortcutTarget } from './keyboard.ts';
 import { download } from '../platform/files.ts';
 import { collaborationMarkerPosition, collaborationLabelBackground } from './collaboration-display.ts';
+import { editorSkinState, editorSkinSignal } from './editor-skin-state.mjs';
 import type { Timeline, NoteHitEntry } from './timeline.ts';
 import type { EditorSession } from '../application/session.ts';
 
@@ -173,11 +174,16 @@ export class CollaborationPanel {
   toast!: HTMLDivElement;
 
   constructor(host: HTMLElement, context: () => CollaborationContext, { receiveChart, receiveAsset, notify, activate, confirmJoin }: CollaborationPanelOptions) {
+    editorSkinState({ collaboration: 'offline' });
     this.host = host; this.context = context; this.receiveAsset = receiveAsset; this.notify = notify; this.activate = activate; this.confirmJoin = confirmJoin;
     this.cursor = null;
     this.transfers = new Map(); this.transport = new CollaborationTransport();
     this.client = new CollaborationClient(this.transport, { session: () => context().session, receiveChart, notify, interactionBusy: () => Boolean(context().timeline.drag || context().timeline.eventInteraction.drag || context().interactionBusy) });
-    this.client.addEventListener('change', () => this.renderState());
+    this.client.addEventListener('change', () => {
+      const state = this.client.ready ? 'ready' : this.client.active ? 'connecting' : 'offline';
+      if (state !== document.documentElement.dataset.rpenCollaboration) editorSkinSignal('collaboration-changed');
+      editorSkinState({ collaboration: state }); this.renderState();
+    });
     this.client.addEventListener('asset', event => { this.asset((event as CustomEvent<AssetChunk>).detail).catch(error => notify((error as Error).message, 'warning')); });
     this.client.addEventListener('asset-manifest', event => {
       if (!this.acceptAssets.checked) return;

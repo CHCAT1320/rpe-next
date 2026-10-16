@@ -12,6 +12,8 @@ export const HOLD_HIT_INTERVAL = 20 / 120;
  */
 export interface HitEntry {
   note: Note;
+  /** Position of the note in its line's `notes` array, used to address it in the editor. */
+  index: number;
   start: number;
   end: number;
   floor: number;

@@ -10,6 +10,8 @@ import { EVENT_WHEEL_STEPS } from '../core/note-editing.ts';
 import { renderShaderInspector } from './shader-inspector.ts';
 import { canCutEvent } from '../application/event-tools.ts';
 import { runEventTool } from './event-tools.ts';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
+import type { EventSampler } from './event-sampler.mjs';
 import type { Notify } from './event-tools.ts';
 import type { EventSelectionEntry } from '../application/event-commands.ts';
 import type { EditorSession } from '../application/session.ts';
@@ -57,7 +59,7 @@ function applyEventTransform(session: EditorSession, label: string, transform: E
   } else transformEvents(session, label, transform);
 }
 
-export function renderEventInspector(session: EditorSession, tempo: TempoMap, currentBeat: () => number, reportError: (error: unknown) => void, notify: Notify = () => {}): void {
+export function renderEventInspector(session: EditorSession, tempo: TempoMap, currentBeat: () => number, reportError: (error: unknown) => void, notify: Notify = () => {}, sampler: EventSampler | null = null): void {
   // A field being edited owns the panel: re-rendering here would rebuild the input under the caret.
   if (session.liveEventEdit) return;
   const container = document.querySelector('#event-properties') as HTMLElement; container.replaceChildren();
@@ -88,24 +90,66 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     };
     try { update(); } catch (error) { if (!quiet) reportError(error); }
   };
+  const samplePanel = (key: string, title: string, kind: EventFieldKind, value: EventValue): { panel: HTMLDivElement; close: HTMLButtonElement } => {
+    const panel = document.createElement('div'); panel.className = 'event-sample-panel'; panel.hidden = true;
+    const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = `${title}取样 · 拖动控制条实时预览，完成后统一应用`;
+    panel.append(hint);
+    const target = { type: eventType, index: entries[0]!.index, lineIndex: entries[0]!.lineIndex ?? session.lineIndex, field: key };
+    let sampleValue: EventValue = structuredClone(value);
+    const applySample = (next: EventValue): void => safely(() => {
+      sampleValue = structuredClone(next);
+      if (sampler) sampler.updateValueDraft(target, next);
+      else applyEventTransform(session, `取样${title}`, current => ({ ...current, [key]: next, ...(current.inst && (key === 'start' || key === 'end') ? { start: structuredClone(next), end: structuredClone(next) } : {}) }));
+    });
+    const addRange = (labelText: string, min: number, max: number, step: number, initial: number, update: (next: number) => EventValue): void => {
+      const label = document.createElement('label'); label.className = 'field'; label.append(labelText);
+      const range = document.createElement('input'); range.type = 'range'; range.min = String(min); range.max = String(max); range.step = String(step); range.value = String(initial); range.setAttribute('aria-label', `${title}${labelText}`);
+      const output = document.createElement('output'); output.textContent = String(initial);
+      range.onpointerdown = () => { sampler?.beginValueDraft(); session.liveEventEdit = true; };
+      range.oninput = () => { const next = update(Number(range.value)); output.textContent = Array.isArray(next) ? next.join(', ') : String(next); applySample(next); };
+      label.append(range, output); panel.append(label);
+    };
+    if (kind === 'array') {
+      // `Color` is exactly three channels, so the fallback and every rebuild below keep that arity.
+      const colors: Color = Array.isArray(value) && value.length === 3 ? [value[0], value[1], value[2]] : [255, 255, 255]; sampleValue = [...colors];
+      const picker = document.createElement('input'); picker.type = 'color'; picker.value = '#' + colors.map(channel => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0')).join(''); picker.setAttribute('aria-label', `${title}取色板`); picker.oninput = () => { const hex = picker.value.slice(1); const next: Color = [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16)) as Color; applySample(next); }; panel.append(picker);
+      for (const [index, channel] of ['R', 'G', 'B'].entries()) addRange(channel, 0, 255, 1, colors[index], next => { const result: Color = [...sampleValue as Color]; result[index] = next; return result; });
+    } else if (eventType === 'alphaEvents') {
+      const wrap = document.createElement('div'); wrap.className = 'alpha-sample-wrap';
+      const range = document.createElement('input'); range.type = 'range'; range.min = '0'; range.max = '255'; range.step = '1'; range.value = String(Number(value) || 0); range.className = 'alpha-sample-gradient'; range.setAttribute('aria-label', `${title}透明度取样`);
+      const output = document.createElement('output'); output.textContent = String(range.value); range.onpointerdown = () => { sampler?.beginValueDraft(); session.liveEventEdit = true; }; range.oninput = () => { output.textContent = String(range.value); applySample(Number(range.value)); }; wrap.append(range, output); panel.append(wrap);
+    } else {
+      // The `alphaEvents` branch above already claimed that type, so `eventType` is narrowed here and
+      // an `alphaEvents` case would be unreachable; the range it used is therefore not repeated.
+      const limits: [number, number, number] = eventType === 'speedEvents' ? [-20, 20, 0.01] : eventType === 'rotateEvents' ? [-360, 360, 0.1] : [-2000, 2000, 0.1];
+      addRange('数值', ...limits, Number(value) || 0, next => next);
+    }
+    const actions = document.createElement('div'); actions.className = 'event-sample-actions';
+    const apply = document.createElement('button'); apply.type = 'button'; apply.textContent = '应用全部取样'; apply.onclick = () => sampler ? sampler.finishValue(true) : undefined;
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = '取消取样'; cancel.onclick = () => sampler ? sampler.finishValue(false) : undefined;
+    const close = document.createElement('button'); close.type = 'button'; close.textContent = '收起取样';
+    actions.append(apply, cancel, close); panel.append(actions);
+    return { panel, close };
+  };
   for (const [key, title, kind] of fields) {
     const label = document.createElement('label'); label.className = 'field'; label.append(title);
     // Built as `HTMLInputElement`: both branches are `input` elements, and the field kinds that need
     // `min`/`max`/`step` are all inputs (never the elements `document.createElement('input')` could
     // otherwise widen to).
     const input: HTMLInputElement = document.createElement('input'); input.type = kind === 'number' ? 'number' : 'text'; input.step = 'any'; input.setAttribute('aria-label', `事件${title}`);
+    input.dataset.rpenField = key; label.dataset.rpenField = key;
     // `min`/`max`/`step` are DOMString attributes, so the original's numeric writes are stored as
     // their decimal text; the parsed value is the same either way.
     if (key === 'easingLeft' || key === 'easingRight') { input.min = '0'; input.max = '1'; }
     if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) { input.min = '0'; input.max = '255'; }
-    if (eventType === 'speedEvents' && (key === 'start' || key === 'end')) input.min = '0';
+    if (eventType === 'speedEvents' && (key === 'start' || key === 'end')) { input.min = '-20'; input.max = '20'; }
     if (key === 'linkgroup') { input.min = '0'; input.step = '1'; }
     // Every field kind except `beat`/`array` reports a plain scalar (number or string), which is what
     // an input's `value` holds; `String` keeps the concatenation the original's `number` branch did.
     const shown = event[key];
     input.value = kind === 'beat' ? formatBeat(event[key] as Beat) : kind === 'array' ? (event[key] as number[]).join(', ') : typeof shown === 'string' || typeof shown === 'number' ? String(shown) : String(key === 'easingRight' ? 1 : 0);
     input.onfocus = () => { session.liveEventEdit = true; };
-    input.onblur = () => { session.liveEventEdit = false; queueMicrotask(() => { if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify); }); };
+    input.onblur = () => { session.liveEventEdit = false; queueMicrotask(() => { if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify, sampler); }); };
     // `oninput` is declared with a plain `Event`, which carries no `isComposing`; the DOM delivers an
     // `InputEvent` here, so the assertion names that already-true fact and nothing more. An IME
     // composition is still in flight in that case, and committing mid-composition would fight it.
@@ -118,7 +162,23 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     // `session.division` is optional until `renderSession` attaches it; `?? 0` keeps the read a
     // number and hands the "no grid yet" case to `beatInputControl`'s own `division() || 4` fallback,
     // which is exactly what an `undefined` return did before.
-    label.append(kind === 'beat' ? beatInputControl(input, () => session.division ?? 0, reportError) : input); container.append(label);
+    const controls = document.createElement('span'); controls.className = 'event-input-controls'; controls.append(kind === 'beat' ? beatInputControl(input, () => session.division ?? 0, reportError) : input);
+    const samplingField = key === 'start' || key === 'end';
+    const samplingType = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents', 'colorEvents'].includes(eventType);
+    if (samplingField && samplingType) {
+      if (sampler && ['moveXEvents', 'moveYEvents', 'rotateEvents'].includes(eventType) && ['start', 'end'].includes(key)) {
+        const open = document.createElement('button'); open.type = 'button'; open.className = 'sample-button'; open.textContent = '⌖'; open.title = `${title}：在预览中拖动取样`;
+        open.onclick = () => sampler.begin({ type: eventType, index: entries[0].index, field: key, lineIndex: entries[0].lineIndex ?? session.lineIndex });
+        controls.append(open);
+      } else {
+        const sampling = samplePanel(key, title, kind, event[key]);
+        const open = document.createElement('button'); open.type = 'button'; open.className = 'sample-button'; open.textContent = '⌖'; open.title = '展开取样控制';
+        sampling.close.onclick = () => { sampling.panel.hidden = true; open.hidden = false; };
+        open.onclick = () => { sampler?.beginValueDraft(); session.liveEventEdit = true; sampling.panel.hidden = false; open.hidden = true; };
+        controls.append(open); label.append(controls); container.append(label); container.insertBefore(sampling.panel, label); continue;
+      }
+    }
+    label.append(controls); container.append(label);
   }
   const lockLabel = document.createElement('label'); lockLabel.className = 'field'; lockLabel.append('钩定（首尾同步）');
   const lock = document.createElement('input'); lock.type = 'checkbox'; lock.checked = Boolean(event.inst); lock.setAttribute('aria-label', '钩定');
@@ -142,7 +202,7 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
   label.append(select); container.append(label);
   container.append(createEasingPicker(event.easingType ?? 1, value => safely(() => applyEventTransform(session, '修改缓动', current => ({ ...current, easingType: value, bezier: 0 }))), galleryState).element);
   const curve = document.createElement('canvas'); curve.width = 260; curve.height = 100; curve.className = 'easing-preview'; curve.setAttribute('aria-label', '缓动曲线预览');
-  const context = curve.getContext('2d') as CanvasRenderingContext2D; context.strokeStyle = '#ffd76a'; context.lineWidth = 2; context.beginPath();
+  const context = editorSkinContext(curve.getContext('2d')!, 'easing'); context.strokeStyle = '#ffd76a'; context.lineWidth = 2; context.beginPath();
   for (let index = 0; index <= 100; index++) {
     const progress = index / 100;
     const value = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1);
@@ -164,7 +224,7 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     container.append(points);
     const dragCanvas = document.createElement('canvas'); dragCanvas.width = 260; dragCanvas.height = 100; dragCanvas.className = 'easing-preview bezier-editor';
     const draftPoints = [...bezierPoints]; let dragPoint: number | null = null; let dragChanged = false;
-    const drawBezier = () => { const draw = dragCanvas.getContext('2d') as CanvasRenderingContext2D; draw.clearRect(0, 0, 260, 100); draw.strokeStyle = '#65748a'; draw.setLineDash([3, 3]); draw.beginPath(); draw.moveTo(10, 80); draw.lineTo(10 + draftPoints[0] * 240, 80 - draftPoints[1] * 60); draw.moveTo(250, 20); draw.lineTo(10 + draftPoints[2] * 240, 80 - draftPoints[3] * 60); draw.stroke(); draw.setLineDash([]); draw.strokeStyle = '#ffd76a'; draw.lineWidth = 2; draw.beginPath(); for (let index = 0; index <= 100; index++) { const progress = index / 100; const value = bezier(progress, draftPoints); const x = 10 + progress * 240; const y = 80 - value * 60; index ? draw.lineTo(x, y) : draw.moveTo(x, y); } draw.stroke(); draw.fillStyle = '#fff2a8'; for (const point of [[draftPoints[0], draftPoints[1]], [draftPoints[2], draftPoints[3]]]) { draw.beginPath(); draw.arc(10 + point[0] * 240, 80 - point[1] * 60, 5, 0, Math.PI * 2); draw.fill(); } };
+    const drawBezier = () => { const draw = editorSkinContext(dragCanvas.getContext('2d')!, 'bezier'); draw.clearRect(0, 0, 260, 100); draw.strokeStyle = '#65748a'; draw.setLineDash([3, 3]); draw.beginPath(); draw.moveTo(10, 80); draw.lineTo(10 + draftPoints[0] * 240, 80 - draftPoints[1] * 60); draw.moveTo(250, 20); draw.lineTo(10 + draftPoints[2] * 240, 80 - draftPoints[3] * 60); draw.stroke(); draw.setLineDash([]); draw.strokeStyle = '#ffd76a'; draw.lineWidth = 2; draw.beginPath(); for (let index = 0; index <= 100; index++) { const progress = index / 100; const value = bezier(progress, draftPoints); const x = 10 + progress * 240; const y = 80 - value * 60; index ? draw.lineTo(x, y) : draw.moveTo(x, y); } draw.stroke(); draw.fillStyle = '#fff2a8'; for (const point of [[draftPoints[0], draftPoints[1]], [draftPoints[2], draftPoints[3]]]) { draw.beginPath(); draw.arc(10 + point[0] * 240, 80 - point[1] * 60, 5, 0, Math.PI * 2); draw.fill(); } };
     drawBezier();
     const commitBezier = () => { if (!dragChanged) return; const committed = [...draftPoints]; safely(() => applyEventTransform(session, '拖动 Bezier 控制点', current => ({ ...current, bezierPoints: committed }))); dragChanged = false; };
     const canvasPoint = (pointer: PointerEvent): { x: number; y: number } => {

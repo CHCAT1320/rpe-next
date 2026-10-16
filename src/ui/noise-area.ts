@@ -3,11 +3,16 @@ import type { NoiseArea, NoiseEvent, NoiseInterval, NoiseTarget } from '../core/
 import { samplingTarget, sampleEditingArea, noiseSampleHandle, applyNoiseSample, fitNoiseSampleView } from '../core/noise-sampling.ts';
 import { beatValue, fromNumber, parseBeat, formatBeat } from '../core/beat.ts';
 import { previewViewport, strokeIntersects } from '../core/editor-display.ts';
-import type { Point } from '../core/editor-display.ts';
+import type { EventChain, Point } from '../core/editor-display.ts';
 import { prepareCanvas } from './timeline.ts';
 import { createEasingPicker, EASING_NAMES } from './easing-picker.ts';
 import { NoiseAreaList } from './noise-list.ts';
-import type { Chart, Beat } from '../core/types.ts';
+import { NoiseLayerPanel } from './noise-layer-panel.mjs';
+import { noiseLayers, noiseLayerId } from '../core/noise-skin.mjs';
+import { drawEventCurve, drawEventCurveBatch } from './event-curve.mjs';
+import { eventDisplayIndex, selectedEventGroups } from './event-display-index.mjs';
+import type { Chart, Beat, NoiseLayer } from '../core/types.ts';
+import type { IntervalIndex } from '../core/interval-index.ts';
 
 /** A judge line's or noise area's entry in the noise timeline, as `drawEntry` builds it. */
 interface NoiseRect {
@@ -26,6 +31,37 @@ interface NoiseRect {
 
 /** A rect plus the handle the pointer is over, if any. */
 type NoiseHover = NoiseRect & { kind: 'start' | 'end' | 'move' };
+
+/** The offscreen bounds `selectionRects` yields; rectangle selection reads only these members. */
+interface SelectionRect {
+  x: number;
+  width: number;
+  index: number;
+  type: string | null;
+  start: number;
+  end: number;
+}
+
+/** One seamless chain's curve sample, batched so a whole chain strokes in a single pass. */
+interface CurveSample {
+  event: Record<string, unknown>;
+  range: EventChain;
+  startY: number;
+  endY: number;
+}
+
+/**
+ * What `event-display-index.mjs` returns for one track.
+ *
+ * The module is still plain JavaScript, so its own return type is inferred as `any`; declaring the
+ * shape the editor reads keeps every lookup below checked instead of silently unchecked.
+ */
+interface EventDisplay {
+  groups: EventChain[];
+  ranges: Map<number, EventChain>;
+  unmergeable: Set<EventChain>;
+  index: IntervalIndex<NoiseEvent>;
+}
 
 /**
  * `findLast` is an ES2023 addition while `tsconfig.json` pins `lib` to ES2022 (the runtime is ES2023,
@@ -52,6 +88,18 @@ export interface NoiseEditorContext {
     division: number;
     gridCount: number;
     judgementColor?: string;
+    /**
+     * The event-display tuning the timeline's own event editor reads.
+     *
+     * The noise editor now draws its tracks with the same chain merging and curve rendering, so it
+     * reads the same optional settings; each is compared against `false`/a fallback exactly as the
+     * timeline does, so an unset value keeps the previous behaviour.
+     */
+    seamlessEvents?: boolean;
+    drawEventCurves?: boolean;
+    eventCurveThreshold?: number;
+    eventValueThreshold?: number;
+    eventValueFontSize?: number;
   };
   preview: { visible: boolean; viewDivisor?: number; aspectRatio?: number };
   realtimePreview: { visible: boolean; viewDivisor?: number; aspectRatio?: number };
@@ -71,6 +119,10 @@ export interface NoiseEditorOptions {
   pause(): void;
   seek(beat: number): void;
   wheel(event: WheelEvent): void;
+  /** The document's asset store, which the layer panel reads to list and parse installed skins. */
+  getAssets(): Map<string, Uint8Array>;
+  /** Installs the files a skin import or a built-in skin unpacked. */
+  onAssets(entries: Map<string, Uint8Array>): void;
 }
 
 /** A clipboard entry: either a whole area or one event from a track. */
@@ -113,8 +165,17 @@ interface FieldOptions {
   kind?: 'number' | 'beat' | 'duration' | 'checkbox' | 'text';
   step?: number;
   sample?: NoiseTarget;
-  choices?: [number, string][];
+  /** A select's `[value, label]` pairs; the 噪域层 select carries string ids, the rest numbers. */
+  choices?: [number | string, string][];
   clear?: boolean;
+}
+
+/** The merged interval lists and ready-flash spans `drawDistribution` caches for one area. */
+interface NoiseDistribution {
+  tracks: [number, number][][];
+  flashes: [number, number][];
+  /** The tempo the spans were measured against; a different map invalidates the entry. */
+  tempo: NoiseEditorContext['tempo'];
 }
 
 /**
@@ -136,6 +197,9 @@ export class NoiseAreaEditor {
   pause!: () => void;
   seek!: (beat: number) => void;
   wheel!: (event: WheelEvent) => void;
+  /** The asset store, read by the layer panel; assigned from `options` like the hooks above. */
+  getAssets!: () => Map<string, Uint8Array>;
+  onAssets!: (entries: Map<string, Uint8Array>) => void;
   /** The properties pane, resolved once from the document. */
   properties: HTMLElement;
   active: boolean;
@@ -146,9 +210,8 @@ export class NoiseAreaEditor {
   /** The selected event within the selected area, if any. */
   event: { type: string; index: number } | null;
   cursor: (Point & { side: string; type: string; beat: number; rawBeat: number }) | null;
-  /** The rects the pointer can hit, and every rect drawn (used by rectangle selection). */
+  /** The rects the pointer can hit. */
   rects: NoiseRect[];
-  allRects: NoiseRect[];
   hover: NoiseHover | null;
   clipboard: { entries: NoiseClipboardEntry[]; start: number } | null;
   /** The first click of a two-click placement. */
@@ -158,8 +221,12 @@ export class NoiseAreaEditor {
   dragError: Error | null;
   easingState: { open: boolean };
   /** Merged interval lists per area, cached because merging runs on every repaint. */
-  distributions: WeakMap<NoiseArea, [number, number][][]>;
+  distributions: WeakMap<NoiseArea, NoiseDistribution>;
+  /** The layers whose preview this session hid or forced to simple rendering; editor-only state. */
+  hiddenLayers: Set<string>;
+  simpleLayers: Set<string>;
   areaList: NoiseAreaList;
+  layerPanel: NoiseLayerPanel;
   overlay: HTMLCanvasElement;
   sampleBar: HTMLDivElement;
   drag: { kind: string; start: NonNullable<NoiseAreaEditor['cursor']>; current?: NonNullable<NoiseAreaEditor['cursor']>; hit?: NoiseRect; base?: Chart; keys?: Set<string>; baseSelection?: Set<string>; points?: Point[]; moved: boolean } | null = null;
@@ -179,9 +246,10 @@ export class NoiseAreaEditor {
   constructor(host: HTMLElement, canvas: HTMLCanvasElement, getContext: () => NoiseEditorContext, options: NoiseEditorOptions) {
     Object.assign(this, options); this.host = host; this.canvas = canvas; this.getContext = getContext;
     this.properties = document.querySelector('#noise-properties') as HTMLElement; this.active = false; this.selected = -1; this.selection = new Set();
-    this.event = null; this.cursor = null; this.rects = []; this.allRects = []; this.hover = null; this.clipboard = null; this.pending = null; this.draftChart = null; this.dragError = null; this.easingState = { open: false };
-    this.distributions = new WeakMap();
+    this.event = null; this.cursor = null; this.rects = []; this.hover = null; this.clipboard = null; this.pending = null; this.draftChart = null; this.dragError = null; this.easingState = { open: false };
+    this.distributions = new WeakMap(); this.hiddenLayers = new Set(); this.simpleLayers = new Set();
     this.areaList = new NoiseAreaList(index => this.select(index));
+    this.layerPanel = new NoiseLayerPanel(this);
     this.overlay = document.createElement('canvas'); this.overlay.className = 'noise-sampler'; this.overlay.hidden = true; (canvas.closest('.stage') as HTMLElement).append(this.overlay);
     this.sampleBar = document.createElement('div'); this.sampleBar.className = 'noise-sample-bar'; this.sampleBar.hidden = true;
     this.sampleBar.append(hint('拖动绿色控制点 · 可连续取样，完成统一应用 · Esc 全部取消'), button('完成取样', '保留全部取样结果并返回时间轴', () => this.endSample(true)), button('取消', '放弃全部取样修改', () => this.endSample(false))); (canvas.closest('.stage') as HTMLElement).append(this.sampleBar);
@@ -203,7 +271,7 @@ export class NoiseAreaEditor {
   area(): NoiseArea | undefined { return this.areas()[this.selected]; }
   open(): void { this.active = true; this.context.timeline.origin = this.context.tempo.beat(this.context.seconds()); this.syncChrome(); this.activate('noise'); this.render(); this.invalidate(); }
   close(): void { this.flush(); this.cancelGesture(); this.endSample(false); this.active = false; this.context.timeline.origin = this.context.tempo.beat(this.context.seconds(), this.context.session.line?.bpmfactor ?? 1); this.syncChrome(); this.activate('chart'); this.invalidate(); }
-  reset(): void { this.cancelGesture(); this.endSample(false); this.active = false; this.selected = -1; this.selection.clear(); this.event = null; this.pending = null; this.areaList.reset(); this.syncChrome(); }
+  reset(): void { this.cancelGesture(); this.endSample(false); this.active = false; this.selected = -1; this.selection.clear(); this.event = null; this.pending = null; this.hiddenLayers.clear(); this.simpleLayers.clear(); this.areaList.reset(); this.syncChrome(); }
   syncChrome(): void {
     (document.querySelector('.editor') as HTMLElement).classList.toggle('noise-mode', this.active);
     this.canvas.hidden = !this.active || this.context.previewVisible || Boolean(this.sampleMode);
@@ -265,7 +333,7 @@ export class NoiseAreaEditor {
     this.activate('noise-properties'); this.render(); this.invalidate();
   }
   add(start: number, end: number, horizontal: number): void {
-    const areas = [...this.areas(), { ...createNoiseArea(start, end), editorPositionX: this.editorX(horizontal) }]; const index = areas.length - 1;
+    const areas = [...this.areas(), { ...createNoiseArea(start, end), layerId: noiseLayers(this.chart)[0].id, editorPositionX: this.editorX(horizontal) }]; const index = areas.length - 1;
     if (this.commitAreas('添加噪域', areas)) this.select(index);
   }
   addEvent(type: string, start: number, end: number, hooked = false): void {
@@ -302,7 +370,13 @@ export class NoiseAreaEditor {
     const firstArea = clipboard.entries.find(entry => entry.type === 'area');
     const deltaX = firstArea && this.cursor?.side === 'areas' ? this.editorX(this.cursor.x) - ((firstArea.value as NoiseArea).editorPositionX ?? 0) : 0;
     for (const entry of clipboard.entries) {
-      if (entry.type === 'area') { const value = entry.value as NoiseArea; areas.push({ ...shiftNoiseArea(value, delta), editorPositionX: Math.max(-675, Math.min(675, (value.editorPositionX ?? 0) + deltaX)) }); }
+      if (entry.type === 'area') {
+        const value = entry.value as NoiseArea;
+        // A paste into a chart whose layers changed keeps the source layer when it still exists and
+        // otherwise falls back to the first layer, so the pasted area never names a missing layer.
+        const sourceLayer = noiseLayerId(value); const layers = noiseLayers(this.chart);
+        areas.push({ ...shiftNoiseArea(value, delta), layerId: layers.some((layer: NoiseLayer) => layer.id === sourceLayer) ? sourceLayer : layers[0].id, editorPositionX: Math.max(-675, Math.min(675, (value.editorPositionX ?? 0) + deltaX)) });
+      }
       else {
         if (!areas[this.selected]) throw new Error('请先选择接收事件的噪域');
         const area = areas[this.selected]; const source = entry.value as NoiseEvent; const value = { ...structuredClone(source), startTime: fromNumber(beatValue(source.startTime) + delta), endTime: fromNumber(beatValue(source.endTime) + delta) };
@@ -440,7 +514,9 @@ export class NoiseAreaEditor {
       const left = Math.min(drag.start.x, current.x); const right = Math.max(drag.start.x, current.x);
       const start = Math.min(drag.start.rawBeat, current.rawBeat); const end = Math.max(drag.start.rawBeat, current.rawBeat);
       this.selection = new Set([...(drag.baseSelection as Set<string>)].filter(key => key.startsWith('area:') === (drag.start.side === 'areas')));
-      for (const rect of this.allRects) if ((Boolean(rect.type) === (drag.start.side === 'events')) && rect.x <= right && rect.x + rect.width >= left && rect.start <= end && rect.end >= start) this.selection.add(rect.type ? rect.type + ':' + rect.index : 'area:' + rect.index);
+      // The bounds are rebuilt here rather than read from the rects `drawTimeline` collected, so a
+      // marquee still sees every entry, including the ones scrolled out of view.
+      for (const rect of this.selectionRects(drag.start.side)) if (rect.x <= right && rect.x + rect.width >= left && rect.start <= end && rect.end >= start) this.selection.add(rect.type ? rect.type + ':' + rect.index : 'area:' + rect.index);
       }
       const first = [...this.selection][0]?.split(':');
       if (first) { if (first[0] === 'area') { this.selected = Number(first[1]); this.event = null; } else this.event = { type: first[0], index: Number(first[1]) }; this.activate('noise-properties'); }
@@ -462,11 +538,13 @@ export class NoiseAreaEditor {
     if (!this.listTitle) {
       this.host.replaceChildren();
       this.listTitle = document.createElement('div'); this.listTitle.className = 'panel-title'; this.host.append(this.listTitle);
+      this.host.append(this.layerPanel.element);
       const actions = document.createElement('div'); actions.className = 'noise-actions';
       actions.append(button('关闭编辑', '返回音符与事件编辑区', () => this.close())); this.host.append(actions);
       this.host.append(hint('Q / R 两次定位放置。拖动首尾调整时间，拖动身体整体移动；左侧窄条可自由横向排布。Shift / 中键框选，空白处按住左键划线多选；Ctrl+C/X/V 复制、剪切、粘贴。'));
       this.host.append(this.areaList.element);
     }
+    this.layerPanel.render();
     const listTitle = '噪域 · ' + this.areas().length;
     if (this.listTitle.textContent !== listTitle) this.listTitle.textContent = listTitle;
     this.areaList.update(this.areas(), this.selected);
@@ -515,6 +593,10 @@ export class NoiseAreaEditor {
     host.append(button('← 噪域列表', '返回噪域管理', () => this.activate('noise')));
     const area = this.area(); if (!area) { host.append(hint('请在左侧选择噪域。')); return; }
     const title = document.createElement('h3'); title.textContent = this.event ? NOISE_TRACKS.find(track => track[0] === this.event!.type)![1] + ' · 噪域 ' + this.selected : '噪域 ' + this.selected; host.append(title);
+    // `noiseLayerId` supplies the default layer's id when the area predates layers, and the choices
+    // are the current chart's layers, so the select always shows a value it can also write back.
+    // `noise-skin.mjs` is still plain JavaScript, so the callback's parameter is annotated here.
+    this.field(host, '所属噪域层', noiseLayerId(area), (item, value) => ({ ...item, layerId: value as unknown as string }), { kind: 'text', choices: noiseLayers(this.chart).map((layer: NoiseLayer) => [layer.id, layer.name] as [string, string]) });
     const target = this.event;
     const modifyEvent = (change: (event: Record<string, unknown>) => void) => (item: NoiseArea): NoiseArea => { const event = (item[target!.type] as unknown as Record<string, unknown>[])[target!.index]; change(event); return item; };
     if (target) {
@@ -638,36 +720,71 @@ export class NoiseAreaEditor {
     context.lineWidth = 1;
     for (let index = 0; index <= timeline.gridCount; index++) { const horizontal = 12 + index * (layout.split - 24) / timeline.gridCount; context.strokeStyle = '#71767c35'; context.beginPath(); context.moveTo(horizontal, HEADER_HEIGHT); context.lineTo(horizontal, height); context.stroke(); }
     for (let index = 0; index <= 6; index++) { const horizontal = layout.eventLeft + index * layout.eventWidth; context.strokeStyle = '#7f838755'; context.beginPath(); context.moveTo(horizontal, HEADER_HEIGHT); context.lineTo(horizontal, height); context.stroke(); }
-    this.rects = []; this.allRects = [];
-    const drawEntry = (entry: Record<string, unknown>, index: number, type: string | null, x: number, entryWidth: number, ghost = false): void => {
+    this.rects = [];
+    // `seamless`, `range` and `curveBatches` are only ever supplied together by `drawTrack`, which
+    // has already resolved the chain an entry belongs to; the defaults keep the area-bar call simple.
+    const drawEntry = (entry: Record<string, unknown>, index: number, type: string | null, x: number, entryWidth: number, ghost = false, seamless = false, range: EventChain | null = null, clipped = false, curveBatches: Map<EventChain, CurveSample[]> | null = null): void => {
       const start = beatValue(entry[type ? 'startTime' : 'appearTime'] as Beat); const end = beatValue(entry[type ? 'endTime' : 'disappearTime'] as Beat);
       const head = this.y(start); const tail = this.y(end); const top = Math.min(head, tail); const bottom = Math.max(head, tail); const entryHeight = Math.max(5, bottom - top);
       const rect: NoiseRect = { x, y: top, width: entryWidth, height: entryHeight, index, type, head, tail, start, end };
-      if (!ghost) this.allRects.push(rect);
       if (bottom < HEADER_HEIGHT || top > height || x + entryWidth < (type ? layout.eventLeft : 0) || x > (type ? width : layout.split)) return;
       if (!ghost) this.rects.push(rect);
-      const selected = this.selection.has(type ? type + ':' + index : 'area:' + index); const color = selected ? '#6de9a4' : type ? colors[NOISE_TRACKS.findIndex(track => track[0] === type)] : '#c97c7c';
+      const selected = this.selection.has(type ? type + ':' + index : 'area:' + index);
+      // An inverted area is drawn violet rather than red so the covered region reads at a glance.
+      const color = type ? selected ? '#6de9a4' : colors[NOISE_TRACKS.findIndex(track => track[0] === type)] : entry.isInvert ? selected ? '#d7b2ff' : '#aa8cdb' : selected ? '#6de9a4' : '#c97c7c';
       const hovered = !ghost && this.hover?.index === index && this.hover?.type === type;
-      context.save(); context.beginPath(); context.rect(type ? layout.eventLeft : 0, HEADER_HEIGHT, type ? width - layout.eventLeft : layout.split, height - HEADER_HEIGHT); context.clip();
-      context.globalAlpha = ghost ? 0.4 : 1; context.fillStyle = color + (hovered && this.hover!.kind === 'move' ? '75' : '40'); context.fillRect(x, top, entryWidth, entryHeight); context.strokeStyle = hovered ? '#fff1d2' : color; context.lineWidth = selected || hovered ? 2 : 1; if (ghost) context.setLineDash([4, 3]); context.strokeRect(x, top, entryWidth, entryHeight);
+      // A merged chain is drawn once as a whole by `drawEventChain`; its curves are collected here
+      // and stroked in one batch after the loop, and a hovered entry opts back out so its own
+      // handles and outline stay visible.
+      if (seamless && !hovered && type !== 'activeIntervals') {
+        if (curveBatches && range && timeline.drawEventCurves !== false && layout.eventWidth >= (timeline.eventCurveThreshold ?? 24)) {
+          if (!curveBatches.has(range)) curveBatches.set(range, []);
+          curveBatches.get(range)!.push({ event: entry, range, startY: head, endY: tail });
+        }
+        return;
+      }
+      if (!clipped) { context.save(); context.beginPath(); context.rect(type ? layout.eventLeft : 0, HEADER_HEIGHT, type ? width - layout.eventLeft : layout.split, height - HEADER_HEIGHT); context.clip(); }
+      context.globalAlpha = ghost ? 0.4 : 1; context.fillStyle = color + (hovered && this.hover!.kind === 'move' ? '75' : '40'); context.strokeStyle = hovered ? '#fff1d2' : color; context.lineWidth = selected || hovered ? 2 : 1; if (ghost) context.setLineDash([4, 3]);
+      if (!seamless || hovered) { context.fillRect(x, top, entryWidth, entryHeight); context.strokeRect(x, top, entryWidth, entryHeight); }
       if (!type && !ghost) this.drawDistribution(context, entry as unknown as NoiseArea, x, entryWidth, top, bottom);
-      context.fillStyle = color; context.fillRect(x, head - 2, entryWidth, 4); context.fillRect(x, tail - 2, entryWidth, 4);
+      context.fillStyle = color; if (!seamless || hovered) { context.fillRect(x, head - 2, entryWidth, 4); context.fillRect(x, tail - 2, entryWidth, 4); }
       if (hovered && this.hover!.kind !== 'move') { context.fillStyle = '#fff1d2'; context.fillRect(x - 2, (this.hover!.kind === 'start' ? head : tail) - 4, entryWidth + 4, 8); }
       context.font = '12px sans-serif'; context.textAlign = 'center';
       if (!type) context.fillText(((entry.Name as string) || '噪域 ' + index) + (entry.isInvert ? ' ⊕' : ''), x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, Math.min(height - 12, top + 18)), Math.max(1, entryWidth - 4));
       else if (type === 'activeIntervals') context.fillText(readyFlashValue(entry.readyFlash) > 0 ? `预闪 ${durationText(readyFlashValue(entry.readyFlash))}s` : '无预闪', x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, top + 18), Math.max(1, entryWidth - 4));
-      else {
-        context.fillText(String(round(entry.end as number)), x + entryWidth / 2, tail + 14, entryWidth); context.fillText(String(round(entry.start as number)), x + entryWidth / 2, head - 5, entryWidth);
-        if (entryHeight > 30) {
-          const track = noiseRuntime(this.area() as NoiseArea, this.context.tempo).tracks[type]; const startSeconds = this.context.tempo.seconds(entry.startTime as Beat); const endSeconds = this.context.tempo.seconds(entry.endTime as Beat);
-          context.beginPath();
-          for (let step = 0; step <= 24; step++) { const progress = step / 24; const value = track.sample({ event: entry as unknown as NoiseEvent, start: startSeconds, end: endSeconds }, startSeconds + (endSeconds - startSeconds) * progress); const fraction = entry.start === entry.end ? 0.5 : ((value as number) - (entry.start as number)) / ((entry.end as number) - (entry.start as number)); const horizontal = x + entryWidth * (0.12 + Math.max(0, Math.min(1, fraction)) * 0.76); const vertical = head + (tail - head) * progress; if (step) context.lineTo(horizontal, vertical); else context.moveTo(horizontal, vertical); } context.stroke();
-        }
+      else if (timeline.drawEventCurves !== false && layout.eventWidth >= (timeline.eventCurveThreshold ?? 24)) {
+        drawEventCurve(context, entry, range, { x, y: Math.max(HEADER_HEIGHT, top), width: entryWidth, height: Math.max(2, Math.min(height, bottom) - Math.max(HEADER_HEIGHT, top)) }, head, tail);
+      }
+      if (!clipped) context.restore();
+    };
+    const drawTrack = (events: NoiseEvent[], type: string, ghost = false): void => {
+      const bounds = this.eventBounds(type); const seamlessGroups = new Set<EventChain>();
+      const curveBatches = new Map<EventChain, CurveSample[]>();
+      const display = eventDisplayIndex(this, events, this.chart) as EventDisplay; const { ranges } = display;
+      const entries = display.index.query(this.beatAt(height, false), this.beatAt(HEADER_HEIGHT, false)).sort((first, second) => first.index - second.index);
+      // A chain only exists for an index the index answered, so the lookups below cannot miss.
+      const groups = new Set(entries.map(entry => ranges.get(entry.index)).filter((group): group is EventChain => group !== undefined));
+      const selectedGroups = ghost ? new Set<EventChain>() : selectedEventGroups(this.selection, type, ranges) as Set<EventChain>;
+      for (const group of groups) {
+        if (timeline.seamlessEvents === false) continue;
+        if (group.entries.length < 2 || selectedGroups.has(group) || display.unmergeable.has(group)) continue;
+        this.drawEventChain(context, group, type, bounds, height, ghost);
+        seamlessGroups.add(group);
+      }
+      context.save(); context.beginPath(); context.rect(layout.eventLeft, HEADER_HEIGHT, width - layout.eventLeft, height - HEADER_HEIGHT); context.clip();
+      for (const { item, index } of entries) { const range = ranges.get(index); drawEntry(item, ghost ? -1 : index, type, bounds.x, bounds.width, ghost, range !== undefined && seamlessGroups.has(range), range ?? null, true, curveBatches); }
+      context.globalAlpha = ghost ? 0.4 : 1; context.strokeStyle = colors[NOISE_TRACKS.findIndex(track => track[0] === type)]; if (ghost) context.setLineDash([4, 3]);
+      for (const [group, curves] of curveBatches) {
+        // A batched chain always spans at least two entries, so both ends exist.
+        const top = Math.max(HEADER_HEIGHT, this.y(beatValue(group.entries.at(-1)!.event.endTime)));
+        const bottom = Math.min(height, this.y(beatValue(group.entries[0]!.event.startTime)));
+        drawEventCurveBatch(context, curves, { x: bounds.x, y: top, width: bounds.width, height: Math.max(2, bottom - top) });
       }
       context.restore();
+      if (type !== 'activeIntervals') this.drawEventValues(context, events, type, bounds, height, ghost, groups);
     };
     this.areas().forEach((area, index) => drawEntry(area as unknown as Record<string, unknown>, index, null, this.areaX(area, index) - AREA_BAR_WIDTH / 2, AREA_BAR_WIDTH));
-    for (const [type] of NOISE_TRACKS) { const bounds = this.eventBounds(type); ((this.area()?.[type] as NoiseEvent[] | undefined) ?? []).forEach((entry, index) => drawEntry(entry as unknown as Record<string, unknown>, index, type, bounds.x, bounds.width)); }
+    for (const [type] of NOISE_TRACKS) drawTrack((this.area()?.[type] as NoiseEvent[] | undefined) ?? [], type);
     if (this.pending && this.cursor) {
       const start = this.pending; const current = this.cursor; const bounds = this.eventBounds(start.type); context.fillStyle = '#78d99b44'; const top = this.y(Math.max(start.beat, current.beat)); const bottom = this.y(Math.min(start.beat, current.beat)); context.fillRect(start.side === 'areas' ? this.areaX({ editorPositionX: this.editorX(start.x) } as NoiseArea, 0) - AREA_BAR_WIDTH / 2 : bounds.x, top, start.side === 'areas' ? AREA_BAR_WIDTH : bounds.width, Math.max(4, bottom - top));
     }
@@ -675,17 +792,70 @@ export class NoiseAreaEditor {
       const delta = this.cursor.beat - this.clipboard.start;
       const ghosts = this.clipboard.entries.some(entry => entry.type === 'area') ? this.pastedAreas(this.cursor.beat).slice(this.areas().length) : [];
       for (const area of ghosts) drawEntry(area as unknown as Record<string, unknown>, -1, null, this.areaX(area, 0) - AREA_BAR_WIDTH / 2, AREA_BAR_WIDTH, true);
-      for (const entry of this.clipboard.entries) if (entry.type !== 'area' && this.area()) { const source = entry.value as NoiseEvent; const value = { ...source, startTime: fromNumber(beatValue(source.startTime) + delta), endTime: fromNumber(beatValue(source.endTime) + delta) }; const bounds = this.eventBounds(entry.type); drawEntry(value as unknown as Record<string, unknown>, -1, entry.type, bounds.x, bounds.width, true); }
+      // Every event ghost goes through the same track drawing, so a previewed paste merges exactly
+      // like the events it will become.
+      const eventGhosts = new Map<string, NoiseEvent[]>();
+      for (const entry of this.clipboard.entries) if (entry.type !== 'area' && this.area()) {
+        const source = entry.value as NoiseEvent; const value = { ...source, startTime: fromNumber(beatValue(source.startTime) + delta), endTime: fromNumber(beatValue(source.endTime) + delta) };
+        if (!eventGhosts.has(entry.type)) eventGhosts.set(entry.type, []); eventGhosts.get(entry.type)!.push(value);
+      }
+      for (const [type, events] of eventGhosts) drawTrack(events, type, true);
     }
     if (this.drag?.kind === 'rectangle') { const start = this.drag.start; const current = this.cursor as NonNullable<NoiseAreaEditor['cursor']>; context.save(); context.lineWidth = 1; context.fillStyle = '#ffcc4430'; context.strokeStyle = '#ffdd77'; const top = this.y(start.rawBeat); const deltaY = this.y(current.rawBeat) - top; context.fillRect(start.x, top, current.x - start.x, deltaY); context.strokeRect(start.x, top, current.x - start.x, deltaY); context.restore(); }
     if (this.drag?.kind === 'stroke' && this.drag.moved) { context.save(); context.lineWidth = 1; context.strokeStyle = '#80ffff'; context.beginPath(); (this.drag.points as Point[]).forEach((point, index) => index ? context.lineTo(point.x, this.y((point as Point & { rawBeat: number }).rawBeat)) : context.moveTo(point.x, this.y((point as Point & { rawBeat: number }).rawBeat))); context.stroke(); context.restore(); }
     this.drawOwner(context, layout);
-    context.fillStyle = '#303030'; context.fillRect(0, 0, width, HEADER_HEIGHT); context.fillStyle = '#f5f5f5'; context.font = '12px RPE, sans-serif'; context.textAlign = 'left'; context.fillText('噪域数量: ' + this.areas().length, 12, 19);
+    context.fillStyle = '#303030'; context.fillRect(0, 0, width, HEADER_HEIGHT); context.fillStyle = '#f5f5f5'; context.font = '12px RPE, sans-serif'; context.textAlign = 'left'; context.fillText('噪域数量: ' + this.areas().length, 12, 19, layout.split - 16);
     const owner = this.area() ? `#${this.selected} ${this.area()!.Name || '未命名噪域'}` : '未指定噪域';
     this.canvas.setAttribute('aria-description', `噪域数量: ${this.areas().length}；当前右侧内部事件：${owner}`);
     context.fillText(owner, layout.eventLeft + 4, 19, width - layout.eventLeft - 8);
     context.textAlign = 'center'; for (const [column, [, label]] of NOISE_TRACKS.entries()) context.fillText(label, layout.eventLeft + (column + 0.5) * layout.eventWidth, 43, Math.max(1, layout.eventWidth - 3));
     context.strokeStyle = timeline.judgementColor ?? '#ffffff'; context.lineWidth = 2; context.beginPath(); context.moveTo(0, this.y(timeline.origin)); context.lineTo(width, this.y(timeline.origin)); context.stroke();
+  }
+  eventGroups(events: NoiseEvent[]): EventChain[] {
+    return (eventDisplayIndex(this, events, this.draftChart ?? this.context.session?.chart) as EventDisplay).groups;
+  }
+  /**
+   * The offscreen bounds rectangle selection tests, one per selectable entry.
+   *
+   * Built on demand rather than collected while drawing, so a marquee sees entries that are scrolled
+   * out of view and nothing is paid for on the frames that draw no marquee.
+   */
+  *selectionRects(side: string): Generator<SelectionRect> {
+    // Build offscreen selection bounds only on mouseup, not on every animation frame.
+    if (side === 'areas') {
+      for (const [index, area] of this.areas().entries()) yield { x: this.areaX(area, index) - AREA_BAR_WIDTH / 2, width: AREA_BAR_WIDTH, index, type: null, start: beatValue(area.appearTime), end: beatValue(area.disappearTime) };
+    } else for (const [type] of NOISE_TRACKS) {
+      const bounds = this.eventBounds(type);
+      for (const [index, event] of ((this.area()?.[type] as NoiseEvent[] | undefined) ?? []).entries()) yield { ...bounds, index, type, start: beatValue(event.startTime), end: beatValue(event.endTime) };
+    }
+  }
+  drawEventChain(context: CanvasRenderingContext2D, group: EventChain, type: string, bounds: { x: number; width: number }, height: number, ghost = false): void {
+    // The chain's length was checked before it was drawn, so both ends exist.
+    const head = this.y(beatValue(group.entries[0]!.event.startTime)); const tail = this.y(beatValue(group.entries.at(-1)!.event.endTime));
+    const top = Math.max(HEADER_HEIGHT, tail); const bottom = Math.min(height, head);
+    if (bottom <= top) return;
+    const layout = this.layout(); const color = colors[NOISE_TRACKS.findIndex(track => track[0] === type)];
+    context.save(); context.beginPath(); context.rect(layout.eventLeft, HEADER_HEIGHT, layout.width - layout.eventLeft, height - HEADER_HEIGHT); context.clip();
+    context.globalAlpha = ghost ? 0.4 : 1; context.fillStyle = color + '40'; context.fillRect(bounds.x, top, bounds.width, bottom - top);
+    context.strokeStyle = color; context.lineWidth = 1; if (ghost) context.setLineDash([4, 3]); context.strokeRect(bounds.x, tail, bounds.width, head - tail);
+    context.fillStyle = color; context.fillRect(bounds.x, head - 2, bounds.width, 4); context.fillRect(bounds.x, tail - 2, bounds.width, 4); context.restore();
+  }
+  drawEventValues(context: CanvasRenderingContext2D, events: NoiseEvent[], type: string, bounds: { x: number; width: number }, height: number, ghost = false, visibleGroups: Set<EventChain> | null = null): void {
+    if (!events.length || bounds.width < (this.context.timeline.eventValueThreshold ?? 30)) return;
+    const groups = visibleGroups ?? this.eventGroups(events);
+    const layout = this.layout();
+    context.save(); context.beginPath(); context.rect(layout.eventLeft, HEADER_HEIGHT, layout.width - layout.eventLeft, height - HEADER_HEIGHT); context.clip();
+    context.globalAlpha = ghost ? 0.4 : 1; context.font = `${this.context.timeline.eventValueFontSize ?? 13}px RPE, sans-serif`; context.textAlign = 'center';
+    for (const group of groups) {
+      // A chain always spans at least two entries, so the first and last are present.
+      const first = group.entries[0]!.event; const last = group.entries.at(-1)!.event;
+      const top = this.y(beatValue(last.endTime)); const bottom = this.y(beatValue(first.startTime));
+      if (bottom < HEADER_HEIGHT || top > height) continue;
+      context.fillStyle = colors[NOISE_TRACKS.findIndex(track => track[0] === type)];
+      context.fillText(String(round(group.max)), bounds.x + bounds.width / 2, Math.max(HEADER_HEIGHT + 14, top + 14), bounds.width);
+      if (bottom - top > 26) context.fillText(String(round(group.min)), bounds.x + bounds.width / 2, Math.min(height - 5, bottom - 5), bounds.width);
+    }
+    context.restore();
   }
   drawOwner(context: CanvasRenderingContext2D, layout: { width: number; height: number; split: number; eventLeft: number; eventWidth: number }): void {
     const area = this.area(); if (!area) return;
@@ -699,19 +869,38 @@ export class NoiseAreaEditor {
     context.fillStyle = '#242628ed'; context.fillRect(left - 3, vertical - 14, textWidth, 19); context.fillStyle = '#f5f5f5'; context.fillText(label, left, vertical, textWidth - 6); context.restore();
   }
   drawDistribution(context: CanvasRenderingContext2D, area: NoiseArea, left: number, width: number, top: number, bottom: number): void {
+    const { tempo } = this.context;
     let distribution = this.distributions.get(area);
-    if (!distribution) {
-      distribution = NOISE_TRACKS.map(([type]) => {
+    // The flash spans are measured in seconds, so a different tempo map invalidates the entry even
+    // though the area itself did not change.
+    if (!distribution || distribution.tempo !== tempo) {
+      const tracks: [number, number][][] = NOISE_TRACKS.map(([type]) => {
         const intervals = (((area[type] as NoiseEvent[] | undefined) ?? []).map(event => [beatValue(event.startTime), beatValue(event.endTime)]) as [number, number][]).sort((first, second) => first[0] - second[0]);
         const merged: [number, number][] = [];
         for (const interval of intervals) { const previous = merged.at(-1); if (previous && interval[0] <= previous[1]) previous[1] = Math.max(previous[1], interval[1]); else merged.push(interval); }
         return merged;
       });
-      this.distributions.set(area, distribution);
+      // A ready flash runs up to `readyFlash` seconds before its window opens, clipped to the area's
+      // own lifetime and to the end of the preceding window so two flashes never overlap.
+      const appear = tempo.seconds(area.appearTime); const disappear = tempo.seconds(area.disappearTime);
+      const windows = (area.activeIntervals ?? []).map(interval => ({ start: Math.max(appear, tempo.seconds(interval.startTime)), end: Math.min(disappear, tempo.seconds(interval.endTime)), readyFlash: readyFlashValue(interval.readyFlash) })).filter(interval => interval.end > interval.start).sort((first, second) => first.start - second.start);
+      const flashes: [number, number][] = windows.flatMap((interval, index) => {
+        const start = Math.max(appear, windows[index - 1]?.end ?? -Infinity, interval.start - interval.readyFlash);
+        return interval.readyFlash > 0 && start < interval.start ? [[tempo.beat(start), tempo.beat(interval.start)]] : [];
+      });
+      distribution = { tracks, flashes, tempo }; this.distributions.set(area, distribution);
     }
     context.save(); context.beginPath(); context.rect(left + 2, top + 2, width - 4, Math.max(0, bottom - top - 4)); context.clip(); context.globalAlpha *= 0.55;
     const spacing = (width - 12) / NOISE_TRACKS.length;
-    for (const [column, intervals] of distribution.entries()) {
+    // The flash marker is a dashed line down the first track's column.
+    const flashX = left + 6 + (spacing - 2) / 2;
+    context.strokeStyle = colors[0]; context.lineWidth = Math.max(1, Math.min(2, spacing / 3)); context.setLineDash([3, 3]); context.beginPath();
+    for (const [start, end] of distribution.flashes) {
+      const upper = Math.max(HEADER_HEIGHT, top, this.y(end)); const lower = Math.min(this.layout().height, bottom, this.y(start));
+      if (lower > upper) { context.moveTo(flashX, upper); context.lineTo(flashX, lower); }
+    }
+    context.stroke(); context.setLineDash([]);
+    for (const [column, intervals] of distribution.tracks.entries()) {
       context.fillStyle = colors[column];
       for (const [start, end] of intervals) {
         const upper = Math.max(HEADER_HEIGHT, top, this.y(end)); const lower = Math.min(this.layout().height, bottom, this.y(start));

@@ -64,7 +64,8 @@ else {
           return new Response(request.method === 'HEAD' ? null : body, { status: 200, headers });
         }
         const response = await net.fetch(pathToFileURL(path).href);
-        headers.set('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
+        const headers = new Headers(response.headers);
+        headers.set('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; font-src 'self' blob:; media-src 'self' blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
         headers.set('X-Content-Type-Options', 'nosniff');
         if (/\.m?js$/.test(path)) headers.set('Content-Type', 'text/javascript; charset=utf-8');
         else if (path.endsWith('.css')) headers.set('Content-Type', 'text/css; charset=utf-8');

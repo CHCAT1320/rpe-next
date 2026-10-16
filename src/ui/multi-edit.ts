@@ -6,6 +6,7 @@ import { createEasingPicker, EASING_NAMES } from './easing-picker.ts';
 import { NOTE_COLORS } from './timeline.ts';
 import { MultiEditParameters } from '../application/multi-edit-parameters.ts';
 import { runEventTool } from './event-tools.ts';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 import type { EditorSession } from '../application/session.ts';
 import type { SelectionEditResult } from '../application/batch-edit.ts';
 import type { BatchKind, BatchParameters, BatchChannelParameters } from '../application/multi-edit-parameters.ts';
@@ -408,8 +409,8 @@ export class MultiEditPanel {
     if (!canvas.clientWidth || this.kind === 'events' && timeline.notesOnly) return;
     // `getContext('2d')` only returns null for a context type the canvas cannot provide, and the
     // editor's own timeline canvases are always created as 2D; the original dereferenced it
-    // unguarded here.
-    const context = canvas.getContext('2d')!; context.save(); context.setLineDash([5, 3]); context.lineWidth = 2;
+    // unguarded here. The skin wrapper recolours the ghost preview like the timeline beneath it.
+    const context = editorSkinContext(canvas.getContext('2d')!, 'batch-preview'); context.save(); context.setLineDash([5, 3]); context.lineWidth = 2;
     context.beginPath(); context.rect(0, this.kind === 'events' ? 23 : 0, canvas.clientWidth, canvas.clientHeight); context.clip();
     // Keyed `<lineIndex>:<type>`; each value is the numeric span the ghost curves are drawn
     // against, grown from the change's own start/end values and the line's chain range.

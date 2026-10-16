@@ -37,7 +37,7 @@ export interface PlaybackSounds {
  * The wheel-scroll settings the animation loop passes in: the migrated settings spread, optionally
  * overridden with the stored editor's scroll speed.
  */
-export type PlaybackWheelSettings = Pick<MigratedSettings, 'scrollSpeed' | 'scrollAcceleration'>;
+export type PlaybackWheelSettings = Pick<MigratedSettings, 'scrollSpeed' | 'scrollAcceleration' | 'wheelStopAtAudioStart'>;
 
 /** The wheel event slice read by the transport: the deltas plus the ALt-key burst multiplier. */
 export interface PlaybackWheelEvent {
@@ -98,6 +98,7 @@ export class EditorPlayback {
     if (now - this.lastWheel > 0.2) this.burstStart = now;
     this.lastWheel = now;
     const delta = wheelSeconds(event.deltaY, this.audio.duration, settings.scrollSpeed, this.audio.rate, settings.scrollAcceleration, now - this.burstStart, event.altKey);
-    this.seek(this.audio.time + delta);
+    const target = this.audio.time + delta;
+    this.seek(settings.wheelStopAtAudioStart === false ? target : Math.max(0, target));
   }
 }

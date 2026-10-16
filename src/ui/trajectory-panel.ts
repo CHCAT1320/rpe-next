@@ -5,6 +5,7 @@ import { SceneRuntime } from '../core/scene.ts';
 import { previewViewport } from '../core/editor-display.ts';
 import { download } from '../platform/files.ts';
 import { prepareCanvas } from './timeline.ts';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 import { trajectorySplitSettings } from '../core/trajectory-simplify.ts';
 import { parseCurvePreset, saveCurvePreset, deleteCurvePreset, copyCurvePreset } from '../core/trajectory-presets.ts';
 import type { Beat, Chart, ChartEvent, CurveTrajectoryOptions, TrajectorySplit } from '../core/types.ts';
@@ -132,7 +133,7 @@ function readFields(host: HTMLElement, base: object): FieldValues {
 function drawPath(canvas: HTMLCanvasElement, points: CurvePoint[] | null, progress = 0): void {
   // `getContext('2d')` answers null only for a context kind the canvas cannot provide, and every
   // canvas here is one this panel created as a 2D canvas; the original dereferenced it unguarded.
-  const context = canvas.getContext('2d')!; const width = canvas.width; const height = canvas.height;
+  const context = editorSkinContext(canvas.getContext('2d')!); const width = canvas.width; const height = canvas.height;
   context.clearRect(0, 0, width, height); context.fillStyle = '#242424'; context.fillRect(0, 0, width, height);
   if (!points?.length) return;
   const xs = points.map(point => point.x); const ys = points.map(point => point.y);

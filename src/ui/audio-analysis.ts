@@ -1,3 +1,5 @@
+import { editorSkinContext } from './editor-skin-canvas.mjs';
+
 /**
  * The slice of the timeline the analysis overlay reads.
  *
@@ -205,7 +207,7 @@ export class AudioAnalysis {
     if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) { canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio); }
     // `getContext('2d')` only returns null for a context type the canvas cannot provide, and this
     // overlay is always created as 2D; the original dereferenced it unguarded here.
-    const context = canvas.getContext('2d')!; context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
+    const context = editorSkinContext(canvas.getContext('2d')!); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
     const left = notesRect.left - stageRect.left; const right = notesRect.right - stageRect.left;
     const center = (left + right) / 2; const half = Math.max(8, (right - left) * clamp(this.width) / 2);
     const timelineHeight = Math.min(height, notesRect.height); const source = this.data;

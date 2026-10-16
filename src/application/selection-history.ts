@@ -99,6 +99,10 @@ function sessionHost(state: SelectionState, chart: Chart, lineIndex: number): Ev
     multiLineActive: false,
     multiLineMode: state.multiLineMode ?? 'notes',
     multiEventSelection: new Map(),
+    // `targetLineIndices` is a getter on `EditorSession`, so a snapshot has to supply it directly;
+    // this stand-in covers a single line, which is what `eventList` reads.
+    targetLineIndices: [lineIndex],
+    multiSelectionIntent: null,
     selection: new Set(state.selection ?? []),
     focus: state.focus ?? 'notes',
     eventClipboard: [],
@@ -172,8 +176,10 @@ export function restoreSelection(session: EditorSession, state: SelectionState):
     const [type, index] = String(key).split(':'); const line = session.chart.judgeLineList?.[lineIndex];
     // A spread drops the class prototype, so `selectionState`/`commit`/`multiLineActive` are re-supplied
     // unchanged to keep the object a valid `EventEditSession`; only `chart`/`lineIndex`/`line` matter here.
+    // `targetLineIndices` is a getter too, so the single line under test is named explicitly.
     const host: EventEditSession = { ...session, chart: session.chart, lineIndex, line,
-      multiLineActive: session.multiLineActive, selectionState: () => session.selectionState(), commit: session.commit.bind(session) };
+      multiLineActive: session.multiLineActive, targetLineIndices: [lineIndex],
+      selectionState: () => session.selectionState(), commit: session.commit.bind(session) };
     return line && eventList(host, eventType(type))[Number(index)];
   }))] as [number, Set<string>]).filter(([, keys]) => keys.size));
   session.multiLineEnabled = state.multiLineEnabled ?? false;

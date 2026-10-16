@@ -1,6 +1,7 @@
 import { lineOverviewWindow, lineOverviewLayout, stepOverviewLine, LineOverviewIndex } from '../core/line-overview.ts';
 import { shaderEvents } from '../core/shader-events.ts';
 import { NOTE_COLORS } from './timeline.ts';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 import { isDefaultLineGroup, isDefaultLineName, lineFeatureLabels, lineGroupName } from '../core/line-groups.ts';
 import type { TempoMap } from '../core/tempo.ts';
 import type { Chart, ChartEvent, Note } from '../core/types.ts';
@@ -329,7 +330,7 @@ interface ThumbnailEntry<T> {
 }
 
 export function drawLineThumbnail(canvas: HTMLCanvasElement, sample: ThumbnailSample, seconds: number, start: number, end: number): void {
-  const context = canvas.getContext('2d')!; const width = canvas.width; const height = canvas.height;
+  const context = editorSkinContext(canvas.getContext('2d')!); const width = canvas.width; const height = canvas.height;
   const vertical = (time: number) => height - 5 - (time - start) / Math.max(0.01, end - start) * (height - 10);
   context.clearRect(0, 0, width, height); context.fillStyle = '#303030'; context.fillRect(0, 0, width, height);
   context.strokeStyle = '#555555'; context.lineWidth = 1;

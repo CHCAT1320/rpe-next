@@ -1,5 +1,6 @@
 import { beatValue } from '../core/beat.ts';
 import type { ClipboardEntry, ClipboardHistory } from '../application/clipboard-history.ts';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 
 const colors: Record<number, string> = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
 
@@ -16,8 +17,9 @@ export interface ClipboardHistoryActions {
  * group holds only one kind, in which case it takes the full width.
  */
 export function drawClipboardThumbnail(canvas: HTMLCanvasElement, entry: ClipboardEntry): void {
+  canvas.classList.add('clipboard-thumbnail');
   canvas.width = 480; canvas.height = 160;
-  const context = canvas.getContext('2d')!;
+  const context = editorSkinContext(canvas.getContext('2d')!);
   const items = [...entry.notes, ...entry.events.map(item => item.event)];
   let first = Infinity; let last = -Infinity;
   for (const item of items) { first = Math.min(first, beatValue(item.startTime)); last = Math.max(last, beatValue(item.endTime)); }

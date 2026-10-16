@@ -4,6 +4,7 @@ import { TempoMap } from './tempo.ts';
 import { sampleCurveTrajectory } from './curve-trajectory.ts';
 import { trajectorySplitSettings } from './trajectory-simplify.ts';
 import { validateNoiseAreas, diagnoseNoiseAreas, normalizeNoiseAreas, NOISE_VERSION } from './noise-areas.ts';
+import { validateNoiseLayers, NOISE_LAYER_VERSION } from './noise-skin.mjs';
 import type { AnyEventType, Beat, Chart, ChartEvent, ChartMeta, ControlPoint, EventLayer, EventType, EventValue, ExtendedType, JudgeLine, NoiseArea, Note, NoteType } from './types.ts';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'] as const satisfies readonly EventType[];
@@ -131,8 +132,9 @@ export function serializeChart(chart: Chart, { compact = false }: { compact?: bo
   assertChart(chart);
   chart = integerChartAlpha(chart);
   // Areas carry the version that introduced them, so a chart that uses them records the bump even if
-  // its own `META.RPEVersion` was written by an older build.
-  const snapshot = chart.blockAreaList?.length ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, NOISE_VERSION) } } : chart;
+  // its own `META.RPEVersion` was written by an older build. Layered noise areas are a later feature
+  // still, so they record the higher layer version instead.
+  const snapshot = chart.blockAreaList?.length || chart.noiseAreaLayers ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : NOISE_VERSION) } } : chart;
   return stringifyPreservingNumbers(snapshot, compact ? 0 : 2) + (compact ? '' : '\n');
 }
 
@@ -161,6 +163,8 @@ export function assertChart(chart: unknown): asserts chart is Chart {
   // Areas and their options are validated from the raw document, before anything is asserted, so a
   // malformed list is reported by name rather than surfacing later as a rendering failure.
   if (document.blockAreaList != null) validateNoiseAreas(document.blockAreaList as Parameters<typeof validateNoiseAreas>[0]);
+  // Layered noise areas are validated by the skin module, which owns their shape.
+  validateNoiseLayers(document);
   if (document.noiseAreaOptions !== undefined) {
     const options = document.noiseAreaOptions;
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('noiseAreaOptions 必须为对象');
@@ -236,16 +240,23 @@ export function diagnose(chart: Chart): DiagnosticIssue[] {
     bpmBeats.add(beat);
   }
   for (const [lineIndex, line] of (chart.judgeLineList ?? []).entries()) {
-    const seen = new Set<string>();
+    // One bit per note category (tap/hold vs drag) so a tap over a hold is reported while two taps
+    // at the same spot still only warn once. Fakes are skipped: they overlap by design.
+    const seen = new Map<string, number>();
     for (const [index, note] of (line.notes ?? []).entries()) {
       const beat = beatValue(note.startTime);
       const report = (message: string, severity: IssueSeverity = 'error'): void => addIssue({ line: lineIndex, beat, index, path: `notes[${index}]`, message }, severity);
       if (beatValue(note.endTime) < beat) report('结束拍早于开始拍');
       if (note.type === 2 && beatValue(note.endTime) === beat) report('Hold 时长为零');
       if (Math.abs(note.positionX) > 675) report('音符超出标准横向范围', 'warning');
+      if (note.isFake === true || Number(note.isFake) === 1) continue;
+      const type = Number(note.type);
+      const category = type === 1 || type === 2 ? 1 : type === 3 ? 2 : 0;
+      if (!category) continue;
       const key = `${beat}:${note.positionX}:${noteIsAbove(note)}`;
-      if (seen.has(key)) report('同位置同时音符重叠', 'warning');
-      seen.add(key);
+      const previous = seen.get(key) ?? 0;
+      if (previous & category) report('同位置同时音符重叠', 'warning');
+      seen.set(key, previous | category);
     }
     const inspectEvents = (layer: EventLayer | null | undefined, layerIndex: number, extended: boolean): void => {
       for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {

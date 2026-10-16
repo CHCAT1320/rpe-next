@@ -27,10 +27,34 @@ const yieldEncoding = (): Promise<void> => globalThis.scheduler?.yield ? globalT
  * `AudioBuffer` data that has already been through the graph; quantising here would lose precision
  * the editor can still be holding. Encoding yields between 64 Ki-frame chunks and gives up as soon as
  * `cancelled` reports true, returning `null` instead of a partial blob.
+ *
+ * `leadingSeconds` prepends that much silence, which is how the chart's audio offset is baked into
+ * the exported cache so the decoded music lines up with beat zero.
  */
-export async function pcmWave(buffer: AudioBuffer, cancelled: () => boolean = () => false): Promise<Blob | null> {
+/**
+ * The decoded-buffer members the encoder reads.
+ *
+ * Written as a required structural minimum rather than `AudioBuffer`: the transport stores an
+ * `AudioBufferLike` whose sample accessors are optional (its doubles omit them), so the call site
+ * narrows to this shape before encoding instead of asserting past the difference.
+ */
+export interface PcmSource {
+  length: number;
+  numberOfChannels: number;
+  sampleRate: number;
+  getChannelData(channel: number): Float32Array;
+}
+
+/** Narrows an optional-member buffer to {@link PcmSource} once its sample accessors are present. */
+export function isPcmSource(buffer: { length?: number; numberOfChannels?: number; sampleRate?: number; getChannelData?(channel: number): Float32Array }): buffer is PcmSource {
+  return Number.isFinite(buffer.length) && Number.isFinite(buffer.numberOfChannels) && Number.isFinite(buffer.sampleRate) && typeof buffer.getChannelData === 'function';
+}
+
+export async function pcmWave(buffer: PcmSource, cancelled: () => boolean = () => false, leadingSeconds = 0): Promise<Blob | null> {
   const channels = buffer.numberOfChannels;
-  const dataSize = buffer.length * channels * 4;
+  const leadingFrames = Math.max(0, Math.round(Number(leadingSeconds) * buffer.sampleRate));
+  const totalFrames = leadingFrames + buffer.length;
+  const dataSize = totalFrames * channels * 4;
   // `dataSize` is written into a 32-bit RIFF field below, so it has to stay inside one, and the
   // header adds 36 bytes on top of it.
   if (!Number.isSafeInteger(dataSize) || dataSize > 0xffffffff - 36 || channels < 1) throw new Error('音频大小超出 PCM 播放缓存限制');
@@ -44,13 +68,15 @@ export async function pcmWave(buffer: AudioBuffer, cancelled: () => boolean = ()
   view.setUint16(32, channels * 4, true); view.setUint16(34, 32, true); text(36, 'data'); view.setUint32(40, dataSize, true);
   const samples = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
   const parts = [new Blob([header])];
-  for (let start = 0; start < buffer.length; start += 65536) {
+  for (let start = 0; start < totalFrames; start += 65536) {
     if (cancelled()) return null;
-    const count = Math.min(65536, buffer.length - start);
+    const count = Math.min(65536, totalFrames - start);
     const chunk = new ArrayBuffer(count * channels * 4);
     const output = new DataView(chunk);
     for (let frame = 0; frame < count; frame++) {
-      for (let channel = 0; channel < channels; channel++) output.setFloat32((frame * channels + channel) * 4, samples[channel][start + frame], true);
+      // Frames before the source audio begins are the leading silence, written as zero.
+      const sourceFrame = start + frame - leadingFrames;
+      for (let channel = 0; channel < channels; channel++) output.setFloat32((frame * channels + channel) * 4, sourceFrame < 0 ? 0 : samples[channel][sourceFrame], true);
     }
     parts.push(new Blob([chunk]));
     await yieldEncoding();

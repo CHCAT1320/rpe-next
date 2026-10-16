@@ -60,6 +60,10 @@ export interface MigratedSettings {
   lineScale: number;
   gridCount: number;
   scrollSpeed: number;
+  /** Whether wheel seeking stops at the start of the audio instead of running to negative time. */
+  wheelStopAtAudioStart: boolean;
+  /** Whether the timeline draws interpolated curves for every event, not just the selected ones. */
+  drawEventCurves: boolean;
   backgroundAlpha: number;
   realtimeAlpha: number;
   scrollAcceleration: boolean;
@@ -152,6 +156,8 @@ export function migratePreferences(settingsText: string = '{}', hotkeyText: stri
       lineScale: finiteRange(originalSettings.LineScale, 0.1, 10, 1.5),
       gridCount: finiteRange(originalSettings.GridlineCount, 2, 100, 11),
       scrollSpeed: finiteRange(originalSettings.ScrollSpeed, 0.1, 100, 5),
+      wheelStopAtAudioStart: true,
+      drawEventCurves: true,
       backgroundAlpha: finiteRange(originalSettings.Alpha, 0, 255, 80) / 255,
       realtimeAlpha: finiteRange(originalSettings.RealTimeAlpha, 0, 1, 0.1),
       scrollAcceleration: originalSettings.ScrollAcc === true,

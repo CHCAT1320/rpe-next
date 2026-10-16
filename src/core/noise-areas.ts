@@ -1,5 +1,6 @@
 import { beatValue, fromNumber, upperBound } from './beat.ts';
 import { EventTrack } from './events.ts';
+import { NOISE_LAYER_VERSION } from './noise-skin.mjs';
 import type { Beat, Chart, ChartEvent, NoiseArea, NoiseEvent, NoiseInterval, NoisePoint } from './types.ts';
 
 // The four area shapes are declared in `types.ts` because `Chart` carries the list and `types.ts` sits
@@ -97,7 +98,8 @@ export function createNoiseArea(start = 0, end = start + 4): NoiseArea {
 }
 export function withNoiseAreas(chart: Chart, areas: NoiseArea[]): Chart {
   validateNoiseAreas(areas);
-  return { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, NOISE_VERSION) }, blockAreaList: areas };
+  // A chart that already carries noise layers needs the higher layer version recorded instead.
+  return { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : NOISE_VERSION) }, blockAreaList: areas };
 }
 export function shiftNoiseArea(area: NoiseArea, delta: number): NoiseArea {
   const result = structuredClone(area);

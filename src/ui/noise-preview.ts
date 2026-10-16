@@ -2,8 +2,10 @@ import { noiseRuntime, NOISE_AREA_COLORS } from '../core/noise-areas.ts';
 import type { NoiseArea } from '../core/noise-areas.ts';
 import { IntervalIndex } from '../core/interval-index.ts';
 import { NoiseEdgeFilter } from './noise-edge-filter.ts';
-import type { Chart } from '../core/types.ts';
-import type { Point } from '../core/editor-display.ts';
+import { noiseLayers, noiseLayerId } from '../core/noise-skin.mjs';
+import { NoiseSkinRenderer } from './noise-skin-renderer.mjs';
+import type { Chart, NoiseLayer as NoiseAreaLayer } from '../core/types.ts';
+import type { Point, PreviewViewport } from '../core/editor-display.ts';
 import type { TempoMap } from '../core/tempo.ts';
 
 const rank: Record<string, number> = { disabled: 0, ready: 1, active: 2 };
@@ -78,7 +80,24 @@ export class NoisePreview {
   declare lifetimes: IntervalIndex<NoisePreviewArea> | undefined;
   /** Set from the saved editor preferences; unset reads as seamless, as `!== false` did before. */
   declare seamless: boolean | undefined;
+  /**
+   * The 噪域 editor's per-layer view state and the skin assets, all assigned by `app.ts` after
+   * construction. `declare` keeps them out of the emitted constructor, so a preview that was never
+   * wired up reads `undefined` for each and every optional read below behaves as it did before.
+   */
+  declare hiddenLayers: Set<string> | undefined;
+  declare simpleLayers: Set<string> | undefined;
+  declare forceSimple: boolean | undefined;
+  declare getAssets: (() => Map<string, Uint8Array>) | undefined;
+  declare invalidate: (() => void) | undefined;
+  declare report: ((message: string) => void) | undefined;
+  /** The GPU skin renderer, built lazily by `draw` the first time a skinned layer renders. */
+  declare gpu: NoiseSkinRenderer | undefined;
+  /** The scratch canvas `pick` measures hit paths on, created on first use. */
+  declare pickCanvas: HTMLCanvasElement | undefined;
   constructor() { this.layers = new Map(); this.edgeFilter = new NoiseEdgeFilter(); }
+  /** Whether this layer renders through its skin rather than the built-in area renderer. */
+  usesSkin(layer: NoiseAreaLayer): boolean { return Boolean(layer.skin) && !this.forceSimple && !this.hiddenLayers?.has(layer.id) && !this.simpleLayers?.has(layer.id); }
   layer(name: string, width: number, height: number, ratio: number): NoiseLayer {
     let canvas = this.layers.get(name);
     if (!canvas) { canvas = document.createElement('canvas'); this.layers.set(name, canvas); }
@@ -88,18 +107,21 @@ export class NoisePreview {
     const context = canvas.getContext('2d')!; context.setTransform(ratio, 0, 0, ratio, 0, 0); context.globalAlpha = 1; context.globalCompositeOperation = 'source-over'; context.clearRect(0, 0, width, height);
     return { canvas, context };
   }
-  draw(target: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, width: number, height: number, scale: number, selected: number | undefined = -1): void {
-    // `Chart` keeps an open-ended index signature, so the noise fields are narrowed here; the value
-    // is read once into `areas` and reused, matching the repeated `chart.blockAreaList` reads.
-    const areas = chart.blockAreaList as NoisePreviewArea[] | undefined;
+  draw(target: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, width: number, height: number, scale: number, selected: number | undefined = -1, viewport: PreviewViewport = { scale, left: 0, top: 0, width, height }): void {
     this.guides = []; this.hitEntries = []; this.width = width; this.height = height;
-    if (!areas?.length || !width || !height) return;
+    if (!width || !height) return;
+    // `Chart` declares the 噪域 fields, so no narrowing is needed here; the list is read once into
+    // `areas` and reused, matching the repeated `chart.blockAreaList` reads.
+    const areas: NoisePreviewArea[] = chart.blockAreaList ?? [];
+    const definitions: NoiseAreaLayer[] = noiseLayers(chart).filter((layer: NoiseAreaLayer) => !this.hiddenLayers?.has(layer.id));
+    this.gpu?.prune(new Set(definitions.filter(layer => this.usesSkin(layer)).map(layer => layer.id)));
+    if (!definitions.length || !areas.length && !definitions.some(layer => this.usesSkin(layer))) return;
     if (this.source !== areas || this.tempo !== tempo) {
       this.source = areas; this.tempo = tempo;
       this.lifetimes = new IntervalIndex<NoisePreviewArea>(areas, area => tempo.seconds(area.appearTime), area => tempo.seconds(area.disappearTime));
     }
     // The index was just built whenever the source or the tempo changed.
-    this.guides = this.lifetimes!.query(seconds, seconds).filter(entry => seconds < entry.end).map(entry => {
+    this.guides = this.lifetimes!.query(seconds, seconds).filter(entry => seconds < entry.end && !this.hiddenLayers?.has(noiseLayerId(entry.item))).map(entry => {
       const runtime: NoiseAreaRuntime = noiseRuntime(entry.item, tempo);
       const sample: NoiseSample = runtime.sample(seconds);
       return { area: entry.item, index: entry.index, ...sample };
@@ -108,39 +130,45 @@ export class NoisePreview {
     const entries = this.guides.filter(entry => entry.scaleX !== 0 && entry.scaleY !== 0 &&
       !entry.points.every(point => width / 2 + point.x * scale < -margin) && !entry.points.every(point => width / 2 + point.x * scale > width + margin) &&
       !entry.points.every(point => height / 2 - point.y * scale < -margin) && !entry.points.every(point => height / 2 - point.y * scale > height + margin));
-    if (!entries.length) return;
     for (const entry of entries) entry.path = polygon(entry.points, width, height, scale);
     const ratio = globalThis.devicePixelRatio || 1;
     entries.sort((left, right) => rank[left.state] - rank[right.state] || left.index - right.index);
-    this.hitEntries = entries;
-    const composite = this.layer('composite', width, height, ratio);
-    for (const state of ['disabled', 'ready', 'active']) {
-      const group = entries.filter(entry => entry.state === state);
-      if (!group.length) continue;
-      const options = chart.noiseAreaOptions as { ignoreTripleInversion?: boolean } | undefined;
-      const layer = this.drawLayer(group, width, height, scale, ratio, options?.ignoreTripleInversion === true);
-      composite.context.globalCompositeOperation = 'destination-out'; composite.context.drawImage(layer.coverage, 0, 0, width, height);
-      composite.context.globalCompositeOperation = 'source-over'; composite.context.drawImage(layer.material, 0, 0, width, height);
+    // One composite per 噪域层, so a skinned layer can draw itself and the rest fall back to the
+    // built-in area renderer.
+    this.hitEntries = definitions.flatMap(layer => entries.filter(entry => noiseLayerId(entry.area) === layer.id));
+    for (const definition of definitions) {
+      const items = entries.filter(entry => noiseLayerId(entry.area) === definition.id);
+      if (this.usesSkin(definition)) {
+        this.gpu ??= new NoiseSkinRenderer(() => this.invalidate?.(), (message: string) => this.report?.(message));
+        const musicSeconds = seconds + Number(chart.META?.offset ?? 0) / 1000;
+        if (this.gpu.render(target, definition, this.getAssets?.() ?? new Map(), items, musicSeconds, viewport, scale, width, height)) continue;
+      }
+      if (!items.length) continue;
+      const composite = this.layer('composite', width, height, ratio);
+      // Ready belongs to the disabled coverage set as well as its own overlay.
+      for (const group of [items.filter(entry => entry.state !== 'active'), items.filter(entry => entry.state === 'active')]) {
+        if (!group.length) continue;
+        const layer = this.drawLayer(group, width, height, scale, ratio);
+        composite.context.globalCompositeOperation = 'destination-out'; composite.context.drawImage(layer.coverage, 0, 0, width, height);
+        composite.context.globalCompositeOperation = 'source-over'; composite.context.drawImage(layer.material, 0, 0, width, height);
+      }
+      target.save(); target.drawImage(composite.canvas, 0, 0, width, height); target.restore();
     }
-    target.save(); target.drawImage(composite.canvas, 0, 0, width, height); target.restore();
   }
-  drawLayer(entries: NoiseGuide[], width: number, height: number, scale: number, ratio: number, singleInversion: boolean): NoiseLayerPair {
+  drawLayer(entries: NoiseGuide[], width: number, height: number, scale: number, ratio: number): NoiseLayerPair {
     const normal = this.layer('normal', width, height, ratio);
     const seamless = this.seamless !== false;
     const hasInversion = entries.some(entry => entry.area.isInvert);
-    singleInversion &&= hasInversion;
     const normalPath = new Path2D();
-    const parity = new Path2D();
-    const invertedUnion = singleInversion ? this.layer('inverted-union', width, height, ratio) : null;
-    const invertedOverlap = singleInversion ? this.layer('inverted-overlap', width, height, ratio) : null;
+    const invertedUnion = hasInversion ? this.layer('inverted-union', width, height, ratio) : null;
+    const invertedOverlap = hasInversion ? this.layer('inverted-overlap', width, height, ratio) : null;
     for (const entry of entries) {
       // Every entry reaching here had `path` filled in by `draw`, which is the only caller.
-      if (entry.area.isInvert && singleInversion) {
+      if (entry.area.isInvert) {
         invertedOverlap!.context.save(); invertedOverlap!.context.clip(entry.path!);
         invertedOverlap!.context.drawImage(invertedUnion!.canvas, 0, 0, width, height); invertedOverlap!.context.restore();
         invertedUnion!.context.fillStyle = '#fff'; invertedUnion!.context.fill(entry.path!);
       }
-      else if (entry.area.isInvert) parity.addPath(entry.path!);
       else normalPath.addPath(entry.path!);
     }
     normal.context.fillStyle = '#fff'; normal.context.fill(normalPath);
@@ -148,14 +176,12 @@ export class NoisePreview {
     if (hasInversion) {
       coverage.context.drawImage(normal.canvas, 0, 0, width, height);
       coverage.context.globalCompositeOperation = 'xor'; coverage.context.fillStyle = '#fff';
-      if (singleInversion) {
-        invertedUnion!.context.globalCompositeOperation = 'destination-out'; invertedUnion!.context.drawImage(invertedOverlap!.canvas, 0, 0, width, height);
-        coverage.context.drawImage(invertedUnion!.canvas, 0, 0, width, height);
-      } else coverage.context.fill(parity, 'evenodd');
+      invertedUnion!.context.globalCompositeOperation = 'destination-out'; invertedUnion!.context.drawImage(invertedOverlap!.canvas, 0, 0, width, height);
+      coverage.context.drawImage(invertedUnion!.canvas, 0, 0, width, height);
     }
     const material = this.layer('material', width, height, ratio);
     const edges = seamless && entries.some(entry => entry.activationMix > 0) ? this.layer('edges', width, height, ratio) : null;
-    const uniform = seamless && entries[0].state !== 'ready';
+    const uniform = seamless && entries.every(entry => entry.state === entries[0].state) && entries[0].state !== 'ready';
     const inverted = !uniform && hasInversion ? this.layer('inverted', width, height, ratio) : null;
     const outlines = uniform && edges ? new Path2D() : null;
     for (const entry of entries) {
@@ -207,7 +233,10 @@ export class NoisePreview {
     return { material: material.canvas, coverage: coverage.canvas };
   }
   pick(horizontal: number, vertical: number): number | null {
-    const context = this.layers.get('normal')?.getContext('2d');
+    // A scratch canvas of its own: the hit paths live in screen space, so measuring them on a layer
+    // canvas that carries a device-pixel transform would be wrong.
+    this.pickCanvas ??= document.createElement('canvas');
+    const context = this.pickCanvas.getContext('2d');
     if (!context || !this.hitEntries?.length) return null;
     context.save(); context.setTransform(1, 0, 0, 1, 0, 0);
     try {

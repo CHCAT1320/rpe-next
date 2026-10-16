@@ -3,6 +3,7 @@ import type { CurveNoteOptions } from '../core/curve-notes.ts';
 import { beatValue, formatBeat, parseBeat } from '../core/beat.ts';
 import { showDialog } from './dialog.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 import type { Beat, Note } from '../core/types.ts';
 
 /**
@@ -87,8 +88,7 @@ export function curveDialog(session: CurveDialogSession, division: number, ancho
   };
   const generate: CurveGenerator = generateCurveNotes;
   const refresh = (): void => {
-    const context = canvas.getContext('2d') as CanvasRenderingContext2D;
-    context.clearRect(0, 0, canvas.width, canvas.height);
+    const context = editorSkinContext(canvas.getContext('2d'), 'curve'); context.clearRect(0, 0, canvas.width, canvas.height);
     picture.src = assetUrl(`easing/${controls.easingType.value}.svg`);
     try {
       const values = read(); const notes = generate(values);
