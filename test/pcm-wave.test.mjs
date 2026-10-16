@@ -27,3 +27,13 @@ test('PCM 缓存转换会让出主线程，并可在切换音乐后取消', asyn
   const wave = await pcmWave({ length: 65537, numberOfChannels: 1, sampleRate: 48000, getChannelData: () => new Float32Array(65537) }, () => cancelled);
   assert.equal(wave, null);
 });
+
+test('PCM 缓存可以在音频开头加入精确的静音帧', async () => {
+  const wave = await pcmWave({ length: 2, numberOfChannels: 1, sampleRate: 4, getChannelData: () => new Float32Array([0.25, -0.5]) }, () => false, 0.5);
+  const view = new DataView(await wave.arrayBuffer());
+  assert.equal(view.getUint32(40, true), 16);
+  assert.equal(view.getFloat32(44, true), 0);
+  assert.equal(view.getFloat32(48, true), 0);
+  assert.equal(view.getFloat32(52, true), 0.25);
+  assert.equal(view.getFloat32(56, true), -0.5);
+});

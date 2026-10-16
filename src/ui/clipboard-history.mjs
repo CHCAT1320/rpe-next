@@ -1,10 +1,12 @@
 import { beatValue } from '../core/beat.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 
 const colors = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
 
 export function drawClipboardThumbnail(canvas, entry) {
+  canvas.classList.add('clipboard-thumbnail');
   canvas.width = 480; canvas.height = 160;
-  const context = canvas.getContext('2d');
+  const context = editorSkinContext(canvas.getContext('2d'));
   const items = [...entry.notes, ...entry.events.map(item => item.event)];
   let first = Infinity; let last = -Infinity;
   for (const item of items) { first = Math.min(first, beatValue(item.startTime)); last = Math.max(last, beatValue(item.endTime)); }

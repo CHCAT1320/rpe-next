@@ -1,17 +1,19 @@
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { IntervalIndex } from '../core/interval-index.mjs';
 import { createNote, noteIsAbove, EVENT_TYPES, EXTENDED_TYPES } from '../core/chart.mjs';
-import { easing, bezier } from '../core/easing.mjs';
 import { eventKey, eventList, eventListAt } from '../application/event-commands.mjs';
 import { shaderIdentity, shaderEventLanes } from '../core/shader-events.mjs';
 import { EventInteraction } from './event-interaction.mjs';
 import { drawClipboard } from './clipboard-preview.mjs';
 import { TempoMap } from '../core/tempo.mjs';
 import { snapPosition, snapTime, verticalGrid, placementRange } from '../core/edit-grid.mjs';
-import { SPECIAL_TRACKS, eventChains, simultaneousNotes, strokeIntersects } from '../core/editor-display.mjs';
+import { SPECIAL_TRACKS, simultaneousNotes, strokeIntersects } from '../core/editor-display.mjs';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.mjs';
 import { lineDisplayLabel } from '../core/line-groups.mjs';
 import { trajectoryEventValue } from '../core/curve-trajectory.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { drawEventCurve, drawEventCurveBatch } from './event-curve.mjs';
+import { eventDisplayIndex, selectedEventGroups } from './event-display-index.mjs';
 
 export const NOTE_COLORS = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
 const isHookedEvent = event => event?.inst === true || Number(event?.inst) === 1;
@@ -27,7 +29,7 @@ export function prepareCanvas(canvas) {
   const context = canvas.getContext('2d');
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, rectangle.width, rectangle.height);
-  return { context, width: rectangle.width, height: rectangle.height };
+  return { context: editorSkinContext(context), width: rectangle.width, height: rectangle.height };
 }
 
 export class Timeline {
@@ -703,54 +705,65 @@ export class Timeline {
   }
 
   drawMultiLineEvents(playBeat) {
-    const session = this.getSession(); const context = this.eventsCanvas.getContext('2d'); const width = this.eventsCanvas.clientWidth; const height = this.eventsCanvas.clientHeight;
+    const session = this.getSession(); const context = editorSkinContext(this.eventsCanvas.getContext('2d')); const width = this.eventsCanvas.clientWidth; const height = this.eventsCanvas.clientHeight;
     this.eventRects = [];
     const baseValueFontSize = this.eventValueFontSize ?? 13;
     for (const lineIndex of session.targetLineIndices) {
       const panel = this.panelIndex(lineIndex, 'events'); const panelWidth = this.panelWidth(width, 'events'); const offset = panel * this.panelStride(width, 'events') - this.multiLineViewportOffset(width, 'events');
+      if (offset + panelWidth < 0 || offset > width) continue;
+      const factor = this.factorForLine(lineIndex); const originSeconds = this.tempo.seconds(this.origin, factor);
+      const beatAt = y => this.tempo.beat(originSeconds + (height - this.judgementOffset - y) / this.scale, factor);
+      const firstBeat = beatAt(height); const lastBeat = beatAt(23);
+      const lineSelection = session.multiEventSelection?.get(lineIndex) ?? (lineIndex === session.lineIndex ? session.eventSelection : new Set());
       const layer = this.extended ? { ...(session.chart.judgeLineList?.[lineIndex]?.extended ?? {}), paintEvents: eventListAt(session, lineIndex, 'paintEvents') } : session.chart.judgeLineList?.[lineIndex]?.eventLayers?.[this.layer] ?? {};
       this.eventTypes.forEach((type, channel) => {
         const channelWidth = panelWidth / this.eventTypes.length; const barWidth = channelWidth * Math.max(0.35, Math.min(1, this.eventBarWidth ?? 0.82)); const barX = offset + channel * channelWidth + (channelWidth - barWidth) / 2;
         context.strokeStyle = '#334154'; context.beginPath(); context.moveTo(offset + channel * channelWidth, 0); context.lineTo(offset + channel * channelWidth, height); context.stroke();
         const events = layer[type] ?? [];
-        const groups = eventChains(events);
-        const ranges = new Map(groups.flatMap(group => group.entries.map(entry => [entry.index, group])));
-        const entries = events.map((event, index) => ({ event, index })).filter(({ event }) => {
-          const start = beatValue(event.startTime); const end = beatValue(event.endTime); const top = this.verticalForLine(end, lineIndex, height); const bottom = this.verticalForLine(start, lineIndex, height);
-          return bottom >= 23 && top <= height;
-        });
+        const display = eventDisplayIndex(this, events, session.chart); const { ranges } = display;
+        const entries = display.index.query(firstBeat, lastBeat).sort((a, b) => a.index - b.index);
+        const visibleGroups = new Set(entries.map(entry => ranges.get(entry.index)));
+        const selectedGroups = selectedEventGroups(lineSelection, type, ranges);
         const seamlessGroups = new Set();
-        if (this.seamlessEvents && channelWidth >= 18 && type !== 'paintEvents') for (const group of new Set(entries.map(entry => ranges.get(entry.index)))) {
+        const curveBatches = new Map();
+        if (this.seamlessEvents && channelWidth >= 18 && type !== 'paintEvents') for (const group of visibleGroups) {
           if (!group || group.entries.length < 2) continue;
-          const lineSelection = session.multiEventSelection?.get(lineIndex) ?? (lineIndex === session.lineIndex ? session.eventSelection : new Set());
-          const hasSelected = group.entries.some(entry => lineSelection.has(eventKey(type, entry.index)));
-          const bound = group.entries.some(entry => Number(entry.event.linkgroup ?? 0) > 0);
-          const hooked = group.entries.some(entry => isHookedEvent(entry.event));
-          if (hasSelected || bound || hooked) continue;
+          if (selectedGroups.has(group) || display.unmergeable.has(group)) continue;
           seamlessGroups.add(group);
           const first = group.entries[0].event; const last = group.entries.at(-1).event;
           const top = Math.max(23, this.verticalForLine(beatValue(last.endTime), lineIndex, height));
           const bottom = Math.min(height, this.verticalForLine(beatValue(first.startTime), lineIndex, height));
           if (bottom > top) { context.globalAlpha = this.eventOpacity ?? 0.25; context.fillStyle = '#e58d24'; context.fillRect(barX, top, barWidth, bottom - top); context.globalAlpha = 1; context.strokeStyle = '#ffa334'; context.strokeRect(barX, top, barWidth, bottom - top); }
         }
-        for (const { index, event } of entries) {
-          const start = beatValue(event.startTime); const end = beatValue(event.endTime); const top = this.verticalForLine(end, lineIndex, height); const bottom = this.verticalForLine(start, lineIndex, height);
+        for (const { index, item: event, start, end } of entries) {
+          const top = this.verticalForLine(end, lineIndex, height); const bottom = this.verticalForLine(start, lineIndex, height);
           if (bottom < 23 || top > height) continue;
           const rectangle = { x: barX, y: Math.max(23, top), width: barWidth, height: Math.max(2, Math.min(height, bottom) - Math.max(23, top)), index, type, lineIndex };
           this.eventRects.push(rectangle);
-          const lineSelection = session.multiEventSelection?.get(lineIndex) ?? (lineIndex === session.lineIndex ? session.eventSelection : new Set());
           const selected = lineSelection.has(eventKey(type, index));
           const hooked = isHookedEvent(event);
           const seamless = seamlessGroups.has(ranges.get(index));
-          context.globalAlpha = this.eventOpacity ?? 0.25;
-          context.fillStyle = type === 'paintEvents' ? '#c6a1ff' : selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24'; if (!seamless) context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-          context.globalAlpha = 1; context.strokeStyle = selected ? '#fff2bd' : type === 'paintEvents' ? '#c6a1ff' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1; if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-          if (event.trajectory) this.drawTrajectoryEvent(context, rectangle, event);
-          if (!event.trajectory && type !== 'paintEvents' && channelWidth >= (this.eventCurveThreshold ?? 24) && Number.isFinite(event.start) && Number.isFinite(event.end)) {
-            const group = ranges.get(index); context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip(); context.lineWidth = 1.5; context.strokeStyle = selected ? '#fff4c2' : '#ffe0a3'; context.beginPath();
-            for (let step = 0; step <= 24; step++) { const progress = step / 24; const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1); const value = event.start + (event.end - event.start) * amount; const normalized = group.max - group.min > 0.01 ? (value - group.min) / (group.max - group.min) : 0.5; const x = rectangle.x + 4 + normalized * Math.max(1, rectangle.width - 8); const y = bottom - progress * (bottom - top); if (!step) context.moveTo(x, y); else context.lineTo(x, y); }
-            context.stroke(); context.restore();
+          if (!seamless) {
+            context.globalAlpha = this.eventOpacity ?? 0.25;
+            context.fillStyle = type === 'paintEvents' ? '#c6a1ff' : selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24'; context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+            context.globalAlpha = 1; context.strokeStyle = selected ? '#fff2bd' : type === 'paintEvents' ? '#c6a1ff' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1; context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
           }
+          if (event.trajectory) this.drawTrajectoryEvent(context, rectangle, event);
+          if (this.drawEventCurves !== false && !event.trajectory && type !== 'paintEvents' && channelWidth >= (this.eventCurveThreshold ?? 24) && Number.isFinite(event.start) && Number.isFinite(event.end)) {
+            if (seamless) {
+              const range = ranges.get(index); if (!curveBatches.has(range)) curveBatches.set(range, []);
+              curveBatches.get(range).push({ event, range, startY: bottom, endY: top });
+            } else {
+              context.strokeStyle = selected ? '#fff4c2' : '#ffe0a3';
+              drawEventCurve(context, event, ranges.get(index), rectangle, bottom, top, { steps: 24, padding: 4, lineWidth: 1.5, drawConstant: true });
+            }
+          }
+        }
+        context.strokeStyle = '#ffe0a3';
+        for (const [group, entries] of curveBatches) {
+          const top = Math.max(23, this.verticalForLine(beatValue(group.entries.at(-1).event.endTime), lineIndex, height));
+          const bottom = Math.min(height, this.verticalForLine(beatValue(group.entries[0].event.startTime), lineIndex, height));
+          drawEventCurveBatch(context, entries, { x: barX, y: top, width: barWidth, height: Math.max(2, bottom - top) }, { steps: 24, padding: 4, lineWidth: 1.5, drawConstant: true });
         }
          const valueThreshold = this.eventValueThreshold ?? 30;
          const valueFontSize = channelWidth >= valueThreshold * 2.4 ? baseValueFontSize : channelWidth >= valueThreshold * 1.7 ? Math.min(baseValueFontSize, 11) : channelWidth >= valueThreshold * 1.2 ? Math.min(baseValueFontSize, 9) : channelWidth >= valueThreshold ? Math.min(baseValueFontSize, 8) : 0;
@@ -842,9 +855,9 @@ export class Timeline {
     if (this.indexedLayer !== session.chart || this.eventIndexKey !== indexKey) {
       this.indexedLayer = session.chart; this.eventIndexKey = indexKey;
       this.shaderLanes = shaderEventLanes(layer.paintEvents ?? []);
-      this.eventIndexes = this.eventTypes.map(type => new IntervalIndex(layer[type] ?? [], event => beatValue(event.startTime), event => beatValue(event.endTime)));
-      this.chains = this.eventTypes.map(type => eventChains(layer[type] ?? []));
-      this.chainRanges = this.chains.map(groups => new Map(groups.flatMap(group => group.entries.map(entry => [entry.index, group]))));
+      this.eventDisplays = this.eventTypes.map(type => eventDisplayIndex(this, layer[type] ?? [], session.chart));
+      this.eventIndexes = this.eventDisplays.map(display => display.index);
+      this.chainRanges = this.eventDisplays.map(display => display.ranges);
     }
     this.eventRects = [];
     this.eventTypes.forEach((type, channel) => {
@@ -859,15 +872,12 @@ export class Timeline {
         return;
       }
       const ranges = this.chainRanges[channel];
+      const display = this.eventDisplays[channel]; const selectedGroups = selectedEventGroups(session.eventSelection, type, ranges);
       const seamlessGroups = new Set();
+      const curveBatches = new Map();
       if (this.seamlessEvents) for (const group of new Set(entries.map(entry => ranges.get(entry.index)))) {
         if (!group || group.entries.length < 2) continue;
-        const linkedSelection = group.entries.some(candidate => {
-          const selected = this.getSession().eventSelection.has(eventKey(type, candidate.index));
-          const bound = Number(candidate.event.linkgroup ?? 0) > 0;
-          return selected || bound || isHookedEvent(candidate.event);
-        });
-        if (linkedSelection) continue;
+        if (selectedGroups.has(group) || display.unmergeable.has(group)) continue;
         seamlessGroups.add(group);
         const first = group.entries[0].event; const last = group.entries.at(-1).event;
         const chainTop = Math.max(0, this.vertical(beatValue(last.endTime)));
@@ -887,30 +897,30 @@ export class Timeline {
         const hooked = isHookedEvent(entry.item);
         const chain = ranges.get(entry.index);
         const seamless = seamlessGroups.has(chain);
-        context.globalAlpha = this.eventOpacity ?? 0.25;
-        context.fillStyle = selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24';
-        if (!seamless) context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-        context.strokeStyle = selected ? '#fff2bd' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1;
-        if (hooked) context.setLineDash([4, 3]);
-        if (!seamless) context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-        context.setLineDash([]);
-        context.globalAlpha = 1;
+        if (!seamless) {
+          context.globalAlpha = this.eventOpacity ?? 0.25;
+          context.fillStyle = selected ? '#ffe091' : hooked ? '#62d8f2' : '#e58d24'; context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+          context.strokeStyle = selected ? '#fff2bd' : hooked ? '#b8f2ff' : '#ffa334'; context.lineWidth = selected ? 2 : 1;
+          if (hooked) context.setLineDash([4, 3]);
+          context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+          if (hooked) context.setLineDash([]);
+          context.globalAlpha = 1;
+        }
         if (entry.item.trajectory) this.drawTrajectoryEvent(context, rectangle, entry.item);
-        if (!entry.item.trajectory && channelWidth >= (this.eventCurveThreshold ?? 24)) {
-          context.lineWidth = 2;
-          context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip();
-          const group = ranges.get(entry.index);
-          context.beginPath();
-          for (let step = 0; step <= 36; step++) {
-            const progress = step / 36; const event = entry.item;
-            const amount = event.bezier ? bezier(progress, event.bezierPoints) : easing(progress, event.easingType, event.easingLeft ?? 0, event.easingRight ?? 1);
-            const value = event.start + (event.end - event.start) * amount;
-            const normalized = group.max - group.min > 0.01 ? (value - group.min) / (group.max - group.min) : 0.5;
-            const horizontalValue = rectangle.x + 6 + normalized * (rectangle.width - 12); const verticalValue = bottom - progress * (bottom - vertical);
-            if (step === 0) context.moveTo(horizontalValue, verticalValue); else context.lineTo(horizontalValue, verticalValue);
-          } if (Number.isFinite(entry.item.start) && Number.isFinite(entry.item.end) && group.max - group.min > 0.01) context.stroke(); context.restore(); context.lineWidth = 1;
+        if (this.drawEventCurves !== false && !entry.item.trajectory && channelWidth >= (this.eventCurveThreshold ?? 24)) {
+          if (seamless) {
+            if (!curveBatches.has(chain)) curveBatches.set(chain, []);
+            curveBatches.get(chain).push({ event: entry.item, range: chain, startY: bottom, endY: vertical });
+          } else { drawEventCurve(context, entry.item, chain, rectangle, bottom, vertical); context.lineWidth = 1; }
         }
       }
+      context.strokeStyle = '#ffa334';
+      for (const [group, entries] of curveBatches) {
+        const top = Math.max(0, this.vertical(beatValue(group.entries.at(-1).event.endTime)));
+        const bottom = Math.min(height, this.vertical(beatValue(group.entries[0].event.startTime)));
+        drawEventCurveBatch(context, entries, { x: barX, y: top, width: barWidth, height: Math.max(2, bottom - top) });
+      }
+      context.lineWidth = 1;
       const visibleGroups = new Set(entries.map(entry => ranges.get(entry.index)));
       const formatValue = value => typeof value === 'number' ? value.toFixed(2) : Array.isArray(value) ? value.join(',') : value;
        const valueThreshold = this.eventValueThreshold ?? 30;
@@ -962,7 +972,7 @@ export class Timeline {
     context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip();
     context.strokeStyle = '#83edca'; context.globalAlpha = 0.95; context.lineWidth = 2; context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
     context.fillStyle = '#a0ffdb'; context.font = '12px RPE, sans-serif'; context.textAlign = 'center'; context.fillText('轨迹 X / Y', rectangle.x + rectangle.width / 2, rectangle.y + 30, Math.max(1, rectangle.width - 4));
-    if (rectangle.width > 20 && rectangle.height > 42) {
+    if (this.drawEventCurves !== false && rectangle.width > 20 && rectangle.height > 42) {
       for (const [axis, color] of [['x', '#86efbf'], ['y', '#baacff']]) {
         const samples = Array.from({ length: 65 }, (unused, index) => trajectoryEventValue(event, index / 64, axis));
         const minimum = Math.min(...samples); const maximum = Math.max(...samples); context.strokeStyle = color; context.beginPath();

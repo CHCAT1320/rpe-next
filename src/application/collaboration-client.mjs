@@ -32,14 +32,14 @@ export class CollaborationClient extends EventTarget {
     if (!local) restoreSelection(session, remapSelection(source, chart, selection));
     this.syncHistory(); session.notify();
   }
-  commit(label, chart) {
+  commit(label, chart, { recordHistory = true } = {}) {
     try {
       if (!this.ready) throw new Error('联机尚未就绪或房主离线，编辑暂停');
       const next = identifyChart(chart); const changes = chartChanges(this.session.chart, next); if (!changes.length) return;
       for (const change of changes) for (const id of changeResources(change)) {
         const owner = this.locks.get(id); if (owner && owner !== this.id) throw new Error(`该物件由 ${this.members.find(member => member.id === owner)?.name ?? '其他用户'} 编辑中`);
       }
-      const operation = { type: 'edit', operation: crypto.randomUUID(), label, changes };
+      const operation = { type: 'edit', operation: crypto.randomUUID(), label, changes, recordHistory };
       this.queue.push(operation); this.setChart(next, true); this.flush(); this.changed();
     } catch (error) { this.notify(error.message, 'warning'); this.session.notify(); }
   }
@@ -98,7 +98,7 @@ export class CollaborationClient extends EventTarget {
           if (own.travel) {
             const { direction, entry } = own.travel;
             (direction === 'undo' ? this.undo : this.redo).pop(); (direction === 'undo' ? this.redo : this.undo).push(entry);
-          } else { this.undo.push({ label: own.label, changes: own.changes }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
+          } else if (own.recordHistory !== false) { this.undo.push({ label: own.label, changes: own.changes }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
         }
         const member = this.members.find(member => member.id === message.id); if (member) member.stats = message.stats;
         this.rebase();

@@ -1,5 +1,5 @@
 import { noteIsAbove } from '../core/chart.mjs';
-import { selectedEvents, transformEvents } from './event-commands.mjs';
+import { selectedEventEntries, transformEvents } from './event-commands.mjs';
 
 export function applyNumberShortcut(session, action) {
   if (!['NumberMirror', 'NumberFill'].includes(action)) return false;
@@ -9,8 +9,9 @@ export function applyNumberShortcut(session, action) {
       : { ...note, above: noteIsAbove(note) ? note.type === 2 ? 0 : 2 : 1 });
     return true;
   }
-  if (session.focus !== 'events' || session.eventSelection.size !== 1) return false;
-  const entry = selectedEvents(session)[0]; if (!entry) return false;
+  if (session.focus !== 'events') return false;
+  const entries = selectedEventEntries(session); if (entries.length !== 1) return false;
+  const entry = entries[0];
   if (entry.type === 'alphaEvents') {
     const value = action === 'NumberMirror' ? 0 : 255;
     transformEvents(session, '快捷填充透明度尾值', event => ({ ...event, end: value, ...(event.inst ? { start: value } : {}) }));

@@ -20,6 +20,7 @@ export class EditorPlayback {
     if (now - this.lastWheel > 0.2) this.burstStart = now;
     this.lastWheel = now;
     const delta = wheelSeconds(event.deltaY, this.audio.duration, settings.scrollSpeed, this.audio.rate, settings.scrollAcceleration, now - this.burstStart, event.altKey);
-    this.seek(this.audio.time + delta);
+    const target = this.audio.time + delta;
+    this.seek(settings.wheelStopAtAudioStart === false ? target : Math.max(0, target));
   }
 }

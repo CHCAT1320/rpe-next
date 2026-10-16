@@ -83,7 +83,7 @@ export function renderShaderInspector(container, session, reportError, refresh) 
     change('修改着色器顺序', current => ({ ...current, order: value }));
   }, 'number', 1); order.min = 0; order.max = 10000;
   const hint = document.createElement('p'); hint.className = 'hint';
-  hint.textContent = '重叠事件按顺序从小到大叠加，同类型也可重复应用。参数使用独立拍数；更换类型会重置参数。'; container.append(hint);
+  hint.textContent = '第一层处理音符和判定线；全局为第二层，在 UI 和噪域之后处理。每层内按顺序从小到大叠加，同类型可重复应用。参数使用独立拍数；更换类型会重置参数。'; container.append(hint);
   const parameters = document.createElement('select'); field(container, '参数', parameters);
   const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'wide-button'; container.append(toggle);
   const tracks = document.createElement('div'); tracks.className = 'shader-parameter-editor'; container.append(tracks);

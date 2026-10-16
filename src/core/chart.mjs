@@ -4,6 +4,7 @@ import { TempoMap } from './tempo.mjs';
 import { sampleCurveTrajectory } from './curve-trajectory.mjs';
 import { trajectorySplitSettings } from './trajectory-simplify.mjs';
 import { validateNoiseAreas, diagnoseNoiseAreas, normalizeNoiseAreas, NOISE_VERSION } from './noise-areas.mjs';
+import { validateNoiseLayers, NOISE_LAYER_VERSION } from './noise-skin.mjs';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'];
 export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'];
@@ -46,7 +47,7 @@ export function noteIsAbove(note) {
 export function serializeChart(chart, { compact = false } = {}) {
   assertChart(chart);
   chart = integerChartAlpha(chart);
-  const snapshot = chart.blockAreaList?.length ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, NOISE_VERSION) } } : chart;
+  const snapshot = chart.blockAreaList?.length || chart.noiseAreaLayers ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : NOISE_VERSION) } } : chart;
   return stringifyPreservingNumbers(snapshot, compact ? 0 : 2) + (compact ? '' : '\n');
 }
 
@@ -63,6 +64,7 @@ export function assertChart(chart) {
   new TempoMap(chart.BPMList);
   if (chart.META.offset !== undefined && !Number.isFinite(chart.META.offset)) throw new Error('META.offset 必须为毫秒数');
   if (chart.blockAreaList != null) validateNoiseAreas(chart.blockAreaList);
+  validateNoiseLayers(chart);
   if (chart.noiseAreaOptions !== undefined) {
     if (!chart.noiseAreaOptions || typeof chart.noiseAreaOptions !== 'object' || Array.isArray(chart.noiseAreaOptions)) throw new Error('noiseAreaOptions 必须为对象');
     for (const key of ['ignoreTripleInversion']) if (chart.noiseAreaOptions[key] !== undefined && typeof chart.noiseAreaOptions[key] !== 'boolean') throw new Error('noiseAreaOptions.' + key + ' 必须为布尔值');
@@ -125,16 +127,21 @@ export function diagnose(chart) {
     bpmBeats.add(beat);
   }
   for (const [lineIndex, line] of (chart.judgeLineList ?? []).entries()) {
-    const seen = new Set();
+    const seen = new Map();
     for (const [index, note] of (line.notes ?? []).entries()) {
       const beat = beatValue(note.startTime);
       const report = (message, severity = 'error') => addIssue({ line: lineIndex, beat, index, path: `notes[${index}]`, message }, severity);
       if (beatValue(note.endTime) < beat) report('结束拍早于开始拍');
       if (note.type === 2 && beatValue(note.endTime) === beat) report('Hold 时长为零');
       if (Math.abs(note.positionX) > 675) report('音符超出标准横向范围', 'warning');
+      if (note.isFake === true || Number(note.isFake) === 1) continue;
+      const type = Number(note.type);
+      const category = type === 1 || type === 2 ? 1 : type === 3 ? 2 : 0;
+      if (!category) continue;
       const key = `${beat}:${note.positionX}:${noteIsAbove(note)}`;
-      if (seen.has(key)) report('同位置同时音符重叠', 'warning');
-      seen.add(key);
+      const previous = seen.get(key) ?? 0;
+      if (previous & category) report('同位置同时音符重叠', 'warning');
+      seen.set(key, previous | category);
     }
     const inspectEvents = (layer, layerIndex, extended) => {
       for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {

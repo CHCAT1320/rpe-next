@@ -1,5 +1,6 @@
 import { beatValue, fromNumber, upperBound } from './beat.mjs';
 import { EventTrack } from './events.mjs';
+import { NOISE_LAYER_VERSION } from './noise-skin.mjs';
 
 const TIME_EPSILON = 1e-9;
 
@@ -25,7 +26,7 @@ export function createNoiseArea(start = 0, end = start + 4) {
 }
 export function withNoiseAreas(chart, areas) {
   validateNoiseAreas(areas);
-  return { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, NOISE_VERSION) }, blockAreaList: areas };
+  return { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : NOISE_VERSION) }, blockAreaList: areas };
 }
 export function shiftNoiseArea(area, delta) {
   const result = structuredClone(area);

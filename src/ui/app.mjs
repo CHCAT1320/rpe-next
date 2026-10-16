@@ -23,8 +23,8 @@ import { RpeSkin } from './skin.mjs';
 import { ProjectImages } from '../platform/images.mjs';
 import { HitSounds } from '../platform/hitsounds.mjs';
 import { renderEventInspector } from './event-inspector.mjs';
-import { eventKey, eventList, deleteEvents, transformEvents } from '../application/event-commands.mjs';
-import { BATCH_ACTIONS, applyBatchAction, nudgeSelection } from '../application/batch-edit.mjs';
+import { eventKey, eventList, selectEvent, selectAllEvents, deleteEvents, transformEvents } from '../application/event-commands.mjs';
+import { BATCH_ACTIONS, applyBatchAction, nudgeSelection, captureSelection } from '../application/batch-edit.mjs';
 import { copyObjects, cutObjects, pasteObjects, deleteObjects } from '../application/clipboard.mjs';
 import { ClipboardHistory } from '../application/clipboard-history.mjs';
 import { renderClipboardHistory } from './clipboard-history.mjs';
@@ -59,16 +59,26 @@ import { assetUrl } from '../core/asset-url.mjs';
 import { AudioAnalysis } from './audio-analysis.mjs';
 import { TrajectoryPanel } from './trajectory-panel.mjs';
 import { TextLinesPanel } from './text-lines.mjs';
+import { NoiseFitPanel } from './noise-fit.mjs';
+import { NoiseTrackingPanel } from './noise-tracking.mjs';
 import { CollaborationPanel } from './collaboration.mjs';
 import { NoiseAreaEditor } from './noise-area.mjs';
+import { EventSampler } from './event-sampler.mjs';
+import { EditorSkins } from './editor-skins.mjs';
+import { editorSkinContext, editorCanvasRevision } from './editor-skin-canvas.mjs';
+import { editorSkinState, editorSkinSignal } from './editor-skin-state.mjs';
+import { pcmWave } from '../platform/pcm-wave.mjs';
 
 const element = selector => document.querySelector(selector);
 const displayFields = [
   ['text-selection-drag', 'textSelectionDrag', false],
   ['event-cut-density', 'cutDensity', 4],
   ['sample-auto-fit', 'sampleAutoFit', true],
+  ['wheel-limit-audio-start', 'wheelStopAtAudioStart', true],
+  ['draw-event-curves', 'drawEventCurves', true],
   ['pick-preview-noise-areas', 'pickPreviewNoiseAreas', true],
   ['seamless-noise-areas', 'seamlessNoiseAreas', true],
+  ['force-simple-noise', 'forceSimpleNoise', false],
   ['judgement-offset', 'judgementOffset', 92],
   ['judgement-color', 'judgementColor', '#ffffff'],
   ['default-line-thickness', 'lineScale', 1.5],
@@ -129,7 +139,14 @@ const timeline = new Timeline(element('#notes'), element('#events'), () => sessi
 const noiseEditor = new NoiseAreaEditor(element('#noise-panel'), element('#noise-editor-canvas'), () => ({ session, tempo, timeline, preview, realtimePreview, previewVisible: preview.visible, seconds: chartSeconds, sampleAutoFit: element('#sample-auto-fit').checked }), {
   commit: (label, chart) => session.commit(label, chart), invalidate, notify, activate: activatePane,
   pause: () => playback.pause(), seek: beat => seekBeat(beat), wheel: event => previewWheel(event),
+  getAssets: () => assets,
+  onAssets: entries => { for (const [name, bytes] of entries) assets.set(name, bytes); assetDirty = true; images.load(session.chart, assets, chartName); invalidate(); },
 });
+for (const renderer of [preview, realtimePreview]) {
+  renderer.noisePreview.hiddenLayers = noiseEditor.hiddenLayers;
+  renderer.noisePreview.simpleLayers = noiseEditor.simpleLayers;
+}
+const eventSampler = new EventSampler(element('.stage'), () => ({ session, tempo, preview, realtimePreview, previewVisible: preview.visible, timeline, seconds: chartSeconds, sampleAutoFit: element('#sample-auto-fit').checked }), { invalidate, pause: () => playback.pause(), notify });
 const audioAnalysis = new AudioAnalysis(element('#audio-analysis-overlay'), () => timeline, () => audio, () => persistEditor());
 let noteHoverTimer = null;
 let noteHoverKey = null;
@@ -196,8 +213,15 @@ const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, ti
 });
 const trajectoryPanel = new TrajectoryPanel(element('#trajectory-editor'), () => ({ session, timeline, tempo, previewVisible: preview.visible }), { invalidate, notify, activate: activatePane });
 const textLinesPanel = new TextLinesPanel(element('#text-lines-editor'), () => ({ session, tempo, seconds: chartSeconds(), skin, noteSize: preview.noteSize }), { invalidate, notify, activate: activatePane });
+const noiseFitPanel = new NoiseFitPanel(element('#noise-fit-editor'), element('.stage'), () => ({ session, tempo, timeline, previewVisible: preview.visible, seconds: () => chartSeconds() }), { invalidate, notify, activate: activatePane, pause: () => playback.pause() });
+const noiseTrackingPanel = new NoiseTrackingPanel(element('#noise-tracking-editor'), element('.stage'), () => ({ session, tempo, timeline, preview, realtimePreview, previewVisible: preview.visible, seconds: () => chartSeconds(), wheel: event => previewWheel(event) }), { invalidate, notify, activate: activatePane, pause: () => playback.pause() });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => images.load(session.chart, assets, chartName) });
+const editorSkins = new EditorSkins(element('#editor-skin-settings'), { invalidate, notify });
+document.addEventListener('rpen-editor-skin-changed', () => {
+  lineSwitcher.lastFrame = -Infinity; lineSwitcher.cache.clear(); renderSession();
+  if (activePaneName === 'clipboard') renderClipboardPanel();
+});
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
   notify,
   onChange: (nextAssets, nextFolders) => {
@@ -238,10 +262,10 @@ const pasteGesture = new PasteGesture({
 window.addEventListener('blur', () => pasteGesture.cancel());
 document.addEventListener('focusin', event => { if (isTextEntry(event.target)) pasteGesture.cancel(); });
 let stripCache;
-function createStripCanvas(width, height) {
+function createStripCanvas(width, height, role) {
   const canvas = document.createElement('canvas'); const ratio = globalThis.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.round(width * ratio)); canvas.height = Math.max(1, Math.round(height * ratio));
-  const context = canvas.getContext('2d'); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
+  const context = editorSkinContext(canvas.getContext('2d'), role); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
   return { canvas, context, width, height };
 }
 function drawTimelineStrips() {
@@ -251,9 +275,9 @@ function drawTimelineStrips() {
   const duration = Math.max(0.001, audio.duration > 0 ? audio.duration : timelineActivity.duration);
   const historyEntries = session.recentEdits ?? [];
   const historySignature = `${historyEntries.length}:${historyEntries.at(-1)?.start ?? ''}:${historyEntries.at(-1)?.end ?? ''}:${historyEntries.at(-1)?.label ?? ''}`;
-  const key = { chart: session.chart, line: session.lineIndex, layer: timeline.layer, extended: timeline.extended, duration, width, historyWidth: historyCanvas.clientWidth, height, historySignature };
+  const key = { chart: session.chart, line: session.lineIndex, layer: timeline.layer, extended: timeline.extended, duration, width, historyWidth: historyCanvas.clientWidth, height, historySignature, skinRevision: editorCanvasRevision() };
   if (!stripCache || Object.keys(key).some(name => stripCache[name] !== key[name])) {
-    const noteFrame = createStripCanvas(width, height); const historyFrame = createStripCanvas(historyCanvas.clientWidth, height);
+    const noteFrame = createStripCanvas(width, height, 'density'); const historyFrame = createStripCanvas(historyCanvas.clientWidth, height, 'history');
     const { bins, noteBins, eventBins, maximum } = timelineActivity.density(session.lineIndex, timeline.layer, timeline.extended, duration, height);
     const logarithm = Math.log1p(maximum); const half = Math.max(1, width / 2 - 2);
     for (let index = 0; index < bins; index++) {
@@ -273,8 +297,8 @@ function drawTimelineStrips() {
     stripCache = { ...key, note: noteFrame.canvas, history: historyFrame.canvas };
   }
   const noteFrame = prepareCanvas(densityCanvas); const historyFrame = prepareCanvas(historyCanvas);
-  noteFrame.context.drawImage(stripCache.note, 0, 0, width, height);
-  historyFrame.context.drawImage(stripCache.history, 0, 0, historyCanvas.clientWidth, height);
+  densityCanvas.getContext('2d').drawImage(stripCache.note, 0, 0, width, height);
+  historyCanvas.getContext('2d').drawImage(stripCache.history, 0, 0, historyCanvas.clientWidth, height);
   const markerY = height - Math.max(0, Math.min(duration, chartSeconds())) / duration * height;
   for (const frame of [noteFrame, historyFrame]) { frame.context.strokeStyle = '#f5e59a'; frame.context.lineWidth = 1; frame.context.beginPath(); frame.context.moveTo(0, markerY + .5); frame.context.lineTo(frame.width, markerY + .5); frame.context.stroke(); }
 }
@@ -322,6 +346,7 @@ document.fonts.load('35px RPEGame').then(invalidate);
 const status = message => { element('#status').textContent = message; };
 const notificationTimers = new Set();
 function notify(message, level = 'success', duration = 2800) {
+  if (['error', 'warning'].includes(level)) editorSkinSignal(level);
   if (level === 'success' && editorPreferences.successNotifications === false) return;
   const host = element('#notifications'); if (!host) return;
   const item = document.createElement('div'); item.className = `editor-notification ${level}`; item.textContent = message; host.append(item);
@@ -377,7 +402,8 @@ const collaboration = new CollaborationPanel(element('#collaboration-panel'), ()
   sharedAssets: () => {
     const references = resourceReferences(session.chart, assets, chartName);
     const names = new Set([references.song, references.background, session.chart.META.background, ...session.chart.judgeLineList.map(line => line.Texture)].filter(Boolean));
-    return [...names].flatMap(name => { const bytes = assetBytes(assets, name, chartName); return bytes ? [[name, bytes]] : []; });
+    const skins = (session.chart.noiseAreaLayers ?? []).map(layer => layer.skin).filter(Boolean);
+    return [...names].flatMap(name => { const bytes = assetBytes(assets, name, chartName); return bytes ? [[name, bytes]] : []; }).concat([...assets].filter(([name]) => skins.some(root => name.startsWith(root + '/'))));
   }
 }), {
   notify, activate: activatePane,
@@ -398,14 +424,15 @@ const collaboration = new CollaborationPanel(element('#collaboration-panel'), ()
 element('#collaboration-tool').onclick = () => activatePane('collaboration');
 const playback = new EditorPlayback(audio, hitSounds, () => {
   timeline.origin = currentBeat();
+  for (const renderer of [preview, realtimePreview]) renderer.noisePreview.gpu?.reset();
   preview.effectsSince = realtimePreview.effectsSince = chartSeconds();
   invalidate();
 });
 timeline.onDragScroll = seconds => playback.seek(audio.time + seconds);
 const autoSave = new AutoSaveClock(async () => {
-  const current = session; const snapshot = { ...current.chart }; delete snapshot.chartTime;
+  const current = session; const document = current.chart; const snapshot = { ...document }; delete snapshot.chartTime;
   await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, [...assets], editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit, { lineIndex: current.lineIndex });
-  if (current === session) { lastDraftDocument = current.chart; status('自动备份已保存（包含音乐、曲绘与编辑位置）'); notify('自动备份已保存', 'success'); }
+  if (current === session) { lastDraftDocument = document; status('自动备份已保存（包含音乐、曲绘与编辑位置）'); notify('自动备份已保存', 'success'); }
 }, error => status(`自动保存失败：${error.message}，请手动保存或导出 PEZ`));
 timeline.onWheel = event => {
   if (event.ctrlKey) {
@@ -413,7 +440,7 @@ timeline.onWheel = event => {
       if (lineSwitcher.enabled) { lineSwitcher.step(event.deltaY); lineSwitcher.show(); }
       else switchLine(event.deltaY);
     }
-  } else playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed }, performance.now() / 1000);
+  } else previewWheel(event);
 };
 function switchLine(direction) {
   const index = stepLine(session.lineIndex, direction, session.chart.judgeLineList?.length ?? 0);
@@ -425,7 +452,7 @@ function selectOverviewLine(index) {
 }
 const previewWheel = event => {
   event.preventDefault();
-  playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed }, performance.now() / 1000);
+  playback.wheel(event, { ...preferences.settings, scrollSpeed: editorPreferences.scrollSpeed ?? preferences.settings.scrollSpeed, wheelStopAtAudioStart: editorPreferences.wheelStopAtAudioStart ?? preferences.settings.wheelStopAtAudioStart ?? true }, performance.now() / 1000);
 };
 element('.preview-wrap').addEventListener('wheel', previewWheel, { passive: false });
 const pickPreviewLine = (renderer, event) => {
@@ -435,6 +462,7 @@ const pickPreviewLine = (renderer, event) => {
 };
 element('#preview').addEventListener('click', event => {
   if (!preview.visible) return;
+  if (noiseTrackingPanel.sampling) { noiseTrackingPanel.pick(event); return; }
   const noiseIndex = preview.pickNoiseArea(event.clientX, event.clientY);
   if (Number.isInteger(noiseIndex)) {
     clearNoteSourceToast(); togglePreview(false, true); openNoisePanel(); noiseEditor.select(noiseIndex); noiseEditor.areaList.reveal(noiseIndex); return;
@@ -444,6 +472,7 @@ element('#preview').addEventListener('click', event => {
   pickPreviewLine(preview, event);
 });
 element('#preview').addEventListener('pointermove', event => {
+  if (noiseTrackingPanel.sampling) { clearNoteSourceToast(); return; }
   if (!preview.visible || (editorPreferences.noteSourceHover ?? preferences.settings.noteSourceHover ?? true) === false) { clearNoteSourceToast(); return; }
   const lineIndex = preview.pickNote(event.clientX, event.clientY);
   if (!Number.isInteger(lineIndex)) { clearNoteSourceToast(); return; }
@@ -477,6 +506,7 @@ const home = new ProjectHome(async id => {
 });
 
 function setHome(visible) {
+  if (visible && noiseTrackingPanel.sampling) noiseTrackingPanel.endSample();
   if (visible && collaboration.client.active) collaboration.client.leave();
   atHome = visible;
   if (visible) clearNoteSourceToast();
@@ -559,10 +589,14 @@ function persistEditor() {
 }
 
 function activatePane(name) {
+  if (name !== 'events' && eventSampler.active) eventSampler.finish(false);
   if (name !== 'multi') multiEdit.hide();
   if (name !== 'trajectory') trajectoryPanel.hide();
   if (name !== 'text-lines') textLinesPanel.hide();
+  if (name !== 'noise-fit') noiseFitPanel.hide();
+  if (name !== 'noise-tracking') noiseTrackingPanel.hide();
   activePaneName = name;
+  editorSkinState({ pane: name });
   noiseEditor.syncChrome();
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
@@ -685,6 +719,7 @@ function updateLineInfo() {
 }
 
 function renderSession() {
+  editorSkinState({ dirty: session.history.dirty || assetDirty, location: atHome ? 'home' : 'editor', mode: noiseEditor.active ? 'noise' : session.multiLineActive ? 'multi-' + session.multiLineMode : timeline.notesOnly ? 'notes' : 'notes-events' });
   const editor = element('.editor');
   noiseEditor.syncChrome();
   editor.classList.toggle('multi-notes', session.multiLineActive && session.multiLineMode === 'notes');
@@ -757,13 +792,14 @@ function renderSession() {
   if (activePaneName === 'diagnose') renderDiagnostics();
   if (activePaneName === 'history') renderHistoryPanel();
   if (activePaneName === 'multi') multiEdit.sync();
+  if (noiseTrackingPanel.active) noiseTrackingPanel.sync();
   if (activePaneName === 'multi-line') multiLinePanel.render();
   if (noiseEditor.active) noiseEditor.render();
   if (activePaneName === 'metadata') renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); });
-  if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); });
+  if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'));
   session.eventLayer = timeline.layer;
   renderProperties(session, reportError);
-  if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify);
+  if (!session.liveEventEdit) renderEventInspector(session, tempo, currentBeat, reportError, notify, eventSampler);
   if (session.eventSelection.size) {
     timeline.eventPlacementType = session.eventSelection.values().next().value.split(':')[0];
   }
@@ -783,6 +819,8 @@ function renderSession() {
     else if (multiEdit.committing) multiEdit.sync();
     else if (activePaneName === 'collaboration') collaboration.renderState();
     else if (textLinesPanel.active) textLinesPanel.sync();
+    else if (noiseFitPanel.active) noiseFitPanel.sync();
+    else if (noiseTrackingPanel.active) noiseTrackingPanel.sync();
     else if (trajectoryPanel.active && selectionCount !== 1) activatePane('trajectory');
     else if (curveEditorOpen) activatePane('curve');
     else if (activePaneName === 'clipboard') renderClipboardPanel();
@@ -808,7 +846,10 @@ session.addEventListener('change', renderSession);
 
 function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   assertChart(chart);
+  if (eventSampler.active) eventSampler.finish(false);
   noiseEditor.reset();
+  noiseFitPanel.reset();
+  noiseTrackingPanel.reset();
   if (!collaborationJoining && collaboration.client.active) collaboration.client.leave();
   lineSwitcher.reset();
   playback.pause(); audio.clear();
@@ -826,6 +867,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   autoSave.reset(performance.now());
   heldPreview = null; curveStart = null; curveEnd = null; curveAnchorMode = null; curveEditorOpen = false; loop = null; element('#loop-enabled').checked = false;
   assets = nextAssets;
+  for (const renderer of [preview, realtimePreview]) renderer.noisePreview.gpu?.clearSkins();
   assetFolders = new Set(nextFolders ?? []);
   assetDirty = false;
   chartName = name;
@@ -866,19 +908,53 @@ async function loadCandidate(candidate, nextAssets) {
   if (session.chart === candidate.chart && candidate.chart.rpeNextLegacySource?.format === 'phigros-v3') notify(`官谱转换完成：${candidate.chart.judgeLineList.length} 条判定线，${candidate.chart.blockAreaList?.length ?? 0} 个噪域`, 'success');
 }
 
-async function loadMusic(bytes, name, updateMetadata = true) {
+async function loadMusic(bytes, name, updateMetadata = true, recordHistory = true) {
   const chartPosition = chartSeconds();
   playback.pause();
   const loadingSession = session;
   const loaded = await audio.load(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), name);
-  if (!loaded || session !== loadingSession) return;
+  if (!loaded || session !== loadingSession) return false;
   audioAnalysis.setBuffer(audio.buffer);
   assets.set(name, bytes);
   element('#music-name').textContent = name;
   element('#scrubber').max = audio.duration;
   renderTimelineMarkers();
-  if (updateMetadata) session.commit('选择音乐', { ...session.chart, META: { ...session.chart.META, song: name } });
+  if (updateMetadata) {
+    assetDirty = true;
+    if (recordHistory) session.commit('选择音乐', { ...session.chart, META: { ...session.chart.META, song: name } });
+    else session.replaceMusicResource(name);
+  }
   playback.seek(chartPosition + offsetSeconds());
+  return true;
+}
+
+function prependAudioSilence() {
+  if (!audio.buffer) { notify('请先载入可解码的音乐', 'error'); return; }
+  const targetSession = session; const buffer = audio.buffer; const revision = audio.loadRevision;
+  const first = [...session.chart.BPMList].sort((left, right) => beatValue(left.startTime) - beatValue(right.startTime))[0];
+  const seconds = 240 / Number(first?.bpm);
+  if (!(seconds > 0 && Number.isFinite(seconds))) { notify('起始 BPM 无效', 'error'); return; }
+  showDialog('音频开头增加 4 拍空白？', `根据已应用的起始 BPM ${first.bpm}，增加 ${Number(seconds.toFixed(3))} 秒静音。将生成 WAV 音频并替换当前音乐；此操作不可撤销，谱面延迟保持不变，完成后需要保存。`);
+  const apply = element('#modal-apply'); apply.hidden = false; apply.textContent = '确认增加';
+  apply.onclick = async () => {
+    element('#modal').close();
+    const button = element('#audio-leading-silence'); button.disabled = true; button.textContent = '正在生成空白音频…';
+    const cancelled = () => session !== targetSession || audio.loadRevision !== revision;
+    try {
+      if (cancelled()) return;
+      playback.pause();
+      const wave = await pcmWave(buffer, cancelled, seconds);
+      if (!wave || cancelled()) return;
+      const bytes = new Uint8Array(await wave.arrayBuffer());
+      if (cancelled()) return;
+      const sourceName = resourceReferences(session.chart, assets, chartName).song || 'music';
+      const stem = sourceName.replaceAll('\\', '/').split('/').at(-1).replace(/\.[^.]+$/, '') + '-leading';
+      let name = stem + '.wav'; let suffix = 2;
+      while (assetBytes(assets, name, chartName)) name = `${stem}-${suffix++}.wav`;
+      if (await loadMusic(bytes, name, true, false)) notify('已增加 4 拍空白，谱面延迟未改变；请保存谱面', 'success');
+    } catch (error) { reportError(error); }
+    finally { button.disabled = false; button.textContent = '音频开头增加 4 拍空白'; invalidate(); }
+  };
 }
 
 function seekBeat(value, pause = true) {
@@ -894,6 +970,7 @@ async function togglePlayback() {
 
 function save() {
   noiseEditor.flush();
+  editorSkinSignal('save-started');
   const savingSession = session;
   return manualSaves.save(savingSession, () => {
     const document = session.chart; const snapshot = { ...document }; delete snapshot.chartTime;
@@ -909,8 +986,8 @@ function save() {
       || assetFolders.size !== project.assetFolders.length || project.assetFolders.some(folder => !assetFolders.has(folder));
     renderSession();
     const message = session.history.dirty || assetDirty ? '已保存开始保存时的版本；后续修改尚未保存' : '已保存到谱面库';
-    status(message); notify(message, 'success');
-  });
+    status(message); notify(message, 'success'); editorSkinSignal('save-succeeded');
+  }).catch(error => { editorSkinSignal('save-failed'); throw error; });
 }
 
 function validateCommit(label, next) { assertChart(next); session.commit(label, next); }
@@ -1085,6 +1162,14 @@ listen('#text-lines-tool', () => {
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; textLinesPanel.open();
 });
+listen('#noise-fit-tool', () => {
+  if (noiseEditor.active) noiseEditor.close();
+  timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; noiseFitPanel.open();
+});
+listen('#noise-tracking-tool', () => {
+  if (noiseEditor.active) noiseEditor.close();
+  timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); clearNoteSourceToast(); curveEditorOpen = false; noiseTrackingPanel.open();
+});
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
@@ -1153,7 +1238,8 @@ listen('#mirror', () => {
   else session.transformSelection('镜像音符', note => ({ ...note, positionX: -note.positionX }));
 });
 listen('#metadata', () => { activatePane('metadata'); renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); }); });
-listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor'), () => { activatePane('chart'); renderSession(); }); });
+listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor')); });
+listen('#audio-leading-silence', prependAudioSilence);
 listen('#assets', () => { activatePane('assets'); assetLibrary.render(); });
 listen('#audio-analysis-tool', () => {
   audioAnalysis.enabled = true; activatePane('audio-analysis'); audioAnalysis.render(element('#audio-analysis-panel')); audioAnalysis.draw(offsetSeconds()); persistEditor();
@@ -1351,6 +1437,8 @@ window.addEventListener('keydown', async event => {
   const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
   const hasSelection = noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
   const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
+  if (noiseFitPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+  if (noiseTrackingPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
   if (noiseEditor.active && (!preview.visible || noiseEditor.sampleMode)) {
     try { if (noiseEditor.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; } }
     catch (error) { event.preventDefault(); reportError(error); return; }
@@ -1369,7 +1457,7 @@ window.addEventListener('keydown', async event => {
     else if (action === 'Undo') travel('undo');
     else if (action === 'Redo') travel('redo');
     else if (action === 'SelectAll') {
-      if (session.focus === 'events') session.eventSelection = new Set(timeline.eventTypes.flatMap(type => eventList(session, type).map((event, index) => eventKey(type, index))));
+      if (session.focus === 'events') selectAllEvents(session, timeline.eventTypes);
       else if (session.multiLineActive && session.multiLineMode === 'notes') {
         session.multiLineSelection = new Map(session.targetLineIndices.map(lineIndex => [lineIndex, new Set((session.chart.judgeLineList?.[lineIndex]?.notes ?? []).map((note, index) => index))]));
         session.selection = new Set(session.multiLineSelection.get(session.lineIndex) ?? []);
@@ -1401,13 +1489,16 @@ window.addEventListener('keydown', async event => {
     else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place(undefined, undefined, undefined, action === 'AddTap');
     else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) handled = timeline.addAtCursor({ AddTap: 1, AddDrag: 4, AddFlick: 3, AddHold: 2 }[action]);
     else if (action === 'Delete') deleteSelection();
-    else if (action === 'QuickDelete' && session.selection.size + session.eventSelection.size + [...(session.multiLineSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) + [...(session.multiEventSelection?.values() ?? [])].reduce((sum, values) => sum + values.size, 0) > 1) deleteSelection();
-    else if (action === 'QuickDelete' && session.focus === 'events' && timeline.eventCursor) {
-      const hit = timeline.eventInteraction.hit(timeline.eventCursor);
-      if (hit) { session.eventSelection = new Set([eventKey(hit.type, hit.index)]); deleteEvents(session); }
-    } else if (action === 'QuickDelete' && timeline.cursor) {
-      const hit = timeline.hit(timeline.cursor);
-      if (hit) { if (session.multiLineActive && session.multiLineMode === 'notes') session.multiLineSelection.set(hit.lineIndex, new Set([hit.index])); session.selection = new Set([hit.index]); deleteSelection(); }
+    else if (action === 'QuickDelete') {
+      const selected = captureSelection(session);
+      if (selected.notes.length + selected.events.length > 1) deleteSelection();
+      else if (area === 'events' && timeline.eventCursor) {
+        const hit = timeline.eventInteraction.hit(timeline.eventCursor);
+        if (hit) { selectEvent(session, hit.lineIndex ?? session.lineIndex, hit.type, hit.index, { replace: true }); deleteEvents(session); }
+      } else if (area === 'notes' && timeline.cursor) {
+        const hit = timeline.hit(timeline.cursor);
+        if (hit) { if (session.multiLineActive && session.multiLineMode === 'notes') session.multiLineSelection = new Map([[hit.lineIndex, new Set([hit.index])]]); session.selection = new Set([hit.index]); deleteSelection(); }
+      }
     } else if (['LastBeat', 'NextBeat'].includes(action)) seekBeat(Math.max(0, currentBeat() + (action === 'LastBeat' ? -1 : 1) / timeline.division));
     else if (action === 'Esc') { session.clipboardVisible = false; session.selection.clear(); session.eventSelection.clear(); session.multiLineSelection?.clear(); session.multiEventSelection?.clear(); timeline.cancelPlacement(); curveAnchorMode = null; curveStart = null; curveEnd = null; curveEditorOpen = false; togglePreview(false); activatePane('chart'); session.notify(); }
     else handled = false;
@@ -1454,14 +1545,14 @@ function frame(timestamp) {
   if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
-  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
+  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active || noiseTrackingPanel.active && noiseTrackingPanel.animating || noiseFitPanel.active && noiseFitPanel.options.animate && noiseFitPanel.options.show && noiseFitPanel.previewChart && !noiseFitPanel.fullPreview) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
     frameSampleCount++;
     const start = performance.now();
     const beat = currentBeat();
     session.editSeconds = Math.max(0, chartSeconds());
     updateLineInfo();
     if (audio.playing) timeline.origin = beat;
-    if (!preview.visible && !noiseEditor.active) {
+    if (!preview.visible && !noiseEditor.active && !noiseFitPanel.active && !noiseTrackingPanel.previewing) {
       timeline.draw(beat);
       multiEdit.drawTimeline();
       selectionOverlay.draw();
@@ -1475,35 +1566,51 @@ function frame(timestamp) {
     const viewSession = timeline.getSession();
     const trajectoryView = trajectoryPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
     const noiseView = noiseEditor.active ? noiseEditor.previewState() : null;
+    const eventSampleView = eventSampler.previewState();
     const textView = textLinesPanel.view();
-    const viewChart = noiseView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
-    const viewSeconds = noiseView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds();
+    const noiseFitView = noiseFitPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
+    const trackingView = noiseTrackingPanel.tick(timestamp, chartSeconds(), audio.playing);
+    const viewChart = trackingView?.chart ?? noiseView?.chart ?? eventSampleView?.chart ?? noiseFitView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
+    const viewSeconds = trackingView?.seconds ?? noiseView?.seconds ?? eventSampleView?.seconds ?? noiseFitView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds();
     const previewAllLines = preview.allLines; const previewEffects = preview.showHitEffects;
     const previewNumbers = preview.lineNumbers; const previewArrows = preview.lineArrows;
-    if (textView) { preview.allLines = true; preview.showHitEffects = false; preview.lineNumbers = false; preview.lineArrows = false; }
+    const forcedLineOpacity = preview.forceLineOpacity;
+    preview.forceLineOpacity = Boolean(trackingView?.forceLineOpacity);
+    if (trackingView) { preview.allLines = true; preview.showHitEffects = false; }
+    if (textView || noiseFitView) { preview.allLines = true; preview.showHitEffects = false; preview.lineNumbers = false; preview.lineArrows = false; }
     preview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
     preview.allLines = previewAllLines; preview.showHitEffects = previewEffects;
     preview.lineNumbers = previewNumbers; preview.lineArrows = previewArrows;
+    preview.forceLineOpacity = forcedLineOpacity;
     if (!preview.visible) {
       const visible = realtimePreview.visible;
-      if (trajectoryView || textView || noiseEditor.sampleMode) realtimePreview.visible = true;
+      if (trackingView || trajectoryView || textView || noiseFitView || noiseEditor.sampleMode || eventSampler.active) realtimePreview.visible = true;
       element('#realtime-preview').hidden = !realtimePreview.visible;
       const opacity = realtimePreview.opacity;
       const allLines = realtimePreview.allLines;
       const lineNumbers = realtimePreview.lineNumbers; const lineArrows = realtimePreview.lineArrows;
-      if (textView) { realtimePreview.allLines = true; realtimePreview.lineNumbers = false; realtimePreview.lineArrows = false; }
-      if (noiseEditor.sampleMode) realtimePreview.opacity = 1;
+      const forcedLineOpacity = realtimePreview.forceLineOpacity;
+      realtimePreview.forceLineOpacity = Boolean(trackingView?.forceLineOpacity);
+      if (trackingView) realtimePreview.allLines = true;
+      if (textView || noiseFitView) { realtimePreview.allLines = true; realtimePreview.lineNumbers = false; realtimePreview.lineArrows = false; }
+      if (trackingView || noiseEditor.sampleMode || eventSampler.active || noiseFitView) realtimePreview.opacity = 1;
       realtimePreview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
       realtimePreview.opacity = opacity;
       realtimePreview.allLines = allLines;
       realtimePreview.lineNumbers = lineNumbers; realtimePreview.lineArrows = lineArrows;
+      realtimePreview.forceLineOpacity = forcedLineOpacity;
       realtimePreview.visible = visible;
     }
     noiseEditor.drawSample();
+    eventSampler.draw();
     element('#play').textContent = audio.playing ? 'Ⅱ 暂停' : '▶ 播放';
     element('#play').dataset.playing = String(audio.playing);
+    const skinBeat = Math.floor(beat);
+    if (audio.playing && document.documentElement.dataset.rpenBeat !== String(skinBeat)) editorSkinSignal('beat');
+    editorSkinState({ playing: audio.playing, beat: skinBeat, dirty: session.history.dirty || assetDirty, location: atHome ? 'home' : preview.visible ? 'preview' : 'editor' });
     element('#play').title = audio.playing ? '暂停' : '播放';
     element('#clock').textContent = `${chartSeconds().toFixed(3)} s`;
+    element('#beat-display').textContent = `${(Math.abs(beat) < 0.0005 ? 0 : beat).toFixed(3)} 拍`;
     element('#scrubber').value = audio.time;
     const tempoPoint = tempo.points[Math.max(0, upperBound(tempo.points, beat, point => point.beat) - 1)];
     element('#bpm-display').textContent = `${(60 / tempoPoint.secondsPerBeat).toFixed(2)} BPM`;
@@ -1643,6 +1750,11 @@ function applyDisplaySettings() {
   for (const renderer of [preview, realtimePreview]) for (const key of ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'pickPreviewNoiseAreas']) renderer[key] = editorPreferences[key] ?? true;
   for (const renderer of [preview, realtimePreview]) {
     renderer.noisePreview.seamless = editorPreferences.seamlessNoiseAreas ?? true;
+    if (renderer.noisePreview.forceSimple !== (editorPreferences.forceSimpleNoise ?? false)) renderer.noisePreview.gpu?.reset();
+    renderer.noisePreview.forceSimple = editorPreferences.forceSimpleNoise ?? false;
+    renderer.noisePreview.getAssets = () => assets;
+    renderer.noisePreview.invalidate = invalidate;
+    renderer.noisePreview.report = message => notify(message + '；暂用简易渲染', 'error');
   }
   const toolbarMode = editorPreferences.toolbarMode ?? 'icons';
   element('.editor-toolbar').classList.remove('mode-compact', 'mode-icons', 'mode-wide');
@@ -1652,6 +1764,7 @@ function applyDisplaySettings() {
   timeline.judgementColor = element('#judgement-color').value;
   timeline.eventValueFontSize = Number(element('#event-value-size').value); timeline.eventValueThreshold = Number(element('#event-value-threshold').value); timeline.eventCurveThreshold = Number(element('#event-curve-threshold').value); timeline.eventOpacity = Number(element('#event-opacity').value); timeline.eventBarWidth = Number(element('#event-bar-width').value);
   timeline.seamlessEvents = element('#seamless-events').checked;
+  timeline.drawEventCurves = element('#draw-event-curves').checked;
   session.cutDensity = Number(element('#event-cut-density').value);
   clipboardHistory.enabled = element('#clipboard-history-enabled').checked;
   lineSwitcher.enabled = element('#line-switcher-enabled').checked;

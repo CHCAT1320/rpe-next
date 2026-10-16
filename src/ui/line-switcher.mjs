@@ -1,6 +1,7 @@
 import { lineOverviewWindow, lineOverviewLayout, stepOverviewLine, LineOverviewIndex } from '../core/line-overview.mjs';
 import { shaderEvents } from '../core/shader-events.mjs';
 import { NOTE_COLORS } from './timeline.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 import { isDefaultLineGroup, isDefaultLineName, lineFeatureLabels, lineGroupName } from '../core/line-groups.mjs';
 
 export class LineSwitcher {
@@ -191,7 +192,7 @@ export class LineSwitcher {
 }
 
 export function drawLineThumbnail(canvas, sample, seconds, start, end) {
-  const context = canvas.getContext('2d'); const width = canvas.width; const height = canvas.height;
+  const context = editorSkinContext(canvas.getContext('2d')); const width = canvas.width; const height = canvas.height;
   const vertical = time => height - 5 - (time - start) / Math.max(0.01, end - start) * (height - 10);
   context.clearRect(0, 0, width, height); context.fillStyle = '#303030'; context.fillRect(0, 0, width, height);
   context.strokeStyle = '#555555'; context.lineWidth = 1;

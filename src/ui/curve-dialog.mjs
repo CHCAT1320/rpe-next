@@ -2,6 +2,7 @@ import { generateCurveNotes } from '../core/curve-notes.mjs';
 import { beatValue, formatBeat, parseBeat } from '../core/beat.mjs';
 import { showDialog } from './dialog.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 
 export function curveDialog(session, division, anchors = []) {
   if (!session.line) throw new Error('请先添加判定线');
@@ -35,7 +36,7 @@ export function curveDialog(session, division, anchors = []) {
     return { ...values, division };
   };
   const refresh = () => {
-    const context = canvas.getContext('2d'); context.clearRect(0, 0, canvas.width, canvas.height);
+    const context = editorSkinContext(canvas.getContext('2d'), 'curve'); context.clearRect(0, 0, canvas.width, canvas.height);
     picture.src = assetUrl(`easing/${controls.easingType.value}.svg`);
     try {
       const values = read(); const notes = generateCurveNotes(values);

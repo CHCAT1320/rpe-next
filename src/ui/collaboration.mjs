@@ -8,6 +8,7 @@ import { eventListAt } from '../application/event-commands.mjs';
 import { isTextEntry, usesNativeTextShortcut } from './keyboard.mjs';
 import { download } from '../platform/files.mjs';
 import { collaborationMarkerPosition, collaborationLabelBackground } from './collaboration-display.mjs';
+import { editorSkinState, editorSkinSignal } from './editor-skin-state.mjs';
 
 const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
 const button = (text, run) => { const element = node('button', text); element.type = 'button'; element.onclick = run; return element; };
@@ -16,10 +17,15 @@ const hash = digestBytes;
 
 export class CollaborationPanel {
   constructor(host, context, { receiveChart, receiveAsset, notify, activate, confirmJoin }) {
+    editorSkinState({ collaboration: 'offline' });
     this.host = host; this.context = context; this.receiveAsset = receiveAsset; this.notify = notify; this.activate = activate; this.confirmJoin = confirmJoin;
     this.transfers = new Map(); this.transport = new CollaborationTransport();
     this.client = new CollaborationClient(this.transport, { session: () => context().session, receiveChart, notify, interactionBusy: () => Boolean(context().timeline.drag || context().timeline.eventInteraction.drag || context().interactionBusy) });
-    this.client.addEventListener('change', () => this.renderState());
+    this.client.addEventListener('change', () => {
+      const state = this.client.ready ? 'ready' : this.client.active ? 'connecting' : 'offline';
+      if (state !== document.documentElement.dataset.rpenCollaboration) editorSkinSignal('collaboration-changed');
+      editorSkinState({ collaboration: state }); this.renderState();
+    });
     this.client.addEventListener('asset', event => this.asset(event.detail).catch(error => notify(error.message, 'warning')));
     this.client.addEventListener('asset-manifest', event => {
       if (!this.acceptAssets.checked) return;

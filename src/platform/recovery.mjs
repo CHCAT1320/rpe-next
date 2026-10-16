@@ -1,3 +1,5 @@
+import { transferSnapshot } from './recovery-transfer.mjs';
+
 function database() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open('rpe-next-recovery', 2);
@@ -37,10 +39,18 @@ export function saveDraft(id, name, chart) {
   });
 }
 
-export async function saveSnapshot(projectId, name, chart, assets, limit = 10, viewState = {}) {
+export function saveSnapshot(projectId, name, chart, assets, limit = 10, viewState = {}) {
+  if (typeof Worker === 'undefined') return saveSnapshotDirect(projectId, name, chart, assets, limit, viewState);
+  try {
+    const worker = new Worker(new URL('./recovery-worker.mjs', import.meta.url), { type: 'module' });
+    return transferSnapshot(worker, [projectId, name, chart, assets, limit, viewState]);
+  } catch (error) { return Promise.reject(error); }
+}
+
+export async function saveSnapshotDirect(projectId, name, chart, assets, limit = 10, viewState = {}) {
   const connection = await database();
   return new Promise((resolve, reject) => {
-    const operation = connection.transaction(['drafts', 'summaries'], 'readwrite'); const store = operation.objectStore('drafts');
+    const operation = connection.transaction(['drafts', 'summaries'], 'readwrite', { durability: 'strict' }); const store = operation.objectStore('drafts');
     const summaries = operation.objectStore('summaries');
     const request = summaries.index('projectId').getAll(projectId);
     request.onsuccess = () => {
@@ -50,7 +60,7 @@ export async function saveSnapshot(projectId, name, chart, assets, limit = 10, v
       store.put(draft); summaries.put(summary(draft));
     };
     operation.oncomplete = () => { connection.close(); resolve(); };
-    operation.onabort = operation.onerror = () => { connection.close(); reject(operation.error); };
+    operation.onabort = operation.onerror = () => { connection.close(); reject(operation.error ?? new Error('恢复备份写入已中止')); };
   });
 }
 

@@ -1,8 +1,9 @@
 import { beatValue, fromNumber } from '../core/beat.mjs';
-import { eventKey, eventList, eventListAt, selectedEvents, transformEvents, placedEvent, insertEventAt } from '../application/event-commands.mjs';
+import { eventKey, eventList, eventListAt, selectedEvents, selectEvent, transformEvents, placedEvent, insertEventAt } from '../application/event-commands.mjs';
 import { strokeIntersects } from '../core/editor-display.mjs';
 import { shaderEventLanes } from '../core/shader-events.mjs';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.mjs';
+import { eventDisplayIndex } from './event-display-index.mjs';
 
 export class EventInteraction {
   constructor(timeline, reportError) {
@@ -81,19 +82,7 @@ export class EventInteraction {
     } else if (multiPanel && (!rectangle && !this.timeline.tool)) this.drag = { kind: 'multi-pan', start: point, current: point };
     else if (!multiMode && (event.shiftKey || event.button === 1)) this.drag = { kind: 'rectangle', area: 'events', start: point, startFactor: this.timeline.factorForLine(session.lineIndex), startSeconds: this.timeline.timeAt(point.y), current: point, append: true, remove: false };
     else if (rectangle && event.button === 0) {
-      const key = eventKey(rectangle.type, rectangle.index);
-      let selectedSet = session.eventSelection;
-      if (session.multiLineActive && session.multiLineMode === 'events' && session.multiEventSelection) {
-        const selected = new Set(session.multiEventSelection.get(rectangle.lineIndex) ?? []);
-        if (event.ctrlKey) { if (selected.has(key)) selected.delete(key); else selected.add(key); }
-        else if (!selected.has(key)) { selected.clear(); selected.add(key); }
-        session.multiEventSelection.set(rectangle.lineIndex, selected);
-        selectedSet = selected;
-        if (rectangle.lineIndex === session.lineIndex) session.eventSelection = new Set(selected);
-      } else {
-        if (event.ctrlKey) { if (session.eventSelection.has(key)) session.eventSelection.delete(key); else session.eventSelection.add(key); }
-        else if (!session.eventSelection.has(key)) session.eventSelection = new Set([key]);
-      }
+      selectEvent(session, rectangle.lineIndex ?? session.lineIndex, rectangle.type, rectangle.index, { toggle: event.ctrlKey });
       const kind = Math.abs(point.y - rectangle.y) < 6 ? 'endTime' : Math.abs(point.y - (rectangle.y + rectangle.height)) < 6 ? 'startTime' : 'move';
       const selected = eventListAt(session, rectangle.lineIndex ?? session.lineIndex, rectangle.type)?.[rectangle.index];
       this.drag = { kind, type: rectangle.type, lineIndex: rectangle.lineIndex, start: point, current: point, anchor: selected?.[kind === 'endTime' ? 'endTime' : 'startTime'], originSeconds: this.timeline.tempo.seconds(this.timeline.origin, this.timeline.factorForLine(rectangle.lineIndex ?? session.lineIndex)) };
@@ -149,15 +138,22 @@ export class EventInteraction {
         const [bottom, top] = this.timeline.rectangleTimes(drag);
         const left = Math.min(drag.startWorldX ?? drag.start.x, drag.currentWorldX ?? drag.current.x); const right = Math.max(drag.startWorldX ?? drag.start.x, drag.currentWorldX ?? drag.current.x);
         if (session.multiLineActive && session.multiLineMode === 'events') {
-          for (const rectangle of this.timeline.eventRects) {
-            const scroll = this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-            if (rectangle.x + scroll >= right || rectangle.x + rectangle.width + scroll <= left) continue;
-            const item = eventListAt(session, rectangle.lineIndex, rectangle.type)[rectangle.index];
-            const selected = rectangle.lineIndex === session.lineIndex ? session.eventSelection : (session.multiEventSelection?.get(rectangle.lineIndex) ?? new Set());
-            if (!item || beatValue(item.startTime) > top || beatValue(item.endTime) < bottom) continue;
-            const key = eventKey(rectangle.type, rectangle.index); drag.remove ? selected.delete(key) : selected.add(key);
-            if (rectangle.lineIndex === session.lineIndex) session.eventSelection = selected;
-            if (session.multiEventSelection) session.multiEventSelection.set(rectangle.lineIndex, selected);
+          // Query chart intervals, so horizontal/vertical panning during a marquee retains offscreen objects.
+          const panelWidth = this.timeline.panelWidth(this.canvas.clientWidth, 'events');
+          const stride = this.timeline.panelStride(this.canvas.clientWidth, 'events');
+          for (const lineIndex of session.targetLineIndices) {
+            const offset = this.timeline.panelIndex(lineIndex, 'events') * stride;
+            const selected = lineIndex === session.lineIndex ? session.eventSelection : (session.multiEventSelection?.get(lineIndex) ?? new Set());
+            this.timeline.eventTypes.forEach((type, channel) => {
+              const bounds = this.timeline.eventColumnBounds(channel, panelWidth);
+              if (offset + bounds.x >= right || offset + bounds.x + bounds.width <= left) return;
+              const display = eventDisplayIndex(this.timeline, eventListAt(session, lineIndex, type), session.chart);
+              for (const entry of display.index.query(bottom, top)) {
+                const key = eventKey(type, entry.index); drag.remove ? selected.delete(key) : selected.add(key);
+              }
+            });
+            if (lineIndex === session.lineIndex) session.eventSelection = selected;
+            if (session.multiEventSelection) session.multiEventSelection.set(lineIndex, selected);
           }
           session.notify(); this.timeline.changed(); return;
         }

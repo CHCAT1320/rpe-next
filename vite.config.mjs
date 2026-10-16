@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { defineConfig } from 'vite';
 
 // GitHub Pages publishes the site under /rpe-next/; every other target (local preview and the
@@ -35,6 +37,37 @@ function distributionExtras(root) {
   };
 }
 
+// The built-in editor and noise skins live in the repository-root `assets/` directory and are
+// resolved at runtime through `assetUrl()` (see src/core/asset-url.mjs), so they cannot be
+// bundled or content-hashed. publicDir only mirrors `public/assets`, which holds the legacy RPE
+// resources, so copy these skin packages into dist/assets/ to keep every built target — local
+// preview, GitHub Pages and the Electron package — able to load them.
+function skinAssets(root) {
+  const directories = ['editor-skins', 'noise-skins'];
+  const walk = async directory => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const files = await Promise.all(entries.map(entry => {
+      const path = join(directory, entry.name);
+      return entry.isDirectory() ? walk(path) : [path];
+    }));
+    return files.flat();
+  };
+  return {
+    name: 'rpe-skin-assets',
+    apply: 'build',
+    async buildStart() {
+      const assetsRoot = join(root, 'assets');
+      for (const name of directories) {
+        if (!existsSync(join(assetsRoot, name))) continue;
+        for (const file of await walk(join(assetsRoot, name))) {
+          const emitted = relative(assetsRoot, file).split(sep).join('/');
+          this.emitFile({ type: 'asset', fileName: `assets/${emitted}`, source: await readFile(file) });
+        }
+      }
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
   base: base(mode),
   // Static resources live in public/assets and are copied to dist/ verbatim, because the editor
@@ -44,7 +77,7 @@ export default defineConfig(({ mode }) => ({
   // The editor is a single document with no client-side routing, so unknown paths must 404
   // instead of falling back to index.html — that keeps the smoke test's asset checks meaningful.
   appType: 'mpa',
-  plugins: [distributionExtras(import.meta.dirname), appVersion(import.meta.dirname)],
+  plugins: [distributionExtras(import.meta.dirname), skinAssets(import.meta.dirname), appVersion(import.meta.dirname)],
   build: {
     outDir: 'dist',
     emptyOutDir: true,

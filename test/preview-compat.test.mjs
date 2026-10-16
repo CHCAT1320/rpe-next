@@ -45,6 +45,22 @@ test('编辑背景的不透明度不会被连续绘制覆盖，模糊修改在�
   assert.equal(context.calls.filter(call => call.method === 'drawImage').at(-1).filter, 'none');
 });
 
+test('追踪取样临时强制判定线不透明，绘制和取样不修改谱面且关闭后恢复', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); const line = chart.judgeLineList[0];
+  line.eventLayers[0].alphaEvents[0].start = line.eventLayers[0].alphaEvents[0].end = 0;
+  const preview = new Preview(previewSurface().canvas); const samples = [];
+  Object.assign(preview, { visible: true, applyShaders: false, showHitEffects: false });
+  preview.drawLine = (context, entry, state) => samples.push(state.alpha);
+  const tempo = new TempoMap(chart.BPMList);
+  preview.draw(chart, tempo, 0, 0); assert.deepEqual(samples, []);
+  preview.forceLineOpacity = true; preview.draw(chart, tempo, 0, 0);
+  assert.deepEqual(samples, [255]); assert.equal(preview.guides[0].alpha, 255);
+  assert.equal(line.eventLayers[0].alphaEvents[0].start, 0);
+  preview.forceLineOpacity = false; preview.draw(chart, tempo, 0, 0);
+  assert.deepEqual(samples, [255]); assert.equal(preview.guides[0].alpha, 0);
+});
+
 test('背景预览跳过 Tap 与 Hold 打击特效生成，正常预览仍生成特效', () => {
   globalThis.devicePixelRatio = 1;
   const chart = createChart(); chart.judgeLineList[0].notes = [createNote(1, 0, 0), createNote(2, 0, 0, 4)];

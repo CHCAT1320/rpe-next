@@ -4,6 +4,7 @@ node_modules/
 *.log
 docs/
 .local-tools/
+examples/editor-skins/daybreak/
 .env
 .env.*
 *.pem

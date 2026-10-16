@@ -126,20 +126,74 @@ test('首尾相接的 shader 保持完整宽度，只有真正重叠时分栏且
   assert.deepEqual([...layout.values()], [{ lane: 0, count: 2 }, { lane: 1, count: 2 }, { lane: 0, count: 1 }]);
 });
 
-test('shader 使用相同的不透明背景底色，成功时替换原画面、失败及结束时恢复', () => {
+test('shader 使用相同的不透明底色，第一层写回场景，第二层替换最终画面', () => {
   globalThis.devicePixelRatio = 1;
   const chart = createChart(); chart.effects = [effect()];
   const context = recordingContext(); const surface = canvas(context); const preview = new Preview(surface);
   preview.visible = true; preview.images = { background: { naturalWidth: 1350, naturalHeight: 900 } };
   preview.shaderRuntime.load = () => {}; preview.shaderPipeline.render = () => true;
+  preview.shaderCanvas = { style: {} };
   const tempo = new TempoMap(chart.BPMList); preview.draw(chart, tempo, 0, 0);
   const fill = context.calls.findIndex(call => call.method === 'fillRect' && call.color === '#111');
   const background = context.calls.findIndex(call => call.method === 'drawImage');
   assert.ok(fill >= 0 && fill < background); assert.equal(context.calls[fill].alpha, 1);
-  assert.equal(context.calls[background].alpha, 0.35); assert.equal(surface.style.opacity, '0');
-  preview.shaderPipeline.render = () => false; preview.draw(chart, tempo, 0, 0); assert.equal(surface.style.opacity, '1');
-  preview.shaderPipeline.render = () => true; preview.draw(chart, tempo, 3, 0); assert.equal(surface.style.opacity, '1');
+  assert.equal(context.calls[background].alpha, 0.35); assert.equal(surface.style.opacity, '1');
+  assert.ok(context.calls.some(call => call.method === 'drawImage' && call.args[0] === preview.shaderCanvas));
+  const globalChart = { ...chart, effects: [{ ...chart.effects[0], global: true }] };
+  preview.draw(globalChart, tempo, 0, 0); assert.equal(surface.style.opacity, '0');
+  preview.shaderPipeline.render = () => false; preview.draw(globalChart, tempo, 0, 0); assert.equal(surface.style.opacity, '1');
+  preview.shaderPipeline.render = () => true; preview.draw(globalChart, tempo, 3, 0); assert.equal(surface.style.opacity, '1');
   context.calls.length = 0; preview.applyShaders = false; preview.draw(chart, tempo, 0, 0);
+  assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
+});
+
+test('场景、第一层 shader、UI、全部噪域、第二层 shader 依次合成，阶段优先于 order', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); chart.META.name = 'stage-ui';
+  chart.effects = [{ ...effect('noise'), global: true, order: -100 }, { ...effect('grayscale'), order: 100 }];
+  const context = recordingContext(); const preview = new Preview(canvas(context)); const sequence = [];
+  preview.visible = true; preview.showGameUI = true; preview.shaderCanvas = { style: {} }; preview.shaderRuntime.load = () => {};
+  preview.shaderPipeline.render = (source, target, passes) => {
+    if (!passes[0].global) {
+      assert.ok(context.calls.some(call => call.method === 'fillRect' && call.color !== '#111'));
+      assert.ok(!context.calls.some(call => call.method === 'fillText' && call.args[0] === 'stage-ui'));
+      sequence.push('first');
+    } else { assert.deepEqual(sequence, ['first', 'noise']); sequence.push('second'); }
+    return true;
+  };
+  preview.noisePreview.draw = () => {
+    assert.ok(context.calls.some(call => call.method === 'drawImage' && call.args[0] === preview.shaderCanvas));
+    assert.ok(context.calls.some(call => call.method === 'fillText' && call.args[0] === 'stage-ui'));
+    sequence.push('noise');
+  };
+  preview.draw(chart, new TempoMap(chart.BPMList), 0, 0);
+  assert.deepEqual(sequence, ['first', 'noise', 'second']);
+  sequence.length = 0; context.calls.length = 0;
+  preview.shaderPipeline.render = () => false;
+  preview.noisePreview.draw = () => {
+    assert.ok(context.calls.some(call => call.method === 'fillText' && call.args[0] === 'stage-ui'));
+    sequence.push('noise');
+  };
+  preview.draw(chart, preview.scene.tempo, 0, 0);
+  assert.deepEqual(sequence, ['noise']); assert.equal(preview.canvas.style.opacity, '1');
+});
+
+test('编辑背景预览给可见皮肤提供不透明场景，隐藏皮肤或简易渲染时恢复透明底', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(); chart.noiseAreaLayers = [{ id: 'default', name: '默认层' }, { id: 'water', name: '水面', skin: 'shader/Water' }];
+  const context = recordingContext(); const preview = new Preview(canvas(context));
+  preview.visible = true; preview.applyShaders = false; preview.noisePreview.draw = () => {};
+  const tempo = new TempoMap(chart.BPMList);
+  preview.draw(chart, tempo, 0, 0);
+  assert.ok(context.calls.some(call => call.method === 'fillRect' && call.color === '#111' && call.alpha === 1));
+  context.calls.length = 0; preview.noisePreview.hiddenLayers = new Set(['water']);
+  preview.draw(chart, tempo, 0, 0);
+  assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
+  context.calls.length = 0; preview.noisePreview.hiddenLayers.clear(); preview.noisePreview.simpleLayers = new Set(['water']);
+  preview.draw(chart, tempo, 0, 0);
+  assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
+  context.calls.length = 0; preview.noisePreview.simpleLayers.clear(); preview.noisePreview.forceSimple = true;
+  preview.draw(chart, tempo, 0, 0);
   assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
 });
 

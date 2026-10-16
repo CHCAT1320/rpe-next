@@ -1,8 +1,10 @@
 const yieldEncoding = () => globalThis.scheduler?.yield ? globalThis.scheduler.yield() : new Promise(resolve => setTimeout(resolve, 0));
 
-export async function pcmWave(buffer, cancelled = () => false) {
+export async function pcmWave(buffer, cancelled = () => false, leadingSeconds = 0) {
   const channels = buffer.numberOfChannels;
-  const dataSize = buffer.length * channels * 4;
+  const leadingFrames = Math.max(0, Math.round(Number(leadingSeconds) * buffer.sampleRate));
+  const totalFrames = leadingFrames + buffer.length;
+  const dataSize = totalFrames * channels * 4;
   if (!Number.isSafeInteger(dataSize) || dataSize > 0xffffffff - 36 || channels < 1) throw new Error('音频大小超出 PCM 播放缓存限制');
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
@@ -13,13 +15,14 @@ export async function pcmWave(buffer, cancelled = () => false) {
   view.setUint16(32, channels * 4, true); view.setUint16(34, 32, true); text(36, 'data'); view.setUint32(40, dataSize, true);
   const samples = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
   const parts = [new Blob([header])];
-  for (let start = 0; start < buffer.length; start += 65536) {
+  for (let start = 0; start < totalFrames; start += 65536) {
     if (cancelled()) return null;
-    const count = Math.min(65536, buffer.length - start);
+    const count = Math.min(65536, totalFrames - start);
     const chunk = new ArrayBuffer(count * channels * 4);
     const output = new DataView(chunk);
     for (let frame = 0; frame < count; frame++) {
-      for (let channel = 0; channel < channels; channel++) output.setFloat32((frame * channels + channel) * 4, samples[channel][start + frame], true);
+      const sourceFrame = start + frame - leadingFrames;
+      for (let channel = 0; channel < channels; channel++) output.setFloat32((frame * channels + channel) * 4, sourceFrame < 0 ? 0 : samples[channel][sourceFrame], true);
     }
     parts.push(new Blob([chunk]));
     await yieldEncoding();

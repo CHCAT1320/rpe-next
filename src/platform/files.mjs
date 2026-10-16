@@ -116,6 +116,7 @@ export function legacyChart(chart, splitSettings = {}) {
   const next = structuredClone(chart);
   delete next.blockAreaList;
   delete next.noiseAreaOptions;
+  delete next.noiseAreaLayers;
   if (next.META.RPEVersion >= 200) next.META = { ...next.META, RPEVersion: 170 };
   const tempo = new TempoMap(next.BPMList);
   for (const line of next.judgeLineList ?? []) {

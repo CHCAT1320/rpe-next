@@ -49,6 +49,7 @@ export function renderProperties(session, reportError) {
     const beatDuration = duration && session.visibleTimeUnit === 'beats';
     const input = document.createElement(kind === 'select' ? 'select' : 'input');
     input.setAttribute('aria-label', labelText);
+    input.dataset.rpenField = key; label.dataset.rpenField = key;
     if (kind === 'select') for (const [value, title] of Object.entries(options)) {
       const option = document.createElement('option'); option.value = value; option.textContent = title; input.append(option);
     }

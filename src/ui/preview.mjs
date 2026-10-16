@@ -10,6 +10,7 @@ import { ShaderRuntime } from '../core/shader.mjs';
 import { ShaderPipeline } from './shader-pipeline.mjs';
 import { PreviewBackground, textureInViewport } from './preview-background.mjs';
 import { NoisePreview } from './noise-preview.mjs';
+import { noiseLayers } from '../core/noise-skin.mjs';
 
 const clamp = value => Math.max(0, Math.min(1, value));
 
@@ -42,7 +43,9 @@ export class Preview {
     const divisor = this.viewDivisor ?? 1;
     const scale = viewport.scale / divisor;
     context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
-    if (this.applyShaders) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
+    const skinScene = noiseLayers(chart).some(layer => this.noisePreview.usesSkin(layer));
+    // Screen-sampling skins preserve scene alpha, so supply the same opaque base as shaders.
+    if (this.applyShaders || skinScene) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
     let background = this.images?.background;
     if (background && this.images.texture) background = this.images.texture(this.images.backgroundName, Math.max(1350 / background.naturalWidth, 900 / background.naturalHeight) * scale * (devicePixelRatio || 1)) ?? background;
     if (background) {
@@ -51,14 +54,13 @@ export class Preview {
       context.globalAlpha = 1;
     } else this.backgroundFrame.clear();
     const states = this.scene.sample(seconds);
-    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea);
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.viewport = viewport; this.selectedLine = selectedLine;
-    this.guides = lineGuides(states, chart.judgeLineList, order, width, height, scale);
+    this.guides = lineGuides(this.forceLineOpacity ? states.map(state => ({ ...state, alpha: 255 })) : states, chart.judgeLineList, order, width, height, scale);
     const visibleNotes = new Map(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index], 1600 * divisor + Math.hypot(states[index]?.x ?? 0, states[index]?.y ?? 0)) ?? []]));
     this.noteHitAreas = [];
     for (const pass of this.passes) for (const index of pass.kind === 'line' ? [pass.index] : order) {
-      if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || chart.judgeLineList[index].attachUI || states[index].alpha <= 0 || states[index].scaleX === 0 || states[index].scaleY === 0)) continue;
+      if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || !this.forceLineOpacity && (chart.judgeLineList[index].attachUI || states[index].alpha <= 0) || states[index].scaleX === 0 || states[index].scaleY === 0)) continue;
       const runtime = this.scene.lines[index];
       const state = states[index];
       if (!runtime) continue;
@@ -71,7 +73,7 @@ export class Preview {
       context.save();
       context.translate(width / 2 + state.x * scale, height / 2 - state.y * scale);
       context.rotate(state.rotation * Math.PI / 180);
-      if (pass.kind === 'line') this.drawLine(context, runtime.line, this.lineTint && index === selectedLine ? { ...state, color: [0, 200, 0] } : state, scale);
+      if (pass.kind === 'line') this.drawLine(context, runtime.line, { ...state, ...(this.forceLineOpacity ? { alpha: 255 } : {}), ...(this.lineTint && index === selectedLine ? { color: [0, 200, 0] } : {}) }, scale);
       else for (const entry of visibleNotes.get(index)) {
         const note = entry.note;
         if ((note.type === 2) !== (pass.kind === 'hold')) continue;
@@ -84,10 +86,10 @@ export class Preview {
         const worldY = -state.y + position.x * Math.sin(rotation) - position.y * Math.cos(rotation);
         const screenX = width / 2 + worldX * scale;
         const screenY = height / 2 + worldY * scale;
-        const tail = Number.isFinite(position.tail) ? position.tail : position.y;
+        const tail = note.type === 2 && Number.isFinite(position.tail) ? position.tail : position.y;
         const tailWorldX = state.x + position.x * Math.cos(rotation) + tail * Math.sin(rotation);
         const tailWorldY = -state.y + position.x * Math.sin(rotation) - tail * Math.cos(rotation);
-        this.noteHitAreas.push({ lineIndex: index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
+        this.noteHitAreas.push({ lineIndex: index, noteIndex: entry.index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
         context.save();
         context.globalAlpha = clamp(position.alpha);
         const tint = note.tint ?? note.color;
@@ -136,32 +138,24 @@ export class Preview {
       }
     }
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
-    const globalShader = shaderEffects.some(effect => effect.global);
-    if (!shaderEffects.length && this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
-    if (!shaderEffects.length) this.drawGuides(context, scale, selectedLine);
-    if (globalShader) {
-      if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
-      this.drawGuides(context, scale, selectedLine);
+    const localEffects = shaderEffects.filter(effect => !effect.global);
+    const globalEffects = shaderEffects.filter(effect => effect.global);
+    const renderShaders = effects => effects.length > 0 && this.shaderPipeline.render(this.canvas, this.shaderCanvas, effects, seconds, effect => this.shaderRuntime.source(effect.shader, effect.sourceName), viewport);
+    // Scene → local effects → game UI → noise layers → global effects.
+    if (renderShaders(localEffects)) {
+      context.clearRect(viewport.left, viewport.top, viewport.width, viewport.height);
+      context.drawImage(this.shaderCanvas, 0, 0, width, height);
     }
+    if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
+    this.drawGuides(context, scale, selectedLine);
+    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea, viewport);
+    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
     context.restore();
-    let shaderRendered = false;
-    if (shaderEffects.length) {
-      shaderRendered = this.shaderPipeline.render(this.canvas, this.shaderCanvas, shaderEffects, seconds, effect => this.shaderRuntime.source(effect.shader, effect.sourceName), viewport);
-      if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
-    } else if (this.shaderCanvas) this.shaderCanvas.style.visibility = 'hidden';
+    const shaderRendered = renderShaders(globalEffects);
+    if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
+    if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
     if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : String(clamp(this.opacity));
     for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer) layer.style.opacity = String(clamp(this.opacity));
-    if (!shaderRendered && shaderEffects.length && !globalShader) {
-      context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
-      if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
-      this.drawGuides(context, scale, selectedLine); context.restore();
-    }
-    if (shaderRendered && !globalShader && this.overlayCanvas) {
-      const overlay = prepareCanvas(this.overlayCanvas); const overlayContext = overlay.context; overlayContext.clearRect(0, 0, overlay.width, overlay.height);
-      if (this.showGameUI) drawGameUi(overlayContext, chart, states, this.completionTimes, seconds, selectedLine, viewport, scale, this.skin, this.duration ?? 600);
-      this.drawGuides(overlayContext, scale, selectedLine);
-      this.overlayCanvas.style.visibility = 'visible';
-    } else if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
     this.images?.trim?.();
   }
 
@@ -184,6 +178,10 @@ export class Preview {
   }
 
   pickNote(clientX, clientY) {
+    return this.pickNoteTarget(clientX, clientY)?.lineIndex ?? null;
+  }
+
+  pickNoteTarget(clientX, clientY) {
     if (!this.visible || !this.noteHitAreas?.length) return null;
     const rectangle = this.canvas.getBoundingClientRect();
     const point = { x: clientX - rectangle.left, y: clientY - rectangle.top };
@@ -193,11 +191,13 @@ export class Preview {
       const amount = length ? Math.max(0, Math.min(1, ((point.x - area.x1) * dx + (point.y - area.y1) * dy) / length)) : 0;
       return Math.hypot(point.x - (area.x1 + amount * dx), point.y - (area.y1 + amount * dy));
     };
-    return this.noteHitAreas.slice().reverse().find(area => distanceToSegment(area) <= area.radius)?.lineIndex ?? null;
+    const view = this.viewport;
+    if (view && (point.x < view.left || point.x > view.left + view.width || point.y < view.top || point.y > view.top + view.height)) return null;
+    const area = this.noteHitAreas.slice().reverse().find(area => distanceToSegment(area) <= area.radius);
+    return area ? { lineIndex: area.lineIndex, noteIndex: area.noteIndex } : null;
   }
 
   drawGuides(context, scale, selectedLine) {
-    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
     if (!this.lineNumbers && !this.lineArrows) return;
     for (const group of mergeGuides(this.guides, scale, this.mergeLineNumbers)) {
       context.save(); context.translate(group.x, group.y); context.rotate(group.rotation * Math.PI / 180);

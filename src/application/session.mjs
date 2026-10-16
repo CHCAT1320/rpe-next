@@ -95,6 +95,22 @@ export class EditorSession extends EventTarget {
 
   selectionState() { return selectionState(this); }
 
+  replaceMusicResource(name) {
+    const previous = this.chart.META.song;
+    const replacements = new Map();
+    const replace = chart => {
+      if (!chart || chart.META.song !== previous) return chart;
+      if (!replacements.has(chart)) replacements.set(chart, { ...chart, META: { ...chart.META, song: name } });
+      return replacements.get(chart);
+    };
+    if (this.collaboration) return this.collaboration.commit('更换音乐资源', replace(this.chart), { recordHistory: false });
+    this.history.document = replace(this.chart);
+    for (const command of [...this.history.undoStack, ...this.history.redoStack]) {
+      command.before = replace(command.before); command.after = replace(command.after);
+    }
+    this.notify();
+  }
+
   commit(label, chart, beforeSelection = this.selectionState()) {
     chart = integerChartAlpha(chart, this.chart);
     if (this.collaboration) return this.collaboration.commit(label, chart, beforeSelection);

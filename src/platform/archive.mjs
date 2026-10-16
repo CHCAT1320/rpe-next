@@ -19,7 +19,7 @@ function checkPath(name) {
   }
 }
 
-export async function readZip(buffer) {
+export async function readZip(buffer, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity } = {}) {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let trailer = -1;
@@ -28,9 +28,10 @@ export async function readZip(buffer) {
   }
   if (trailer < 0) throw new Error('无效 ZIP/PEZ 目录');
   const count = view.getUint16(trailer + 10, true);
+  if (count > maxFiles) throw new Error('ZIP 文件数量超限');
   if (view.getUint16(trailer + 4, true) || view.getUint16(trailer + 6, true) || count === 0xffff || view.getUint32(trailer + 12, true) === ZIP64_MARKER || view.getUint32(trailer + 16, true) === ZIP64_MARKER) throw new Error('不支持分卷或 ZIP64');
   const files = new Map();
-  let offset = view.getUint32(trailer + 16, true);
+  let offset = view.getUint32(trailer + 16, true); let declaredBytes = 0;
   for (let index = 0; index < count; index++) {
     if (offset + 46 > trailer || view.getUint32(offset, true) !== 0x02014b50) throw new Error('ZIP 目录损坏');
     const flags = view.getUint16(offset + 8, true);
@@ -38,6 +39,8 @@ export async function readZip(buffer) {
     const checksum = view.getUint32(offset + 16, true);
     const compressedSize = view.getUint32(offset + 20, true);
     const size = view.getUint32(offset + 24, true);
+    declaredBytes += size;
+    if (size > maxFileBytes || declaredBytes > maxBytes) throw new Error('ZIP 解压后大小超限');
     const nameSize = view.getUint16(offset + 28, true);
     const extraSize = view.getUint16(offset + 30, true);
     const commentSize = view.getUint16(offset + 32, true);

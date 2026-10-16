@@ -5,6 +5,7 @@ import { SceneRuntime } from '../core/scene.mjs';
 import { previewViewport } from '../core/editor-display.mjs';
 import { download } from '../platform/files.mjs';
 import { prepareCanvas } from './timeline.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 import { trajectorySplitSettings } from '../core/trajectory-simplify.mjs';
 import { parseCurvePreset, saveCurvePreset, deleteCurvePreset, copyCurvePreset } from '../core/trajectory-presets.mjs';
 
@@ -45,7 +46,7 @@ function readFields(host, base) {
   return result;
 }
 function drawPath(canvas, points, progress = 0) {
-  const context = canvas.getContext('2d'); const width = canvas.width; const height = canvas.height;
+  const context = editorSkinContext(canvas.getContext('2d')); const width = canvas.width; const height = canvas.height;
   context.clearRect(0, 0, width, height); context.fillStyle = '#242424'; context.fillRect(0, 0, width, height);
   if (!points?.length) return;
   const xs = points.map(point => point.x); const ys = points.map(point => point.y);

@@ -6,6 +6,7 @@ import { createEasingPicker, EASING_NAMES } from './easing-picker.mjs';
 import { NOTE_COLORS } from './timeline.mjs';
 import { MultiEditParameters } from '../application/multi-edit-parameters.mjs';
 import { runEventTool } from './event-tools.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 
 function control(root, title, value, options) {
   const label = document.createElement('label'); label.className = 'field'; label.append(title);
@@ -197,7 +198,7 @@ export class MultiEditPanel {
     const timeline = this.timeline; const session = this.getSession();
     const canvas = this.kind === 'notes' ? timeline.notesCanvas : timeline.eventsCanvas;
     if (!canvas.clientWidth || this.kind === 'events' && timeline.notesOnly) return;
-    const context = canvas.getContext('2d'); context.save(); context.setLineDash([5, 3]); context.lineWidth = 2;
+    const context = editorSkinContext(canvas.getContext('2d'), 'batch-preview'); context.save(); context.setLineDash([5, 3]); context.lineWidth = 2;
     context.beginPath(); context.rect(0, this.kind === 'events' ? 23 : 0, canvas.clientWidth, canvas.clientHeight); context.clip();
     const ranges = new Map();
     if (this.kind === 'events') for (const change of this.result.changes) {

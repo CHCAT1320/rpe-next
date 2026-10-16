@@ -1,6 +1,7 @@
 import { parseBeat, beatValue, formatBeat, fromNumber } from '../core/beat.mjs';
 import { parseLineExpression } from '../application/multi-line-edit.mjs';
 import { textLinesChart } from '../application/text-lines.mjs';
+import { editorSkinContext } from './editor-skin-canvas.mjs';
 
 const action = (label, run) => { const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.onclick = run; return button; };
 
@@ -115,7 +116,7 @@ export class TextLinesPanel {
     worker.postMessage({ mask, width, height, length, thickness, limit: indices.length, tolerance: options.tolerance / 100, requiredCoverage: options.coverage / 100 }, [mask.buffer]);
   }
   drawResult(raster, fit, length, thickness, texture) {
-    const context = this.canvas.getContext('2d'); const scale = Math.min(480 / raster.width, 240 / raster.height);
+    const context = editorSkinContext(this.canvas.getContext('2d'), 'text-lines'); const scale = Math.min(480 / raster.width, 240 / raster.height);
     context.clearRect(0, 0, 500, 260); context.save(); context.translate((500 - raster.width * scale) / 2, (260 - raster.height * scale) / 2); context.scale(scale, scale);
     context.globalAlpha = 0.45; context.drawImage(raster, 0, 0); context.globalCompositeOperation = 'source-atop'; context.fillStyle = '#6de3ff'; context.fillRect(0, 0, raster.width, raster.height); context.globalCompositeOperation = 'source-over'; context.globalAlpha = 0.85;
     for (const stroke of fit.strokes) { context.save(); context.translate(stroke.x, stroke.y); context.rotate(stroke.angle); if (texture) context.drawImage(texture, -length / 2, -thickness / 2, length, thickness); else { context.fillStyle = '#f0d363'; context.fillRect(-length / 2, -thickness / 2, length, thickness); } context.restore(); }
