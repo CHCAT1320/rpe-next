@@ -9,7 +9,7 @@ const site = new URL('https://example.com/rpe-next/');
 const names = new Set(entries.filter(entry => entry.isFile()).map(entry => relative(fileURLToPath(root), join(entry.parentPath, entry.name)).replaceAll('\\', '/')));
 assert.ok(names.has('index.html'), 'index.html is missing from the Pages artifact');
 assert.ok(names.has('LICENSE') && names.has('NOTICE') && names.has('.nojekyll'), 'licence files or the Pages marker are missing');
-for (const name of names) assert.match(name, /^(?:index\.html|LICENSE|NOTICE|\.nojekyll|assets\/.+)$/);
+for (const name of names) assert.match(name, /^(?:index\.html|LICENSE|NOTICE|\.nojekyll|assets\/.+|protocols\/.+|schemas\/.+)$/);
 function checkReference(reference: string, file: string): void {
   if (/^(?:[a-z]+:)?\/\//i.test(reference) || reference.startsWith('data:') || reference.startsWith('#')) return;
   const resolved = new URL(reference, new URL(file, site));

@@ -6,6 +6,7 @@ import type { AnyEventType, Chart, ChartEvent, JudgeLine, Note } from '../core/t
 import { beatValue, fromNumber } from '../core/beat.ts';
 import type { TempoMap } from '../core/tempo.ts';
 import { selectionState, sameSelection, remapSelection, restoreSelection } from './selection-history.ts';
+import { emitModHook } from '../core/mod-hooks.ts';
 
 /** A note together with the line it belongs to; the unit `selectedNoteEntries` hands to callers. */
 export interface NoteEntry {
@@ -187,16 +188,20 @@ export class EditorSession extends EventTarget {
     this.notify();
   }
 
-  commit(label: string, chart: Chart, beforeSelection: SelectionState = this.selectionState()): void {
+  commit(label: string, chart: Chart, beforeSelection: SelectionState = this.selectionState()): boolean | void {
+    const change = emitModHook('session:before-commit', { session: this, label, chart, beforeSelection, cancel: false, normalizeAlpha: true });
+    if (change.cancel) return false;
+    label = change.label; chart = change.chart; beforeSelection = change.beforeSelection;
     // Alpha values are stored as integers; normalise before the history entry is recorded.
-    const normalized = integerChartAlpha(chart, this.chart);
-    if (this.collaboration) return this.collaboration.commit(label, normalized, beforeSelection);
+    const normalized = change.normalizeAlpha !== false ? integerChartAlpha(chart, this.chart) : chart;
+    if (this.collaboration) { const result = this.collaboration.commit(label, normalized, beforeSelection); emitModHook('session:after-commit', { session: this, label, chart: this.chart }); return result; }
     if (this.history.commit(label, normalized, { beforeSelection, afterSelection: this.selectionState() })) {
       const time = Number.isFinite(this.editSeconds) ? Math.max(0, this.editSeconds) : 0;
       this.recentEdits.push({ start: time, end: time, label });
       if (this.recentEdits.length > 50) this.recentEdits.shift();
     }
     this.notify();
+    emitModHook('session:after-commit',{session:this,label,chart:this.chart});
   }
 
   updateLine(label: string, change: (line: JudgeLine) => JudgeLine, beforeSelection: SelectionState = this.selectionState()): void {
@@ -352,6 +357,8 @@ export class EditorSession extends EventTarget {
   }
 
   travel(direction: 'undo' | 'redo'): void {
+    const auxiliary = (direction === 'undo' ? this.history.undoStack : this.history.redoStack).at(-1);
+    if (auxiliary?.auxiliaryOnly) { this.history[direction](); this.notify(); return; }
     if (this.collaboration) return this.collaboration.travel(direction);
     const command = (direction === 'undo' ? this.history.undoStack : this.history.redoStack).at(-1);
     if (!command) return;

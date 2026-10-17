@@ -4,13 +4,17 @@ import { integerChartAlpha } from './alpha-values.ts';
 import { parseLegacyChart } from './legacy-chart.ts';
 import { parsePecChart } from './pec-chart.ts';
 import { parseOfficialChart } from './official-chart.ts';
+import { emitModHook } from './mod-hooks.ts';
 
 export function parseDocument(text: string): Chart {
+  const custom = emitModHook('chart:parse', { text, chart: null as Chart | null });
+  if (custom.chart) return custom.chart;
+  text = custom.text;
   const trimmed = text.replace(/^\uFEFF/, '').trimStart();
   if (trimmed.startsWith('{')) {
     const candidate = JSON.parse(trimmed);
-    return candidate.formatVersion && !candidate.META ? integerChartAlpha(parseOfficialChart(candidate)) : parseChart(trimmed);
+    return emitModHook('chart:parsed',{chart:candidate.formatVersion && !candidate.META ? integerChartAlpha(parseOfficialChart(candidate)) : parseChart(trimmed)}).chart;
   }
   const bpm = trimmed.split(/\r?\n/).find(row => /^bp\s/.test(row.trim()));
-  return integerChartAlpha(bpm?.trim().split(/\s+/).length === 5 ? parseLegacyChart(trimmed) : parsePecChart(trimmed));
+  return emitModHook('chart:parsed',{chart:integerChartAlpha(bpm?.trim().split(/\s+/).length === 5 ? parseLegacyChart(trimmed) : parsePecChart(trimmed))}).chart;
 }

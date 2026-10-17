@@ -162,6 +162,12 @@ export interface NoteHitArea {
   x2: number;
   y2: number;
   radius: number;
+  /** Extra collision geometry supplied to mods (3D camera picking). */
+  type?: number;
+  collisionWidth?: number;
+  collisionHeight?: number;
+  rotation?: number;
+  polygon?: { x: number; y: number }[] | null;
 }
 
 export class Preview {
@@ -207,6 +213,12 @@ export class Preview {
    * head's screen point and its tail's, plus the radius the hit test allows.
    */
   noteHitAreas: NoteHitArea[];
+  /** The scale the last frame was drawn with; read by projection mods. */
+  viewScale?: number;
+  /** Enables the extra collision geometry mods read from `noteHitAreas`. */
+  collisionGeometry?: boolean;
+  /** World-capture camera offset installed by the 3D camera mod. */
+  cameraX?: number;
   /**
    * The display toggles. The constructor never assigns any of them — they are installed from the
    * saved editor preferences by `app.ts` before the first frame, and `view-controls.ts` augmentates
@@ -304,16 +316,36 @@ export class Preview {
     const divisor = this.viewDivisor ?? 1;
     const scale = viewport.scale / divisor;
     context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
-    // `noiseLayers` lives in un-migrated JavaScript, so its result is `any`; the annotation states
-    // the shape `core/noise-skin.ts` actually returns (the chart's layers, or one default layer).
     const skinScene = (noiseLayers(chart) as NoiseLayer[]).some(layer => this.noisePreview.usesSkin(layer));
-    // Screen-sampling skins preserve scene alpha, so supply the same opaque base as shaders.
     if (this.applyShaders || skinScene) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
-    // The image store reports a decoded record or `null`; the fallback keeps the previous one, which
-    // is what makes this a `PreviewImage` rather than the store's own `DecodedImage`. `images` is a
-    // fully optional dependency here: the tests install a bare `{ background }` literal before a
-    // project exists, so both the store and its `texture` method stay behind their own guards and
-    // the second `this.images` read is the one that resolves the type.
+    this.drawBackground(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor });
+    const states = this.scene.sample(seconds);
+    this.viewScale = scale; this.viewport = viewport; this.selectedLine = selectedLine;
+    this.drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states: states as LineState[] });
+    const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
+    const localEffects = shaderEffects.filter(effect => !effect.global);
+    const globalEffects = shaderEffects.filter(effect => effect.global);
+    const shaderEffect = (effect: typeof shaderEffects[number]): string => this.shaderRuntime.source(effect.shader, effect.sourceName);
+    const renderShaders = (effects: typeof shaderEffects): boolean => effects.length > 0 && this.shaderPipeline.render(this.canvas, this.shaderCanvas as HTMLCanvasElement, effects, seconds, shaderEffect, viewport);
+    if (renderShaders(localEffects)) {
+      context.clearRect(viewport.left, viewport.top, viewport.width, viewport.height);
+      context.drawImage(this.shaderCanvas as HTMLCanvasElement, 0, 0, width, height);
+    }
+    if (this.showGameUI) this.drawUi(context, chart, tempo, seconds, selectedLine, { viewport, scale, states: states as LineState[] });
+    this.drawGuides(context, scale, selectedLine);
+    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea, viewport);
+    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
+    context.restore();
+    const shaderRendered = renderShaders(globalEffects);
+    if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
+    if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
+    if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : String(clamp(this.opacity));
+    for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer) layer.style.opacity = String(clamp(this.opacity));
+    this.images?.trim?.();
+  }
+
+  drawBackground(context: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, selectedLine: number, { width, height, scale, center }: { width: number; height: number; viewport?: PreviewViewport; scale: number; divisor?: number; center?: { x: number; y: number } }): void {
+    void chart; void tempo; void seconds; void selectedLine;
     let background: PreviewImage | null | undefined = this.images?.background;
     if (background && this.images?.texture && this.images) {
       const store = this.images;
@@ -321,25 +353,28 @@ export class Preview {
       const loaded = store.texture(store.backgroundName ?? '', Math.max(1350 / measured.naturalWidth, 900 / measured.naturalHeight) * scale * (devicePixelRatio || 1));
       background = loaded ?? background;
     }
-    if (background) {
-      const sized = background as SizedImage;
-      context.globalAlpha = this.backgroundAlpha;
-      this.backgroundFrame.draw(context, sized, width, height, scale, this.backgroundBlur, devicePixelRatio || 1, this.images?.backgroundAnimated ?? false);
-      context.globalAlpha = 1;
-    } else this.backgroundFrame.clear();
-    const states = this.scene.sample(seconds);
+    if (!background) { this.backgroundFrame.clear(); return; }
+    context.save();
+    if (center) context.translate(-center.x * scale, center.y * scale);
+    context.globalAlpha = this.backgroundAlpha;
+    this.backgroundFrame.draw(context, background as SizedImage, width, height, scale, this.backgroundBlur, devicePixelRatio || 1, Boolean(center) || this.images?.backgroundAnimated === true);
+    context.restore();
+  }
+
+  drawUi(context: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, selectedLine: number, { viewport, scale, states }: { viewport: PreviewViewport; scale: number; states: LineState[] }): void {
+    void tempo;
+    drawGameUi(context, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
+  }
+
+  // Independent world pass, allowing optional modules to project it before screen effects and UI.
+  drawScene(context: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, selectedLine: number, { width, height, viewport, scale, divisor, states, center, cullNotes = false }: { width: number; height: number; viewport: PreviewViewport; scale: number; divisor: number; states: LineState[]; center?: { x: number; y: number }; cullNotes?: boolean }): void {
+    void tempo;
+    const originX = width / 2 - (center?.x ?? 0) * scale, originY = height / 2 + (center?.y ?? 0) * scale;
     const order = this.allLines ? this.scene.order : [selectedLine];
-    this.viewport = viewport; this.selectedLine = selectedLine;
-    // A forced line opacity also flattens the guide states to full alpha, so the numbers and arrows
-    // drawn for a hidden line stay readable while the tracking sampler captures it. `?? {}` mirrors
-    // the original spread of a possibly-`undefined` state.
     this.guides = lineGuides(this.forceLineOpacity ? states.map(state => ({ ...(state ?? {}), alpha: 255 })) as GuideState[] : states as GuideState[], chart.judgeLineList, order, width, height, scale);
-    // `visibleNotes` reports hit entries, whose `note` is what the loop below reads. `sample` leaves
-    // an out-of-range index `undefined`, which the call already tolerates: `radius` is only read
-    // from `states` at that index, and the `undefined` state itself is passed straight through.
-    const visibleNotes = new Map<number, HitEntry[]>(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index] as ScreenState, 1600 * divisor + Math.hypot(states[index]?.x ?? 0, states[index]?.y ?? 0)) ?? []]));
-    // The hit areas describe the frame about to be drawn, so they are rebuilt from scratch here
-    // rather than accumulated across frames.
+    if (center) for (const guide of this.guides) { guide.x -= center.x * scale; guide.y += center.y * scale; }
+    const visibleNotes = new Map<number, HitEntry[]>(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index] as ScreenState, 1600 * divisor + Math.hypot((states[index]?.x ?? 0) - (center?.x ?? 0), (states[index]?.y ?? 0) - (center?.y ?? 0))) ?? []]));
+    const noteAspects = new Map<number, number>();
     this.noteHitAreas = [];
     for (const pass of this.passes ?? []) for (const index of pass.kind === 'line' ? [pass.index ?? 0] : order) {
       if (pass.kind === 'line' && ((!this.allLines && index !== selectedLine) || !this.forceLineOpacity && (chart.judgeLineList[index].attachUI || (states[index]?.alpha ?? 0) <= 0) || states[index]?.scaleX === 0 || states[index]?.scaleY === 0)) continue;
@@ -347,24 +382,19 @@ export class Preview {
       const state = states[index];
       if (!runtime || !state) continue;
       if (pass.kind === 'line' && !(runtime.line.extended?.textEvents as LineTextEventSource[] | undefined)?.length) {
-        // The three sources are the texture record the store reports, the decoded image it cached,
-        // and the literal standing in for the built-in `line.png`. `naturalWidth`/`naturalHeight`
-        // stay optional on the record — it is built by spreading a PNG header probe that yields `{}`
-        // for a damaged asset — while the literal and the decoded image always carry both sizes, so
-        // the looser shape is what the union has to be collected into.
         const descriptor: PreviewImage | undefined = this.images?.describe?.(runtime.line.Texture);
         const texture: PreviewImage | undefined = runtime.line.Texture && runtime.line.Texture !== 'line.png'
           ? descriptor ?? this.images?.images.get(runtime.line.Texture)
           : { naturalWidth: DEFAULT_LINE_WIDTH, naturalHeight: DEFAULT_LINE_HEIGHT * this.lineScale };
-        if (!texture || texture.naturalWidth && !textureInViewport(texture as SizedImage, runtime.line, state, width, height, scale, viewport)) continue;
+        if (!texture || texture.naturalWidth && !textureInViewport(texture as SizedImage, runtime.line, center ? { ...state, x: state.x - center.x, y: state.y - center.y } : state, width, height, scale, viewport)) continue;
       }
       context.save();
-      context.translate(width / 2 + state.x * scale, height / 2 - state.y * scale);
+      context.translate(originX + state.x * scale, originY - state.y * scale);
       context.rotate(state.rotation * Math.PI / 180);
       if (pass.kind === 'line') {
-        // A forced line opacity draws every line fully opaque, which is what the noise-tracking
-        // sampler needs so the line it is tracing is never hidden by its own fade animation.
-        const lineState: TintedLineState = { ...state, ...(this.forceLineOpacity ? { alpha: 255 } : {}), ...(this.lineTint && index === selectedLine ? { color: [0, 200, 0] } : {}) };
+        const packColor = this.skin?.resourcePack?.perfectColor;
+        const usePackColor = packColor && (!runtime.line.Texture || runtime.line.Texture === 'line.png') && !runtime.line.attachUI && !runtime.line.extended?.textEvents?.length && !runtime.line.extended?.colorEvents?.length;
+        const lineState: TintedLineState = { ...state, ...(usePackColor ? { color: packColor.rgb, alpha: state.alpha * packColor.alpha } : {}), ...(this.forceLineOpacity ? { alpha: 255 } : {}), ...(this.lineTint && index === selectedLine ? { color: [0, 200, 0] } : {}) };
         this.drawLine(context, runtime.line, lineState, scale);
       } else for (const entry of visibleNotes.get(index) ?? []) {
         const note = entry.note;
@@ -373,24 +403,35 @@ export class Preview {
         if (position.alpha <= 0 || position.size === 0) continue;
         const noteWidth = this.noteSize * scale * position.size;
         const horizontal = position.x * scale;
-        // The note is placed in the line's rotated frame, so the hit capsule has to be rotated the
-        // same way: `worldX`/`worldY` mirror the transform the draw calls below apply.
         const rotation = state.rotation * Math.PI / 180;
         const worldX = state.x + position.x * Math.cos(rotation) + position.y * Math.sin(rotation);
         const worldY = -state.y + position.x * Math.sin(rotation) - position.y * Math.cos(rotation);
-        const screenX = width / 2 + worldX * scale;
-        const screenY = height / 2 + worldY * scale;
-        // Only a hold has a real tail; for every other type the tail is the note's own position, so a
-        // stale `tail` on a tap cannot stretch its hit capsule.
+        const screenX = originX + worldX * scale;
+        const screenY = originY + worldY * scale;
         const tail = note.type === 2 && Number.isFinite(position.tail) ? position.tail : position.y;
         const tailWorldX = state.x + position.x * Math.cos(rotation) + tail * Math.sin(rotation);
         const tailWorldY = -state.y + position.x * Math.sin(rotation) - tail * Math.cos(rotation);
-        this.noteHitAreas.push({ lineIndex: index, noteIndex: entry.index, x1: screenX, y1: screenY, x2: width / 2 + tailWorldX * scale, y2: height / 2 + tailWorldY * scale, radius: Math.max(12, noteWidth * 0.65) });
+        const tailX = originX + tailWorldX * scale, tailY = originY + tailWorldY * scale;
+        if (cullNotes) {
+          const aspectKey = note.type * 2 + Number(this.highlight !== false && this.simultaneous?.has(note) === true);
+          let aspect = noteAspects.get(aspectKey);
+          if (aspect === undefined) { const image = this.skin?.noteImage?.(note.type, Boolean(aspectKey % 2)); aspect = image ? ((image.naturalHeight ?? image.height ?? 0) / (image.naturalWidth ?? image.width ?? 1)) : note.type === 2 ? 1 : 0.12; noteAspects.set(aspectKey, aspect); }
+          const padding = Math.max(12, Math.abs(noteWidth) * (1 + aspect * (1 + Math.abs(Math.tan(position.skew * Math.PI / 180)))));
+          if (Math.max(screenX, tailX) + padding < viewport.left || Math.min(screenX, tailX) - padding > viewport.left + viewport.width ||
+              Math.max(screenY, tailY) + padding < viewport.top || Math.min(screenY, tailY) - padding > viewport.top + viewport.height) continue;
+        }
+        const hitArea: NoteHitArea = { lineIndex: index, noteIndex: entry.index, type: note.type, x1: screenX, y1: screenY, x2: tailX, y2: tailY, radius: Math.max(12, noteWidth * 0.65) };
+        if (this.collisionGeometry) {
+          const outline = this.skin?.noteImage?.(note.type, this.highlight !== false && this.simultaneous?.has(note) === true);
+          const aspect = outline ? (outline.naturalHeight ?? outline.height ?? 0) / (outline.naturalWidth ?? outline.width ?? 1) : 0.12;
+          const halfHeight = Math.max(this.skin?.resourcePack ? 0 : 2.5, Math.abs(noteWidth) * aspect / 2);
+          const cosine = Math.cos(rotation), sine = Math.sin(rotation), skew = Math.tan(position.skew * Math.PI / 180);
+          hitArea.collisionWidth = Math.abs(noteWidth); hitArea.collisionHeight = halfHeight * 2; hitArea.rotation = rotation;
+          hitArea.polygon = note.type === 2 ? null : [[-noteWidth / 2, -halfHeight], [noteWidth / 2, -halfHeight], [noteWidth / 2, halfHeight], [-noteWidth / 2, halfHeight]].map(([dx, dy]) => ({ x: screenX + ((dx ?? 0) + (dy ?? 0) * skew) * cosine - (dy ?? 0) * sine, y: screenY + ((dx ?? 0) + (dy ?? 0) * skew) * sine + (dy ?? 0) * cosine }));
+        }
+        this.noteHitAreas.push(hitArea);
         context.save();
         context.globalAlpha = clamp(position.alpha);
-        // `Note` indexes unknown keys, so a chart-supplied per-note tint has no declared type. The
-        // runtime form is an RGB triple, which is what the two uses below need; the authoring field
-        // is typed so the shared `Color` cannot be attached here yet.
         const tint = (note.tint ?? note.color) as RgbColor | undefined;
         context.fillStyle = Array.isArray(tint) ? `rgb(${tint.join(',')})` : NOTE_COLORS[note.type];
         let drawnHold = false;
@@ -411,27 +452,25 @@ export class Preview {
       context.restore();
     }
     if (this.showHitEffects) {
-      // `sampler` resolves one line at a time and is reused for every hit at the same instant; the
-      // states themselves stay `undefined`-able, which the guards below cover.
       const hitStates = new Map<number, SceneSampler>();
       for (const index of order) {
         const runtime = this.scene.lines[index];
         if (!runtime) continue;
-        for (const hit of recentHits(runtime, seconds, this.effectsSince, Math.max(HIT_DURATION, 2 / 3))) {
+        for (const hit of recentHits(runtime, seconds, this.effectsSince, this.skin?.hitLifetime ?? Math.max(HIT_DURATION, 2 / 3))) {
           const { entry, time, seed } = hit;
-          const frame = hitFrame(seconds - time);
-          // The hit tint is an authoring field `Note` indexes as unknown; its runtime form is an RGB
-          // triple, and the fallback is the same literal the original wrote out twice.
           const hitTint = (entry.note.tintHitEffects ?? [255, 236, 160]) as RgbColor;
-          const picture = frame === null ? null : this.skin?.tinted(`img-${frame}`, hitTint);
           if (!hitStates.has(time)) hitStates.set(time, this.scene.sampler(time));
-          const state = hitStates.get(time)?.(index);
-          if (!state) continue;
-          const position = runtime.noteState(entry, state, time);
-          const angle = state.rotation * Math.PI / 180;
-          const horizontal = width / 2 + (state.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
-          const vertical = height / 2 + (-state.y + position.x * Math.sin(angle) - position.y * Math.cos(angle)) * scale;
+          const hitState = hitStates.get(time)?.(index);
+          if (!hitState) continue;
+          const position = runtime.noteState(entry, hitState, time);
+          const angle = hitState.rotation * Math.PI / 180;
+          const horizontal = originX + (hitState.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
+          const vertical = originY + (-hitState.y + position.x * Math.sin(angle) - position.y * Math.cos(angle)) * scale;
           const size = this.noteSize * 1.4 * scale;
+          if (cullNotes && (horizontal + size * 2 < viewport.left || horizontal - size * 2 > viewport.left + viewport.width || vertical + size * 2 < viewport.top || vertical - size * 2 > viewport.top + viewport.height)) continue;
+          if (this.skin?.drawHit?.(context, { age: seconds - time, x: horizontal, y: vertical, size, rotation: angle, color: hitTint, seed: index * 65537 + seed })) continue;
+          const frame = hitFrame(seconds - time);
+          const picture = frame === null ? null : this.skin?.tinted(`img-${frame}`, hitTint);
           if (picture) context.drawImage(picture as CanvasImageSource, horizontal - size / 2, vertical - size / 2, size, size);
           context.fillStyle = `rgb(${hitTint.join(',')})`;
           for (const particle of hitParticles(seconds - time, index * 65537 + seed, this.noteSize * scale)) {
@@ -442,33 +481,6 @@ export class Preview {
         }
       }
     }
-    const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
-    const localEffects = shaderEffects.filter(effect => !effect.global);
-    const globalEffects = shaderEffects.filter(effect => effect.global);
-    // `active` reports each effect's shader name and the source it was authored under; both are
-    // read here, so the callback is bound to the effect record rather than the pipeline's
-    // narrower `ShaderPass` view. The shader canvas is only null before the first layout, and
-    // `render` re-checks the target through `ensure`, so the original passed it straight through;
-    // the assertion is erased at runtime.
-    const shaderEffect = (effect: typeof shaderEffects[number]): string => this.shaderRuntime.source(effect.shader, effect.sourceName);
-    const renderShaders = (effects: typeof shaderEffects): boolean => effects.length > 0 && this.shaderPipeline.render(this.canvas, this.shaderCanvas as HTMLCanvasElement, effects, seconds, shaderEffect, viewport);
-    // Scene → local effects → game UI → noise layers → global effects. Local effects run on their own
-    // pass and are composited back before the UI is drawn, so the UI and noise layers stay unshaded.
-    if (renderShaders(localEffects)) {
-      context.clearRect(viewport.left, viewport.top, viewport.width, viewport.height);
-      context.drawImage(this.shaderCanvas as HTMLCanvasElement, 0, 0, width, height);
-    }
-    if (this.showGameUI) drawGameUi(context, chart, states, this.completionTimes ?? [], seconds, selectedLine, viewport, scale, this.skin ?? null, this.duration ?? 600);
-    this.drawGuides(context, scale, selectedLine);
-    this.noisePreview.draw(context, chart, tempo, seconds, width, height, scale, this.selectedNoiseArea, viewport);
-    this.noisePreview.drawGuides(context, scale, this.selectedNoiseArea, this.lineNumbers);
-    context.restore();
-    const shaderRendered = renderShaders(globalEffects);
-    if (this.shaderCanvas) this.shaderCanvas.style.visibility = shaderRendered ? 'visible' : 'hidden';
-    if (this.overlayCanvas) this.overlayCanvas.style.visibility = 'hidden';
-    if (this.canvas.style) this.canvas.style.opacity = shaderRendered ? '0' : String(clamp(this.opacity));
-    for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer) layer.style.opacity = String(clamp(this.opacity));
-    this.images?.trim?.();
   }
 
   pick(clientX: number, clientY: number): number | null {

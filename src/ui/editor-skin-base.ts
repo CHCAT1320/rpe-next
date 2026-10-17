@@ -26,6 +26,8 @@ ${scope} :where(.editor,.inspector,#home,.home-heading,.settings-body,.noise-fit
 ${scope} :where(.editor-toolbar,.editor-footer,.timeline-head,.panel-title,.line-switcher,.asset-details,.batch-panel-actions,.noise-fit-footer,.noise-tracking-footer,.text-lines-footer,.trajectory-footer,.asset-folder > summary,#multi-line-labels,.noise-layer-panel,.clipboard-card,.timeline-strip){background:var(--rpen-surface-alt);border-color:var(--rpen-border);color:var(--rpen-text)}
 ${scope} :where(dialog,.timeline-context-menu,.collaboration-chat){background:var(--rpen-surface);color:var(--rpen-text);border-color:var(--rpen-border);border-radius:var(--rpen-radius-panel);box-shadow:var(--rpen-panel-shadow)}
 ${scope} dialog::backdrop{background:#0007}
+${scope} :where(.note-skin-card,.note-skin-form details,.note-skin-materials){background:var(--rpen-surface-alt);border-color:var(--rpen-border);color:var(--rpen-text)}
+${scope} .note-skin-card[aria-pressed=true]{border-color:var(--rpen-accent);outline-color:var(--rpen-accent)}
 ${scope} :where(.hint,#document-name,#selection-info,#hotkey-help,.project-detail,.project-credits,.chart-info,.asset-details p,footer,#compatibility,.clipboard-select span){color:var(--rpen-muted)}
 ${scope} :where(h1,h2,h3,.panel-title,strong,.chart-info dd,.project-title){color:var(--rpen-text)}
 ${scope} label,${scope} #clock{color:var(--rpen-text)}
@@ -34,6 +36,7 @@ ${scope} #document-name,${scope} #selection-info,${scope} #hotkey-help,${scope} 
 ${scope} summary,${scope} .home-heading p,${scope} .project-card time{color:var(--rpen-muted)}
 ${scope} .multi-line-width-controls output,${scope} #noise-properties h3{color:var(--rpen-text)}
 ${scope} .editor.noise-mode .timeline-head::before{color:var(--rpen-text)}
+${scope} .editor.global-events-mode .timeline-head::before{color:var(--rpen-text)}
 ${scope} .editor.noise-mode .noise-toolbar-close,${scope} .noise-input-controls > button{color:var(--rpen-info)}
 ${scope} .multi-line-head-controls button.active,${scope} .multi-line-controls button.active,${scope} .analysis-mode-buttons button.active,${scope} .layer-buttons button.active{color:var(--rpen-accent-text);background:var(--rpen-selected);border-color:var(--rpen-selected-border)}
 ${scope} .noise-sample-bar,${scope} .hotkey-toolbar{background:var(--rpen-elevated);border-color:var(--rpen-border)}

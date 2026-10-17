@@ -11,13 +11,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 const origin = 'rpe://app';
 const smokeSettings = process.argv.includes('--smoke-settings');
 const smokeMedia = process.argv.includes('--smoke-media');
-const smoke = process.argv.includes('--smoke-test') || smokeSettings || smokeMedia;
+const smokeMods = process.argv.includes('--smoke-mods');
+const smoke = process.argv.includes('--smoke-test') || smokeSettings || smokeMedia || smokeMods;
 // A packaged build places the Vite output directly in resources/app. `npm run desktop` passes
 // --dist so the same shell can be run against a checkout's own build.
 const fromDist = process.argv.includes('--dist');
 // The Vite build emits the entry document at the app root and every bundled or copied resource
 // under assets/, so the protocol only has to expose those two places plus the licence files.
-const bundled = /^(?:index\.html|LICENSE|NOTICE|assets\/.+)$/;
+const bundled = /^(?:index\.html|LICENSE|NOTICE|assets\/.+|protocols\/.+|schemas\/.+)$/;
 // The `--smoke-*` probes import `src/` modules by path to exercise the code the bundle inlines, which
 // a build output has no copy of. Those requests are served from the checkout instead, and only while
 // a smoke run is active, so a normal session never exposes the source tree. Chromium cannot execute
@@ -26,7 +27,7 @@ const bundled = /^(?:index\.html|LICENSE|NOTICE|assets\/.+)$/;
 // read from disk by the main process rather than fetched.
 const sourced = /^src\/.+\.ts$/;
 app.setName('RePhiEdit Next');
-app.setPath('userData', resolve(app.getPath('appData'), smoke ? 'rpe-next-desktop-smoke' : 'rpe-next-desktop'));
+app.setPath('userData', smokeMods ? resolve(app.getPath('temp'), 'rpe-next-mod-smoke-' + Date.now()) : resolve(app.getPath('appData'), smoke ? 'rpe-next-desktop-smoke' : 'rpe-next-desktop'));
 mkdirSync(app.getPath('userData'), { recursive: true });
 protocol.registerSchemesAsPrivileged([{ scheme: 'rpe', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
@@ -61,14 +62,14 @@ else {
         const headers = new Headers();
         if (source) {
           headers.set('Content-Type', 'text/javascript; charset=utf-8');
-          headers.set('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
+          headers.set('Content-Security-Policy', `default-src 'self'; script-src 'self' blob:; script-src-elem 'self' blob: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob:; media-src 'self' blob: data:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
           headers.set('X-Content-Type-Options', 'nosniff');
           const body = stripTypeScriptTypes(await readFile(path, 'utf8'), { mode: 'strip' });
           return new Response(request.method === 'HEAD' ? null : body, { status: 200, headers });
         }
         const response = await net.fetch(pathToFileURL(path).href);
         const responseHeaders = new Headers(response.headers);
-        responseHeaders.set('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; font-src 'self' blob:; media-src 'self' blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
+        responseHeaders.set('Content-Security-Policy', `default-src 'self'; script-src 'self' blob:; script-src-elem 'self' blob: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob:; media-src 'self' blob: data:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
         responseHeaders.set('X-Content-Type-Options', 'nosniff');
         if (/\.(?:m?js|ts)$/.test(path)) responseHeaders.set('Content-Type', 'text/javascript; charset=utf-8');
         else if (path.endsWith('.css')) responseHeaders.set('Content-Type', 'text/css; charset=utf-8');
@@ -97,7 +98,7 @@ else {
     });
     const errors: string[] = [];
     mainWindow.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message); });
-    await mainWindow.loadURL(`${origin}/`);
+    await mainWindow.loadURL(`${origin}/${process.argv.includes('--mods-off') ? '?mods=off' : ''}`);
     if (smoke) {
       // Whether the checkout's sources are reachable decides if the media-hash probe can run at all:
       // it imports a source module, and only a smoke run from a checkout serves those. A packaged app
@@ -134,6 +135,7 @@ else {
       // The smoke helpers live in the checkout's `tools/`, which a `--dist` run does not serve, so
       // they are resolved from the application root rather than from the served site root.
       if (smokeMedia) result.media = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-media.ts')).href)).smokeMediaTransfer(mainWindow.webContents);
+      if (smokeMods) result.mods = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-mods.ts')).href)).smokeMods(mainWindow.webContents);
       console.log(JSON.stringify({ ...result, errors }));
       const passed = result.secure && result.libraryVisible && result.webgl && result.database && result.entry.endsWith('.js') && result.resources.every((resource: { status: number; bytes: number }) => resource.status === 200 && resource.bytes > 0) && result.forbidden === 404 && !errors.length;
       app.exit(passed ? 0 : 1);

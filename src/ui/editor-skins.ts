@@ -62,6 +62,8 @@ export class EditorSkins {
   reloadButton: HTMLButtonElement;
   previewImage: HTMLImageElement;
   appearance: HTMLDivElement;
+  appearanceDisclosure: HTMLDetailsElement;
+  appearanceSkinId: string | undefined;
   details: HTMLParagraphElement;
   message: HTMLParagraphElement;
   directoryHandle: FileSystemDirectoryHandle | null;
@@ -94,7 +96,7 @@ export class EditorSkins {
     }, true);
     this.select = document.createElement('select'); this.zip = document.createElement('input'); this.directory = document.createElement('input');
     this.previewButton = action('', () => {}); this.applyButton = action('', () => {}); this.exportButton = action('', () => {}); this.deleteButton = action('', () => {}); this.resetParametersButton = action('', () => {}); this.reloadButton = action('', () => {});
-    this.previewImage = document.createElement('img'); this.appearance = document.createElement('div'); this.details = document.createElement('p'); this.message = document.createElement('p');
+    this.previewImage = document.createElement('img'); this.appearance = document.createElement('div'); this.appearanceDisclosure = document.createElement('details'); this.details = document.createElement('p'); this.message = document.createElement('p');
     this.render(); this.ready = this.load();
   }
   async load(): Promise<void> {
@@ -135,9 +137,11 @@ export class EditorSkins {
     controls.append(action('导入皮肤包', () => this.zip.click()), action('导入文件夹', () => { this.pickDirectory().catch(error => this.error(error)); }), this.reloadButton, this.previewButton, this.applyButton, this.resetParametersButton, this.exportButton, this.deleteButton, action('恢复默认皮肤', () => this.reset()));
     this.previewImage = document.createElement('img'); this.previewImage.className = 'editor-skin-preview'; this.previewImage.hidden = true; this.previewImage.alt = '所选皮肤预览';
     this.appearance = document.createElement('div'); this.appearance.className = 'editor-skin-parameters';
+    this.appearanceDisclosure = document.createElement('details'); this.appearanceDisclosure.className = 'editor-skin-options';
+    const appearanceSummary = document.createElement('summary'); appearanceSummary.textContent = '外观与可选参数'; this.appearanceDisclosure.append(appearanceSummary, this.appearance);
     this.details = document.createElement('p'); this.details.className = 'hint'; this.message = document.createElement('p'); this.message.className = 'hint'; this.message.setAttribute('role', 'status');
     const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '皮肤只保存在本机，不随谱面分享。预览 15 秒后自动复原；Ctrl+Alt+Shift+Backspace 恢复当前皮肤原始参数；Ctrl+Alt+Shift+F12 切回默认皮肤。';
-    this.host.append(controls, this.zip, this.directory, this.previewImage, this.appearance, this.details, this.message, hint); this.updateOptions();
+    this.host.append(controls, this.zip, this.directory, this.previewImage, this.appearanceDisclosure, this.details, this.message, hint); this.updateOptions();
   }
   updateOptions(selected = this.current): void {
     this.select.replaceChildren(new Option('默认皮肤', 'default'), ...[...this.records.values()].map(record => new Option((record.skin.name ?? record.skin.id ?? '') + (record.skin.author ? `(${record.skin.author})` : ''), record.skin.id ?? '')));
@@ -145,6 +149,9 @@ export class EditorSkins {
   }
   showDetails(): void {
     const record = this.records.get(this.select.value);
+    if (this.appearanceSkinId !== record?.skin.id) this.appearanceDisclosure.open = false;
+    this.appearanceSkinId = record?.skin.id;
+    this.appearanceDisclosure.hidden = !record || !Object.keys(record.skin.parameters ?? {}).length && !Object.keys(record.skin.variants ?? {}).length;
     this.details.textContent = record ? `${record.skin.description ?? ''}${record.skin.skinVersion ? ' · v' + String(record.skin.skinVersion) : ''}${record.skin.license ? ' · ' + String(record.skin.license) : ''} · ${record.files.size} 个文件 · ${(record.bytes / 1024).toFixed(1)} KiB` : '编辑器原有外观与布局。';
     this.deleteButton.disabled = !record || Boolean(record.builtin); this.exportButton.disabled = !record;
     this.resetParametersButton.disabled = !record || !Object.keys(record.skin.parameters ?? {}).length;

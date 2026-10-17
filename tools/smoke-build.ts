@@ -19,7 +19,7 @@ try {
   const style = html.match(/href="([^"]+\.css)"/)?.[1];
   if (!script || !style) throw new Error('入口页面没有引用打包后的脚本与样式');
 
-  for (const path of ['/', script, style, '/assets/rpe/Texture/Tap2.png', '/assets/rpe/fonts/cmdysj.ttf', '/assets/rpe/SE/tap.ogg', '/assets/easing/29.svg']) {
+  for (const path of ['/', script, style, '/assets/rpe/Texture/Tap2.png', '/assets/rpe/fonts/cmdysj.ttf', '/assets/rpe/SE/tap.ogg', '/assets/easing/29.svg', '/protocols/MOD-PROTOCOL.zh-CN.md', '/protocols/GLOBAL-EVENTS-PROTOCOL.zh-CN.md', '/protocols/EDITOR-SKIN-PROTOCOL.zh-CN.md', '/schemas/mod-v1.schema.json', '/schemas/mod-api-v1.d.ts', '/assets/mods/index.json', '/assets/mods/sky-dodge/main.mjs', '/assets/note-skins/index.json']) {
     const response = await get(path);
     if (response.status !== 200 || !(await response.arrayBuffer()).byteLength) throw new Error(`${path} 不可读取`);
     if (path.endsWith('.svg') && !response.headers.get('content-type')?.includes('image/svg+xml')) throw new Error('缓动 SVG 类型错误');

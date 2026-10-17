@@ -148,7 +148,7 @@ function orderedExportChart(chart: Chart): Chart {
     const time = event?.startTime ?? event?.start;
     return Array.isArray(time) ? beatValue(time) : Number.isFinite(time) ? Number(time) : 0;
   };
-  const ordered = (events: ChartEvent[]): ChartEvent[] => [...events].sort((left, right) => startBeat(left) - startBeat(right));
+  const ordered = <T extends { startTime?: unknown }>(events: T[]): T[] => [...events].sort((left, right) => startBeat(left as unknown as ChartEvent) - startBeat(right as unknown as ChartEvent));
   // A shader event's `vars` may hold nested effect lists, which are tracks in their own right.
   const shader = (event: ChartEvent): ChartEvent => {
     if (!event?.vars) return event;
@@ -177,6 +177,7 @@ function orderedExportChart(chart: Chart): Chart {
       ...Object.fromEntries(NOISE_TRACKS.filter(([type]) => Array.isArray(area[type])).map(([type]) => [type, ordered(area[type] as ChartEvent[])])) })) } : {}),
     ...(Array.isArray(document.effects) ? { effects: effects(document.effects) } : {}),
     ...(Array.isArray(document.shaderEvents) ? { shaderEvents: effects(document.shaderEvents) } : {}),
+    ...(chart.globalEvents ? { globalEvents: { ...chart.globalEvents, types: Object.fromEntries(Object.entries(chart.globalEvents.types).map(([id, type]) => [id, { ...type, columns: Object.fromEntries(Object.entries(type.columns).map(([key, column]) => [key, { ...column, events: ordered(column.events) }])) }])) } } : {}),
     ...(Array.isArray(chart.META?.effects) ? { META: { ...chart.META, effects: effects(chart.META.effects as ChartEvent[]) } } : {}) };
 }
 
@@ -190,10 +191,12 @@ function orderedExportChart(chart: Chart): Chart {
  */
 export function legacyChart(chart: Chart, splitSettings: Partial<TrajectorySplit> = {}): Chart {
   if (chart.blockAreaList?.length) throw new Error('原 RPE 不支持噪域，请在导出窗口明确选择移除噪域后导出');
+  if (Object.values(chart.globalEvents?.types ?? {}).some(type => Object.values(type.columns).some(column => column.events.length))) throw new Error('原 RPE 不支持全局事件，请在导出窗口明确选择移除全局事件后导出');
   const next = structuredClone(chart);
   delete next.blockAreaList;
   delete next.noiseAreaOptions;
   delete next.noiseAreaLayers;
+  delete next.globalEvents;
   if (next.META.RPEVersion >= 200) next.META = { ...next.META, RPEVersion: 170 };
   const tempo = new TempoMap(next.BPMList);
   for (const line of next.judgeLineList ?? []) {
@@ -311,6 +314,8 @@ export interface PackageOptions {
   compact?: boolean;
   /** Whether a 原 RPE export should drop the noise areas it cannot represent. */
   removeNoiseAreas?: boolean;
+  /** Whether a 原 RPE export may drop global events, which that reader cannot represent. */
+  removeGlobalEvents?: boolean;
   /** The folder name the game should install the chart into. */
   identifier?: string;
 }
@@ -396,6 +401,8 @@ export interface ChartExportOptions {
    * silently losing the areas.
    */
   removeNoiseAreas?: boolean;
+  /** Whether a 原 RPE export may drop global events, which that reader cannot represent. */
+  removeGlobalEvents?: boolean;
   /** The folder name the game should install the chart into. */
   identifier?: string;
 }
@@ -405,7 +412,8 @@ export function createChartExport(chart: Chart, assets: ArchiveEntries, chartNam
   if (!['json', 'pez'].includes(format) || !['next', 'rpe'].includes(compatibility)) throw new Error('导出格式无效');
   // `chartTime` is a scratch field some callers hang off the document; it is optional here so it can
   // be deleted, which is what the original did before serializing.
-  const source: Chart & { chartTime?: unknown } = compatibility === 'rpe' && options.removeNoiseAreas ? { ...chart, blockAreaList: [] } : chart;
+  let source: Chart & { chartTime?: unknown } = compatibility === 'rpe' && options.removeNoiseAreas ? { ...chart, blockAreaList: [] } : chart;
+  if (compatibility === 'rpe' && options.removeGlobalEvents) { source = { ...source }; delete source.globalEvents; }
   const snapshot: Chart & { chartTime?: unknown } = compatibility === 'rpe' ? legacyChart(source, split) : orderedExportChart(chart);
   delete snapshot.chartTime;
   const stem = String(name).trim().replace(/\.(json|pez|pec|zip)$/i, '');

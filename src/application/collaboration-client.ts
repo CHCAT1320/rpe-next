@@ -28,7 +28,8 @@ export interface QueuedOperation {
   changes: ChartChange[];
   recordHistory?: boolean;
   sent?: boolean;
-  travel?: { direction: 'undo' | 'redo'; entry: { label: string; changes: ChartChange[] } };
+  auxiliary?: { undo(): void; redo(): void };
+  travel?: { direction: 'undo' | 'redo'; entry: { label: string; changes: ChartChange[]; auxiliary?: { undo(): void; redo(): void } } };
 }
 
 /** A chat line as broadcast to the room. */
@@ -41,7 +42,7 @@ export interface ChatEntry {
 }
 
 /** One committed, invertible edit in the local undo/redo pair. */
-interface HistoryEntry { label: string; changes: ChartChange[] }
+interface HistoryEntry { label: string; changes: ChartChange[]; auxiliary?: { undo(): void; redo(): void } }
 
 /**
  * Installs the collaboration history stacks on the session.
@@ -260,7 +261,8 @@ export class CollaborationClient extends EventTarget {
           if (own.travel) {
             const { direction, entry } = own.travel;
             (direction === 'undo' ? this.undo : this.redo).pop(); (direction === 'undo' ? this.redo : this.undo).push(entry);
-          } else if (own.recordHistory !== false) { this.undo.push({ label: own.label, changes: own.changes }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
+            entry.auxiliary?.[direction]();
+          } else if (own.recordHistory !== false) { this.undo.push({ label: own.label, changes: own.changes, ...(own.auxiliary ? { auxiliary: own.auxiliary } : {}) }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
         }
         const member = this.members.find(member => member.id === message.id); if (member) member.stats = message.stats;
         this.rebase();

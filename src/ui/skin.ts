@@ -35,6 +35,17 @@ interface SkinImage {
  * forward it back into `tintedSource`, and the test suite substitutes plain stand-ins, so only the
  * members that path reads are declared.
  */
+/** The note-skin resource pack the editor can install over the built-in RPE textures. */
+export interface ResourceNoteSkin {
+  readonly hitLifetime?: number;
+  readonly perfectColor?: { rgb: Color; alpha: number };
+  dispose(): void;
+  drawHit(context: CanvasRenderingContext2D, options: { age: number; x: number; y: number; size: number; rotation: number; color?: Color; seed: number }): boolean;
+  noteImage(type: number, highlight?: boolean): SkinImage | undefined;
+  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight?: boolean, color?: Color): boolean;
+  hold(context: CanvasRenderingContext2D, horizontal: number, head: number, tail: number, width: number, highlight?: boolean, showHead?: boolean, color?: Color): boolean;
+}
+
 export interface DrawableImage extends SkinImage {
   readonly source?: SkinImage;
   /** Cleared by `platform/images.ts` when it releases a decoded record. */
@@ -59,8 +70,18 @@ export class RpeSkin {
   nextSourceId: number;
   /** Called after a load finishes; `app.ts` uses it to schedule a repaint. */
   invalidate: () => void;
+  /** An imported note skin that overrides the built-in textures while installed. */
+  resourcePack: ResourceNoteSkin | null;
 
-  constructor(invalidate: () => void) { this.images = new Map(); this.tints = new Map(); this.sourceIds = new WeakMap(); this.nextSourceId = 1; this.invalidate = invalidate; }
+  constructor(invalidate: () => void) { this.images = new Map(); this.tints = new Map(); this.sourceIds = new WeakMap(); this.nextSourceId = 1; this.invalidate = invalidate; this.resourcePack = null; }
+
+  setResourcePack(pack: ResourceNoteSkin | null): void {
+    if (this.resourcePack !== pack) this.resourcePack?.dispose();
+    this.resourcePack = pack; this.tints.clear(); this.invalidate();
+  }
+  get hitLifetime(): number | undefined { return this.resourcePack?.hitLifetime; }
+  drawHit(context: CanvasRenderingContext2D, options: { age: number; x: number; y: number; size: number; rotation: number; color?: Color; seed: number }): boolean { return this.resourcePack?.drawHit(context, options) ?? false; }
+  noteImage(type: number, highlight = false): SkinImage | undefined { return this.resourcePack?.noteImage(type, highlight) ?? this.images.get((highlight ? highlights : names)[type as NoteType]); }
 
   async load(): Promise<void> {
     // The built-in RPE textures: the two note-head tables above, a handful of named extras, and the
@@ -121,17 +142,19 @@ export class RpeSkin {
     return this.tints.get(key) ?? null;
   }
 
-  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight = false, color?: Color): boolean {
+  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight = false, color?: Color, minimumHeight = 5): boolean {
+    if (this.resourcePack) return this.resourcePack.head(context, type, horizontal, vertical, width, highlight, color);
     const name = (highlight ? highlights : names)[type];
     const picture = this.images.get(name);
     if (!picture) return false;
-    const height = Math.max(5, width * (picture.naturalHeight ?? 0) / (picture.naturalWidth ?? 1));
+    const height = Math.max(minimumHeight, width * (picture.naturalHeight ?? 0) / (picture.naturalWidth ?? 1));
     const customTint = Array.isArray(color) && color.length === 3 && color.every(Number.isFinite) && color.some((value: number): boolean => value !== 255);
     context.drawImage((customTint ? this.tinted(name, color) : picture) as CanvasImageSource, horizontal - width / 2, vertical - height / 2, width, height);
     return true;
   }
 
   hold(context: CanvasRenderingContext2D, horizontal: number, head: number, tail: number, width: number, highlight = false, showHead = true, color?: Color): boolean {
+    if (this.resourcePack) return this.resourcePack.hold(context, horizontal, head, tail, width, highlight, showHead, color);
     const bodyName = highlight ? 'HoldHL' : this.images.has('Hold3') ? 'Hold3' : 'Hold';
     const body = this.images.get(bodyName);
     const end = this.images.get('HoldEnd');

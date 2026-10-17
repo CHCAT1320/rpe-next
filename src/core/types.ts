@@ -317,6 +317,46 @@ export interface NoiseLayer extends NoiseSkinSettings {
 }
 
 /** A complete RPE chart document. */
+/** One value-bearing event inside a global-event column. */
+export interface GlobalEventValue {
+  startTime: Beat;
+  endTime: Beat;
+  start: unknown;
+  end: unknown;
+  easingType?: number;
+  easingLeft?: number;
+  easingRight?: number;
+  bezier?: unknown;
+  bezierPoints?: unknown;
+  inst?: unknown;
+  [key: string]: unknown;
+}
+
+/** One column of a global-event type, as stored in the chart. */
+export interface GlobalEventColumnData {
+  name: string;
+  timelineLabel?: string;
+  valueType?: 'number' | 'text' | 'boolean' | 'color' | 'json';
+  width?: number;
+  events: GlobalEventValue[];
+  [key: string]: unknown;
+}
+
+/** One global-event type, as stored in the chart. */
+export interface GlobalEventTypeData {
+  name: string;
+  source: { kind: 'builtin' | 'mod'; id: string; name: string; author?: string; version?: string };
+  columns: Record<string, GlobalEventColumnData>;
+  width?: number;
+  [key: string]: unknown;
+}
+
+/** The global-event section of a document. */
+export interface GlobalEventsData {
+  version: 1;
+  types: Record<string, GlobalEventTypeData>;
+}
+
 export interface Chart {
   META: ChartMeta;
   BPMList: BpmEntry[];
@@ -339,6 +379,8 @@ export interface Chart {
   noiseAreaLayers?: NoiseLayer[];
   /** Options the 噪域 feature carries; the triple-inversion toggle is the only one so far. */
   noiseAreaOptions?: { ignoreTripleInversion?: boolean };
+  /** Global events, present only on documents that use them. */
+  globalEvents?: GlobalEventsData;
   /**
    * Present when the document was imported from another format, so re-export can preserve it.
    *

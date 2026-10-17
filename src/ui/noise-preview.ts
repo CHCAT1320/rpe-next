@@ -92,6 +92,8 @@ export class NoisePreview {
   declare getAssets: (() => Map<string, Uint8Array>) | undefined;
   declare invalidate: (() => void) | undefined;
   declare report: ((message: string) => void) | undefined;
+  /** Lets a mod (the 3D camera) transform sampled guides before they are drawn or hit-tested. */
+  declare transformGeometry: ((guide: NoiseGuide, context: { width: number; height: number; scale: number; viewport: PreviewViewport; seconds: number }) => NoiseGuide | null) | undefined;
   /** The GPU skin renderer, built lazily by `draw` the first time a skinned layer renders. */
   declare gpu: NoiseSkinRenderer | undefined;
   /** The scratch canvas `pick` measures hit paths on, created on first use. */
@@ -127,6 +129,7 @@ export class NoisePreview {
       const sample: NoiseSample = runtime.sample(seconds);
       return { area: entry.item, index: entry.index, ...sample };
     });
+    if (this.transformGeometry) this.guides = this.guides.map(entry => this.transformGeometry!(entry, { width, height, scale, viewport, seconds })).filter((entry): entry is NoiseGuide => entry !== null);
     const margin = Math.max(2, scale * 5);
     const entries = this.guides.filter(entry => entry.scaleX !== 0 && entry.scaleY !== 0 &&
       !entry.points.every(point => width / 2 + point.x * scale < -margin) && !entry.points.every(point => width / 2 + point.x * scale > width + margin) &&

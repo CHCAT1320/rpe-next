@@ -1,6 +1,7 @@
 import { compileEditorSkin, editorSkinSelector, EDITOR_SKIN_COMPONENTS, EDITOR_SKIN_BUILTINS } from '../core/editor-skin.ts';
 import type { EditorSkinCanvasConfig, EditorSkinRule, SkinDocument } from '../core/editor-skin.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import { emitModHook } from '../core/mod-hooks.ts';
 import { baseEditorSkinCss } from './editor-skin-base.ts';
 import { setEditorCanvasSkin } from './editor-skin-canvas.ts';
 
@@ -158,6 +159,8 @@ export class EditorSkinRuntime {
       for (const id of group.items) {
         const item = document.querySelector(EDITOR_SKIN_COMPONENTS[id] ?? ''); if (!item || item === destination || item.parentElement === destination && (item as HTMLElement).dataset.skinOrganized === String(index)) continue;
         if (item.contains(destination)) continue;
+        if (emitModHook('ui:before-relocate', { node: item, parent: destination, anchor: null, reason: 'skin-organize', cancel: false }).cancel) continue;
+        if(emitModHook('ui:before-relocate',{node:item,parent:destination,anchor:null,reason:'skin-organize',cancel:false}).cancel)continue;
         if (!this.moves.has(item)) { const anchor = document.createComment('editor skin original position'); item.before(anchor); this.moves.set(item, anchor); }
         destination.append(item); (item as HTMLElement).dataset.skinOrganized = String(index);
       }
@@ -207,7 +210,7 @@ export class EditorSkinRuntime {
   clear(): void {
     this.observer.disconnect(); if (this.frame) cancelAnimationFrame(this.frame); this.frame = null;
     if (this.sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter(sheet => sheet !== this.sheet);
-    for (const [element, anchor] of this.moves) { if (anchor.parentNode) anchor.replaceWith(element); delete (element as HTMLElement).dataset.skinOrganized; }
+    for (const [element, anchor] of this.moves) { if (anchor.parentNode && !emitModHook('ui:before-relocate', { node: element, parent: anchor.parentNode, anchor, reason: 'skin-restore', cancel: false }).cancel) anchor.replaceWith(element); delete (element as HTMLElement).dataset.skinOrganized; }
     for (const element of [...this.groups, ...this.decorations]) element.remove();
     for (const [element, patches] of this.patches) for (const [key, patch] of patches) {
       if (isTextPatch(patch)) { if (patch.node.textContent === patch.applied) patch.node.textContent = patch.original; }

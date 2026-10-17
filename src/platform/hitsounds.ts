@@ -76,6 +76,8 @@ export class HitSounds {
   maxVoices: number;
   maxBurst: number;
   maxSameTime: number;
+  /** Buffers supplied by the active note skin; they take precedence over chart assets. */
+  skinBuffers: Map<string, AudioBuffer>;
   gain?: GainNode;
   chart?: Chart;
   compiled: Chart | null;
@@ -90,6 +92,7 @@ export class HitSounds {
     this.maxVoices = 192;
     this.maxBurst = 96;
     this.maxSameTime = 64;
+    this.skinBuffers = new Map();
     this.compiled = null;
     this.compiledLine = null;
     this.entries = [];
@@ -122,6 +125,7 @@ export class HitSounds {
     }));
   }
 
+  setSoundPack(buffers: Map<string, AudioBuffer> = new Map()): void { this.stop(); this.skinBuffers = new Map(buffers); }
   setProject(chart: Chart, assets: ArchiveEntries, chartName: string): void { this.stop(); this.generation++; this.buffers.clear(); this.chart = chart; this.assets = assets; this.chartName = chartName; this.compiled = null; this.compiledLine = null; this.onlyCurrentLine = false; }
   setVolume(value: number): void { this.volume = Math.max(0, Math.min(1, value)); if (this.gain) this.gain.gain.value = this.volume; }
   stop(): void { for (const source of this.sources) { source.stop(); source.disconnect(); } this.sources.clear(); this.revision = -1; }
@@ -144,7 +148,7 @@ export class HitSounds {
     while (this.next < this.entries.length && this.entries[this.next].time <= until && this.entries[this.next].time < (this.transport.scheduleHorizon ?? Infinity)) {
       const entry = this.entries[this.next++];
       // Narrowing instead of casting: a non-string `hitsound` finds no buffer, exactly as before.
-      const buffer = typeof entry.sound === 'string' ? this.buffers.get(entry.sound) : undefined;
+      const buffer = typeof entry.sound === 'string' ? this.skinBuffers.get(entry.sound) ?? this.buffers.get(entry.sound) : undefined;
       if (!buffer || !this.gain) continue;
       const timeKey = Math.round(entry.time * 1000);
       const timeCount = sameTime.get(timeKey) ?? 0;

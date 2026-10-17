@@ -25,6 +25,8 @@ interface GuideLineSource {
 /** A clickable judge-line guide in canvas coordinates. */
 export interface LineGuide {
   index: number;
+  /** A segment guide is hit-tested along its line instead of as a rotated bar. */
+  segment?: [GuidePoint, GuidePoint];
   x: number;
   y: number;
   rotation: number;
@@ -65,6 +67,11 @@ export function mergeGuides(guides: LineGuide[], scale: number, enabled = true):
 
 export function pickGuide(guides: LineGuide[], point: GuidePoint, selected: number, radius = 10): number | null {
   const matches = guides.filter(guide => {
+    if (guide.segment) {
+      const [start, end] = guide.segment; const dx = end.x - start.x; const dy = end.y - start.y; const length = dx * dx + dy * dy;
+      const amount = length ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / length)) : 0;
+      return Math.hypot(point.x - start.x - amount * dx, point.y - start.y - amount * dy) <= radius;
+    }
     const angle = guide.rotation * Math.PI / 180;
     const deltaX = point.x - guide.x; const deltaY = point.y - guide.y;
     const across = deltaX * Math.cos(angle) + deltaY * Math.sin(angle);

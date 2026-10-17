@@ -1,0 +1,10 @@
+{
+  "protocol": "rpen-mod", "api": 1, "id": "spatial-camera", "name": "三维摄像机", "version": "1.0.0", "author": "rpe-next",
+  "description": "用全局事件控制摄像机 X/Y/Z、偏航、俯仰、画面倾斜和视角。提供拖拽取样与姿态过渡助手，支持缓动、撤销和 Next 谱面保存；可选择让游戏 UI 与背景跟随谱面。",
+  "entry": "main.mjs",
+  "conflicts": ["sky-dodge"],
+  "settings": {
+    "assistant-key": { "type": "shortcut", "label": "打开摄像机过渡助手", "default": "CTRL&ALT&C" },
+    "quality": { "type": "select", "label": "透视画质", "default": "balanced", "options": { "economy": "流畅", "balanced": "均衡", "sharp": "精细" } }
+  }
+}

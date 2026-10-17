@@ -13,6 +13,10 @@ export interface HistoryCommand {
   after: Chart;
   beforeSelection?: unknown;
   afterSelection?: unknown;
+  /** A side effect paired with this command, used by mod-provided auxiliary edits. */
+  auxiliary?: { undo(): void; redo(): void };
+  /** When true the document is untouched and only the auxiliary callbacks run. */
+  auxiliaryOnly?: boolean;
 }
 
 /**
@@ -49,7 +53,8 @@ export class History {
     const command = this.undoStack.pop();
     if (!command) return false;
     this.redoStack.push(command);
-    this.document = command.before;
+    if (!command.auxiliaryOnly) this.document = command.before;
+    command.auxiliary?.undo();
     return true;
   }
 
@@ -57,10 +62,16 @@ export class History {
     const command = this.redoStack.pop();
     if (!command) return false;
     this.undoStack.push(command);
-    this.document = command.after;
+    if (!command.auxiliaryOnly) this.document = command.after;
+    command.auxiliary?.redo();
     return true;
   }
 
   markSaved(document: Chart = this.document): void { this.savedDocument = document; }
+  commitAuxiliary(label: string, auxiliary: { undo(): void; redo(): void }): void {
+    this.undoStack.push({ label, before: this.document, after: this.document, auxiliary, auxiliaryOnly: true });
+    if (this.undoStack.length > this.limit) this.undoStack.shift();
+    this.redoStack = [];
+  }
   get dirty(): boolean { return this.document !== this.savedDocument; }
 }

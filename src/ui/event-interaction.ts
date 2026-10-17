@@ -88,6 +88,8 @@ interface EventDrag {
   tracing?: boolean;
   points?: CanvasPoint[];
   type?: AnyEventType;
+  /** Client X of the previous multi-pan move, so column panning can use the raw delta. */
+  clientX?: number;
 }
 
 /**
@@ -99,6 +101,9 @@ interface EventDrag {
  */
 interface EventTimeline {
   eventDisplayChart?: Chart;
+  createPlacedEvent?: (...args: Parameters<typeof placedEvent>) => ReturnType<typeof placedEvent>;
+  eventChannelAt?: (horizontal: number) => number;
+  panEventColumns?: (deltaX: number) => void;
   eventsCanvas: HTMLCanvasElement;
   tempo: TempoMap;
   origin: number;
@@ -181,6 +186,8 @@ export class EventInteraction {
     return Math.round(target * this.timeline.division) / this.timeline.division - beatValue(start);
   }
 
+  createEvent(...args: Parameters<typeof placedEvent>): ReturnType<typeof placedEvent> { return this.timeline.createPlacedEvent ? this.timeline.createPlacedEvent(...args) : placedEvent(...args); }
+
   place(type: AnyEventType | null = null, beat?: number, easingType?: number | null, inst = false): boolean {
     const session = this.timeline.getSession() as EventSession;
     if (!session.line) return false;
@@ -188,7 +195,8 @@ export class EventInteraction {
     if (beat === undefined && !point) return false;
     const lineIndex = this.timeline.lineIndexAt(point?.x ?? 0, this.canvas.clientWidth, 'events');
     const panelWidth = this.timeline.panelWidth(this.canvas.clientWidth, 'events'); const panelOffset = this.timeline.panelIndex(lineIndex, 'events') * this.timeline.panelStride(this.canvas.clientWidth, 'events') - this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-    const channel = Math.max(0, Math.min(this.timeline.eventTypes.length - 1, Math.floor(((point?.x ?? 0) - panelOffset) / (panelWidth / this.timeline.eventTypes.length))));
+    const channel = this.timeline.eventChannelAt ? this.timeline.eventChannelAt((point?.x ?? 0) - panelOffset) : Math.max(0, Math.min(this.timeline.eventTypes.length - 1, Math.floor(((point?.x ?? 0) - panelOffset) / (panelWidth / this.timeline.eventTypes.length))));
+    if (channel < 0 && !this.pending && !type) return false;
     const eventType: AnyEventType = this.pending?.type ?? type ?? this.timeline.eventTypes[channel];
     const at = beat ?? this.timeline.eventBeatAt(point!.y, eventType, true);
     session.focus = 'events'; session.eventLayer = this.timeline.layer; session.selection.clear();
@@ -200,7 +208,7 @@ export class EventInteraction {
       let event: ChartEvent | null;
       // `placedEvent` throws the validation errors this handler reports; `error` is `unknown` under
       // `strict`, so the message is read through a local narrowing rather than asserted.
-      try { event = placedEvent(session, pending.type, pending.beat, at, easingType, pending.lineIndex, pending.inst); }
+      try { event = this.createEvent(session, pending.type, pending.beat, at, easingType, pending.lineIndex, pending.inst); }
       catch (error) { this.timeline.notify?.(errorMessage(error), 'error'); return false; }
       if (event) insertEventAt(session, pending.lineIndex ?? lineIndex, pending.type, event);
       this.pending = null;
@@ -231,13 +239,14 @@ export class EventInteraction {
     }
     session.focus = 'events'; session.eventLayer = this.timeline.layer;
     if (!event.ctrlKey && !event.shiftKey && event.button !== 1) { session.selection.clear(); if (!rectangle) session.eventSelection.clear(); }
-    this.canvas.focus(); this.canvas.setPointerCapture(event.pointerId);
+    this.canvas.focus({ preventScroll: true }); this.canvas.setPointerCapture(event.pointerId);
     const multiMode = session.multiLineActive;
     const multiPanel = multiMode && this.timeline.panelCount('events') > 1;
-    if (multiPanel && (event.shiftKey || event.button === 1)) {
+    const panColumns = typeof this.timeline.panEventColumns === 'function';
+    if ((multiPanel || panColumns) && (event.shiftKey || event.button === 1)) {
       const worldX = point.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
       this.drag = { kind: 'rectangle', area: 'events', start: point, startWorldX: worldX, current: point, currentWorldX: worldX, startFactor: this.timeline.factorForLine(panelLineIndex), startSeconds: this.timeline.timeAt(point.y), append: true, remove: false };
-    } else if (multiPanel && (!rectangle && !this.timeline.tool)) this.drag = { kind: 'multi-pan', start: point, current: point };
+    } else if ((multiPanel || panColumns) && (!rectangle && !this.timeline.tool)) this.drag = { kind: 'multi-pan', start: point, current: point, clientX: event.clientX };
     else if (!multiMode && (event.shiftKey || event.button === 1)) this.drag = { kind: 'rectangle', area: 'events', start: point, startFactor: this.timeline.factorForLine(session.lineIndex), startSeconds: this.timeline.timeAt(point.y), current: point, append: true, remove: false };
     else if (rectangle && event.button === 0) {
       // Selection across multiple lines is owned by `event-commands`, so the single-line and
@@ -260,6 +269,12 @@ export class EventInteraction {
       const drag = this.drag; const previous = drag.current; drag.current = point; drag.currentWorldX = point.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
       if (drag.startFactor !== undefined) drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, drag.startFactor) + (this.timeline.viewHeight() - (this.timeline.judgementOffset ?? 42) - drag.current.y) / this.timeline.scale;
       if (drag.kind === 'multi-pan') {
+        if (this.timeline.panEventColumns) {
+          this.timeline.panEventColumns(event.clientX - (drag.clientX ?? event.clientX)); drag.clientX = event.clientX;
+          const next = this.timeline.point(event, this.canvas); drag.current = next;
+          this.timeline.eventCursor = next; this.timeline.clipboardPointer = next;
+          this.canvas.style.cursor = 'grabbing'; this.timeline.changed(); return;
+        }
         const current = this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
         // `multiLineScroll` holds one shared offset or one per area (`notes` / `events`); both forms
         // carry the `events` key this branch writes.
@@ -281,14 +296,14 @@ export class EventInteraction {
       }
     }
     const hit = this.hit(point);
-    this.canvas.style.cursor = hit && (Math.abs(point.y - hit.y) < 6 || Math.abs(point.y - hit.y - hit.height) < 6) ? 'ns-resize' : hit ? 'move' : 'default';
+    this.canvas.style.cursor = hit && (Math.abs(point.y - hit.y) < 6 || Math.abs(point.y - hit.y - hit.height) < 6) ? 'ns-resize' : hit ? 'move' : this.timeline.panEventColumns ? 'grab' : 'default';
     this.timeline.changed();
   }
 
   up(event: PointerLike): void {
     if (!this.drag) return;
     if (this.drag.kind === 'stroke') this.move(event);
-    if (this.drag.kind === 'multi-pan') { this.drag = null; this.timeline.changed(); return; }
+    if (this.drag.kind === 'multi-pan') { this.drag = null; this.canvas.style.cursor = this.timeline.panEventColumns ? 'grab' : 'default'; this.timeline.changed(); return; }
     if (this.drag.kind === 'stroke' && !this.drag.remove && !this.drag.tracing && this.timeline.previewPick?.(event)) { this.drag = null; this.timeline.changed(); return; }
     this.drag.current = this.timeline.point(event, this.canvas);
     this.drag.currentWorldX = this.drag.current.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
@@ -367,7 +382,7 @@ export class EventInteraction {
     if (channel < 0) return;
     const end: number = this.timeline.eventCursor ? this.timeline.eventBeatAt(this.timeline.eventCursor.y, pending.type, true) : pending.beat;
     let valid = true;
-    try { placedEvent(session, pending.type, pending.beat, end, undefined, pending.lineIndex); } catch { valid = false; }
+    try { this.createEvent(session, pending.type, pending.beat, end, undefined, pending.lineIndex, pending.inst); } catch { valid = false; }
     const lineIndex = this.timeline.lineIndexAt(this.timeline.eventCursor?.x ?? 0, width, 'events');
     const vertical = session.multiLineActive && session.multiLineMode === 'events' ? (beat: BeatLike) => this.timeline.verticalForLine(beat, lineIndex, this.canvas.clientHeight) : (beat: BeatLike) => this.timeline.eventVertical(beat, pending.type);
     const top = Math.min(vertical(pending.beat), vertical(end));

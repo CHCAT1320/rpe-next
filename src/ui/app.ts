@@ -79,6 +79,12 @@ import { EditorSkins } from './editor-skins.ts';
 import { editorSkinContext, editorCanvasRevision } from './editor-skin-canvas.ts';
 import { editorSkinState, editorSkinSignal } from './editor-skin-state.ts';
 import { pcmWave, isPcmSource } from '../platform/pcm-wave.ts';
+import { NoteSkins } from './note-skins.ts';
+import { ModManager } from './mod-manager.ts';
+import type { ModEditor } from './mod-runtime.ts';
+import { emitModHook } from '../core/mod-hooks.ts';
+import { GlobalEventRegistry, registerPlaceholderGlobalEvent } from '../core/global-events.ts';
+import { GlobalEventsEditor } from './global-events.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, JudgeLine, Note, NoteType } from '../core/types.ts';
 import type { Timeline as TimelineClass, TimelineSession, CursorPosition } from './timeline.ts';
 import type { AudioContextLike } from '../platform/audio.ts';
@@ -300,6 +306,14 @@ type StripEvent = MouseEvent;
  * kind, so controls can be read and written without a narrowing at each use.
  */
 const element = <T extends HTMLElement = HTMLElement>(selector: string): T => document.querySelector(selector) as T;
+let mods: ModManager | undefined;
+(globalThis as { __rpenModInputGate?: boolean }).__rpenModInputGate = true;
+for (const type of ['keydown', 'keyup', 'wheel', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'drop', 'dragstart', 'input', 'change', 'submit']) window.addEventListener(type, event => {
+  const runtime = mods?.runtime; if (!runtime) return;
+  const key = event as KeyboardEvent;
+  if (type === 'keydown' && key.ctrlKey && key.altKey && key.shiftKey && key.key === 'F11') { event.preventDefault(); event.stopImmediatePropagation(); runtime.emergency?.(); return; }
+  runtime.handleInput(event);
+}, { capture: true, passive: false });
 /**
  * The settings controls `applyDisplaySettings` writes, as `[element id, preference key, default]`.
  *
@@ -311,6 +325,7 @@ const element = <T extends HTMLElement = HTMLElement>(selector: string): T => do
  * boolean: `judgement-color` is a `<input type="color">` whose default is a hex string.
  */
 const displayFields: [string, keyof EditorPreferences, string | number | boolean][] = [
+
   ['text-selection-drag', 'textSelectionDrag', false],
   ['event-cut-density', 'cutDensity', 4],
   ['sample-auto-fit', 'sampleAutoFit', true],
@@ -402,6 +417,11 @@ const noiseEditor = new NoiseAreaEditor(element<HTMLElement>('#noise-panel'), el
   getAssets: () => assets,
   onAssets: (entries: Map<string, Uint8Array>) => { for (const [name, bytes] of entries) assets.set(name, bytes); assetDirty = true; images.load(session.chart, assets, chartName); invalidate(); },
 });
+const globalEventRegistry = new GlobalEventRegistry();
+registerPlaceholderGlobalEvent(globalEventRegistry);
+const globalEvents = new GlobalEventsEditor(element('#global-events-panel'), element('#global-events-canvas'), globalEventRegistry,
+  () => ({ session, tempo, timeline, previewVisible: preview.visible, seconds: () => chartSeconds(), duration: () => audio.duration }),
+  { activate: activatePane, invalidate, notify, seek: beat => seekBeat(beat), wheel: event => previewWheel(event) });
 for (const renderer of [preview, realtimePreview]) {
   renderer.noisePreview.hiddenLayers = noiseEditor.hiddenLayers;
   renderer.noisePreview.simpleLayers = noiseEditor.simpleLayers;
@@ -471,7 +491,7 @@ const stopMultiLineScrollDrag = (event?: Event) => {
 multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
 multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
 multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
-const batchControls = new BatchControls(element<HTMLElement>('.stage'), timeline, () => session, () => !atHome && !preview.visible && !noiseEditor.active, reportError);
+const batchControls = new BatchControls(element<HTMLElement>('.stage'), timeline, () => session, () => !atHome && !preview.visible && !noiseEditor.active && !globalEvents.active, reportError);
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify,
 });
@@ -486,10 +506,12 @@ const noiseTrackingPanel = new NoiseTrackingPanel(element('#noise-tracking-edito
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
 const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => { images.load(session.chart, assets, chartName); } });
 const editorSkins = new EditorSkins(element('#editor-skin-settings'), { invalidate, notify });
+const noteSkins = new NoteSkins(element('#note-skin-settings'), { skin, hitSounds, audio, invalidate, notify, settings: settingsDialog, pause: () => playback.pause() });
 document.addEventListener('rpen-editor-skin-changed', () => {
   lineSwitcher.lastFrame = -Infinity; lineSwitcher.cache.clear(); renderSession();
   if (activePaneName === 'clipboard') renderClipboardPanel();
 });
+document.addEventListener('rpen-note-skin-changed', () => { if (textLinesPanel.active) textLinesPanel.refresh(); });
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
   notify,
   onChange: (nextAssets: Map<string, Uint8Array>, nextFolders?: Iterable<string>) => {
@@ -514,7 +536,7 @@ const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
   chart: session.chart, tempo, seconds: chartSeconds(), selected: session.lineIndex,
   layer: timeline.layer, extended: timeline.extended,
   start: timeline.timeAt(timeline.viewHeight()), end: timeline.timeAt(0),
-  visible: hasDocument && !atHome && !preview.visible && !noiseEditor.active && !dialogOpen(),
+  visible: hasDocument && !atHome && !preview.visible && !noiseEditor.active && !globalEvents.active && !dialogOpen(),
 }), { select: (index: number) => selectOverviewLine(index) });
 function clipboardTargetLine() {
   return timeline.hoverArea === 'events'
@@ -696,7 +718,7 @@ const advanceEditClock = (timestamp: number) => {
   editClockTick = timestamp;
 };
 const formatEditTime = (seconds: number) => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
-const currentBeat = () => tempo.beat(chartSeconds(), noiseEditor.active ? 1 : session.line?.bpmfactor ?? 1);
+const currentBeat = () => tempo.beat(chartSeconds(), noiseEditor.active || globalEvents.active ? 1 : session.line?.bpmfactor ?? 1);
 let collaborationJoining = false;
 const collaborationTool = document.createElement('button'); collaborationTool.id = 'collaboration-tool'; collaborationTool.textContent = '联机协作'; element('[data-panel="chart"] .action-grid').append(collaborationTool);
 const collaboration = new CollaborationPanel(element('#collaboration-panel'), () => ({
@@ -913,6 +935,8 @@ function persistEditor() {
 }
 
 function activatePane(name: string) {
+  if (name === 'global-event-properties' && (!globalEvents.active || globalEvents.selection.size !== 1)) name = 'global-events';
+  if (name === 'global-events' && !globalEvents.active) { openGlobalEvents(); return; }
   if (name !== 'events' && eventSampler.active) eventSampler.finish(false);
   if (name !== 'multi') multiEdit.hide();
   if (name !== 'trajectory') trajectoryPanel.hide();
@@ -922,8 +946,11 @@ function activatePane(name: string) {
   activePaneName = name;
   editorSkinState({ pane: name });
   noiseEditor.syncChrome();
+  globalEvents.syncChrome();
   for (const panel of document.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
+  if (globalEvents.active && ['global-events', 'global-event-properties'].includes(name)) globalEvents.render();
+  invalidate();
 }
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pane]')) button.onclick = () => {
   const pane = button.dataset.pane;
@@ -931,8 +958,17 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pane]')
   activatePane(pane ?? '');
   if (pane === 'lines') linePanel.render();
 };
-function openMultiLinePanel() { activatePane('multi-line'); multiLinePanel.render(); }
-function openNoisePanel() { timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false; noiseEditor.open(); }
+function openMultiLinePanel() { if (globalEvents.active) globalEvents.close(); activatePane('multi-line'); multiLinePanel.render(); }
+function openNoisePanel() { if (globalEvents.active) globalEvents.close(); timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false; noiseEditor.open(); }
+function openGlobalEvents() {
+  if (noiseEditor.active) noiseEditor.close();
+  eventSampler.finish?.(false); timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false;
+  globalEvents.open();
+  renderSession();
+}
+const globalEventsTool = document.createElement('button'); globalEventsTool.id = 'global-events-tool'; globalEventsTool.textContent = '全局事件'; element<HTMLElement>('#noise-areas-tool').after(globalEventsTool);
+globalEventsTool.onclick = openGlobalEvents;
+element<HTMLButtonElement>('#close-global-events').onclick = () => { globalEvents.close(); renderSession(); };
 element<HTMLButtonElement>('#noise-areas-tool').addEventListener('click', openNoisePanel);
 element<HTMLButtonElement>('#close-noise-editor').addEventListener('click', () => noiseEditor.close());
 element<HTMLButtonElement>('#noise-tab').addEventListener('click', () => { activatePane('noise'); noiseEditor.render(); });
@@ -951,18 +987,19 @@ element<HTMLButtonElement>('#multi-line-merge').addEventListener('click', () => 
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-return-chart]')) button.onclick = () => activatePane('chart');
 for (const form of document.querySelectorAll<HTMLFormElement>('#properties, #event-properties')) form.addEventListener('submit', event => { event.preventDefault(); (document.activeElement as HTMLElement | null)?.blur(); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
-function togglePreview(force?: boolean, stay = false, replay = false) {
+function togglePreview(force?: boolean, stay = false, replay = false, { autoplay = true }: { autoplay?: boolean } = {}) {
   const visible = force ?? !preview.visible;
   if (visible) clearNoteSourceToast();
   if (visible && (!preview.visible || replay)) {
     previewReturnTime = audio.time; timeline.cancelPlacement();
     if (replay) playback.seek(0);
-    if ((editorPreferences.autoplayView ?? preferences.settings.autoplayView) && !audio.playing && !playback.pending) togglePlayback().catch(reportError);
+    if (autoplay && (editorPreferences.autoplayView ?? preferences.settings.autoplayView) && !audio.playing && !playback.pending) togglePlayback().catch(reportError);
   }
   if (!visible && preview.visible) playback.seek(stay ? audio.time : previewReturnTime);
   preview.visible = visible;
   element('.preview-wrap').hidden = !preview.visible;
   element<HTMLButtonElement>('#view-toggle').classList.toggle('active', preview.visible);
+  globalEvents.syncChrome();
   element('#multi-line-labels').hidden = preview.visible;
   element<HTMLInputElement>('#multi-line-scroll').hidden = preview.visible;
   element('#preview-title').textContent = session.chart.META.name ?? '';
@@ -1070,7 +1107,7 @@ function updateLineInfo() {
 }
 
 function renderSession() {
-  editorSkinState({ dirty: session.history.dirty || assetDirty, location: atHome ? 'home' : 'editor', mode: noiseEditor.active ? 'noise' : session.multiLineActive ? 'multi-' + session.multiLineMode : timeline.notesOnly ? 'notes' : 'notes-events' });
+  editorSkinState({ dirty: session.history.dirty || assetDirty, location: atHome ? 'home' : 'editor', mode: globalEvents.active ? 'global-events' : noiseEditor.active ? 'noise' : session.multiLineActive ? 'multi-' + session.multiLineMode : timeline.notesOnly ? 'notes' : 'notes-events' });
   const editor = element('.editor');
   noiseEditor.syncChrome();
   editor.classList.toggle('multi-notes', session.multiLineActive && session.multiLineMode === 'notes');
@@ -1134,7 +1171,7 @@ function renderSession() {
   element<HTMLSelectElement>('#line-select').value = String(session.lineIndex);
   element<HTMLButtonElement>('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
   element<HTMLButtonElement>('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
-  element<HTMLButtonElement>('#notes-only').disabled = session.multiLineActive || noiseEditor.active;
+  element<HTMLButtonElement>('#notes-only').disabled = session.multiLineActive || noiseEditor.active || globalEvents.active;
   element('#multi-line-count').textContent = String(session.multiLineActive ? session.multiLineIndices.length : 0);
   element<HTMLButtonElement>('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
   element<HTMLButtonElement>('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
@@ -1162,6 +1199,7 @@ function renderSession() {
   if (noiseTrackingPanel.active) noiseTrackingPanel.sync();
   if (activePaneName === 'multi-line') multiLinePanel.render();
   if (noiseEditor.active) noiseEditor.render();
+  if (globalEvents.active) globalEvents.render();
   if (activePaneName === 'metadata') renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); });
   if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'));
   session.eventLayer = timeline.layer;
@@ -1185,7 +1223,8 @@ function renderSession() {
       : (session.multiLineActive && session.multiLineMode === 'notes'
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
-    if (noiseEditor.active) noiseEditor.render();
+    if (globalEvents.active) globalEvents.render();
+    else if (noiseEditor.active) noiseEditor.render();
     else if (multiEdit.committing) multiEdit.sync();
     else if (activePaneName === 'collaboration') collaboration.renderState();
     else if (textLinesPanel.active) textLinesPanel.sync();
@@ -1213,6 +1252,7 @@ function renderSession() {
   const limits = previewLimitations(session.chart);
   element('#compatibility').textContent = '已使用原 RPE 音符素材与打击音；支持封面、静态纹理、多线与控制曲线。尚需原版逐帧对照。' + (limits.length ? `需进一步验证：${limits.join('、')}。` : '');
   invalidate();
+  globalEvents.syncChrome();
 }
 
 session.addEventListener('change', renderSession);
@@ -1221,6 +1261,7 @@ function replaceChart(chart: Chart, name: string, nextAssets: Map<string, Uint8A
   assertChart(chart);
   if (eventSampler.active) eventSampler.finish(false);
   noiseEditor.reset();
+  globalEvents.reset();
   noiseFitPanel.reset();
   noiseTrackingPanel.reset();
   if (!collaborationJoining && collaboration.client.active) collaboration.client.leave();
@@ -1342,7 +1383,7 @@ function prependAudioSilence() {
 }
 
 function seekBeat(value: number, pause = true) {
-  playback.seek(tempo.seconds(value, noiseEditor.active ? 1 : session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
+  playback.seek(tempo.seconds(value, noiseEditor.active || globalEvents.active ? 1 : session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
   invalidate();
 }
 
@@ -1355,6 +1396,7 @@ async function togglePlayback() {
 function save() {
   noiseEditor.flush();
   editorSkinSignal('save-started');
+  mods?.runtime.emit('editor:save-started',{});
   const savingSession = session;
   // The capture closure returns the document it saved alongside the project, so `complete` can mark
   // exactly that revision as saved. Naming the snapshot here is what lets `ManualSaveQueue` infer its
@@ -1378,8 +1420,8 @@ function save() {
       || assetFolders.size !== savedFolders.length || savedFolders.some(folder => !assetFolders.has(folder));
     renderSession();
     const message = session.history.dirty || assetDirty ? '已保存开始保存时的版本；后续修改尚未保存' : '已保存到谱面库';
-    status(message); notify(message, 'success'); editorSkinSignal('save-succeeded');
-  }).catch(error => { editorSkinSignal('save-failed'); throw error; });
+    status(message); notify(message, 'success'); editorSkinSignal('save-succeeded');mods?.runtime.emit('editor:save-succeeded',{message});
+  }).catch(error => { editorSkinSignal('save-failed');mods?.runtime.emit('editor:save-failed',{error}); throw error; });
 }
 
 function validateCommit(label: string, next: Chart) { assertChart(next); session.commit(label, next); }
@@ -1566,6 +1608,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-tool]')
   invalidate();
 };
 function travel(direction: 'undo' | 'redo', silent = false) {
+  globalEvents.timeline.cancelPlacement();
   noiseEditor.cancelGesture(); noiseEditor.endSample(false);
   timeline.cancelPlacement();
   const stack = direction === 'undo' ? session.history.undoStack : session.history.redoStack;
@@ -1579,21 +1622,24 @@ listen('#redo', () => travel('redo'));
 listen('#curve-notes', openCurvePanel);
 listen('#curve-trajectory', () => { curveEditorOpen = false; trajectoryPanel.open(); });
 listen('#text-lines-tool', () => {
+  if (globalEvents.active) globalEvents.close();
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; textLinesPanel.open();
 });
 listen('#noise-fit-tool', () => {
+  if (globalEvents.active) globalEvents.close();
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; noiseFitPanel.open();
 });
 listen('#noise-tracking-tool', () => {
+  if (globalEvents.active) globalEvents.close();
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); clearNoteSourceToast(); curveEditorOpen = false; noiseTrackingPanel.open();
 });
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
-  if (session.multiLineActive || noiseEditor.active) return;
+  if (session.multiLineActive || noiseEditor.active || globalEvents.active) return;
   timeline.cancelPlacement(); timeline.hoverArea = 'notes'; session.focus = 'notes';
   activatePane('notes');
   editorPreferences.notesOnly = !timeline.notesOnly;
@@ -1633,14 +1679,16 @@ element<HTMLButtonElement>('#toolbar-mode').onclick = () => {
   applyDisplaySettings(); persistEditor();
 };
 function copySelection() {
+  if (globalEvents.active) { globalEvents.copy(); return; }
   if (noiseEditor.active) { noiseEditor.copy(); return; }
   const count = copyObjects(session);
   if (count) { clipboardHistory.remember(session); status(`已复制 ${count} 个物件`); }
   invalidate();
 }
-function deleteSelection() { if (noiseEditor.active) { noiseEditor.remove(); return; } deleteObjects(session); }
-function cutSelection() { if (noiseEditor.active) { noiseEditor.copy(true); return; } if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
+function deleteSelection() { if (globalEvents.active) { globalEvents.safely(() => globalEvents.remove()); return; } if (noiseEditor.active) { noiseEditor.remove(); return; } deleteObjects(session); }
+function cutSelection() { if (globalEvents.active) { globalEvents.safely(() => globalEvents.copy(true)); return; } if (noiseEditor.active) { noiseEditor.copy(true); return; } if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
 function pasteSelection(mirror = false, keepTime = false) {
+  if (globalEvents.active) { globalEvents.safely(() => globalEvents.paste(keepTime)); return; }
   if (noiseEditor.active) { noiseEditor.action(keepTime ? 'KeepTimePaste' : 'Paste'); return; }
   timeline.clipboardMode = { mirror, keepTime };
   pasteObjects(session, clipboardBeat(timeline), { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() });
@@ -1692,7 +1740,7 @@ function renderHistoryPanel() {
   }
 }
 listen('#history-panel', () => { activatePane('history'); renderHistoryPanel(); });
-listen('#clear-clipboard', () => { noiseEditor.clipboard = null; clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
+listen('#clear-clipboard', () => { if (globalEvents.active) { globalEvents.document.editor.eventClipboard = []; globalEvents.document.editor.clipboardVisible = false; invalidate(); return; } noiseEditor.clipboard = null; clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
 const clipboardButton = document.createElement('button'); clipboardButton.id = 'clipboard-history'; clipboardButton.textContent = '剪贴板历史'; clipboardButton.title = '长按 Ctrl+V';
 element('[data-panel="chart"] .action-grid').append(clipboardButton);
 function renderClipboardPanel() {
@@ -1880,6 +1928,7 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
+  if (mods?.runtime.locks.size) return;
   if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || usesNativeTextShortcut(event)) return;
   event.preventDefault();
   if (event.repeat) return;
@@ -1888,12 +1937,14 @@ window.addEventListener('keydown', event => {
 }, true);
 window.addEventListener('blur', () => { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); });
 window.addEventListener('keydown', event => {
+  if (mods?.runtime.locks.size) return;
   if (atHome || !hasDocument || dialogOpen() || usesNativeTextShortcut(event) || isTextEntry(event.target as ShortcutTargetArg) || !shortcutMatches(event, preferences.hotkeys.Pause)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   playbackSpaceHeld = true;
   if (!event.repeat) togglePlayback().catch(reportError);
 }, true);
 window.addEventListener('keyup', event => {
+  if (mods?.runtime.locks.size) return;
   if (!shortcutReleased(event, preferences.hotkeys.Pause) || !playbackSpaceHeld) return;
   event.preventDefault(); event.stopImmediatePropagation(); playbackSpaceHeld = false;
 }, true);
@@ -1902,13 +1953,18 @@ window.addEventListener('keydown', async event => {
   // `keyboard.ts` types its parameter as a structural `ShortcutTarget` and probes every member before
   // using it (see `closest`); `isPlaybackSpace` in that same module casts `event.target` the same way.
   // The cast only names the members the helpers below inspect.
+  if (mods?.runtime.locks.size) return;
   const target = event.target as ShortcutTargetArg;
   if (atHome || !hasDocument || dialogOpen() || usesNativeTextShortcut(event)) return;
   if (batchControls.active) { event.preventDefault(); return; }
-  const area = timeline.hoverArea ?? session.focus;
+  const area = globalEvents.active ? 'events' : timeline.hoverArea ?? session.focus;
   const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
-  const hasSelection = noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
+  const hasSelection = globalEvents.active ? globalEvents.selection.size > 0 : noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
   const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
+  if (globalEvents.active) {
+    try { if (action && globalEvents.action(action, event)) { event.preventDefault(); event.stopImmediatePropagation(); return; } }
+    catch (error) { event.preventDefault(); reportError(error); return; }
+  }
   if (action && noiseFitPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
   if (action && noiseTrackingPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
   if (noiseEditor.active && (!preview.visible || noiseEditor.sampleMode)) {
@@ -2002,6 +2058,7 @@ window.addEventListener('keydown', async event => {
   } catch (error) { event.preventDefault(); reportError(error); }
 }, true);
 window.addEventListener('keyup', event => {
+  if (mods?.runtime.locks.size) return;
   pasteGesture.up(event);
   if (timeline.clipboardMode?.mirror || timeline.clipboardMode?.keepTime) { timeline.clipboardMode = {}; invalidate(); }
   if (heldPreview && (event.code === heldPreview.code || shortcutReleased(event, preferences.hotkeys[heldPreview.action]))) {
@@ -2026,9 +2083,10 @@ let lastTick = 0;
 function frame(timestamp: number) {
   const elapsed = lastTick ? (timestamp - lastTick) / 1000 : 0; lastTick = timestamp;
   audio.update();
+  mods?.runtime.tick({timestamp,elapsed,chartSeconds:chartSeconds(),musicSeconds:audio.time,playing:audio.playing});
   batchControls.sync();
   lineSwitcher.draw(timestamp);
-  if (!atHome) { if (noiseEditor.active) noiseEditor.autoScroll(elapsed); else timeline.autoScroll(elapsed); }
+  if (!atHome) { if (globalEvents.active) globalEvents.autoScroll(elapsed); else if (noiseEditor.active) noiseEditor.autoScroll(elapsed); else timeline.autoScroll(elapsed); }
   if (timestamp - frameSampleStart >= 500) { measuredFps = frameSampleCount * 1000 / (timestamp - frameSampleStart); frameSampleStart = timestamp; frameSampleCount = 0; }
   advanceEditClock(timestamp);
   if (hasDocument && !atHome && timestamp - lastInfoTick > 500) {
@@ -2040,7 +2098,7 @@ function frame(timestamp: number) {
   // `Boolean` coercion is the value the original passed to the same truthiness test.
   if (hasDocument && !atHome && !document.hidden) autoSave.tick(timestamp, Boolean(editorPreferences.autoSave ?? preferences.settings.autoSave),
     Number(editorPreferences.autoSaveSeconds ?? preferences.settings.autoSaveSeconds), session.history.dirty && session.chart !== lastDraftDocument);
-  if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
+  if (audio.playing && !mods?.runtime.locks.size && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
   if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active || noiseTrackingPanel.active && noiseTrackingPanel.animating || noiseFitPanel.active && noiseFitPanel.options.animate && noiseFitPanel.options.show && noiseFitPanel.previewChart && !noiseFitPanel.fullPreview) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
@@ -2050,7 +2108,7 @@ function frame(timestamp: number) {
     session.editSeconds = Math.max(0, chartSeconds());
     updateLineInfo();
     if (audio.playing) timeline.origin = beat;
-    if (!preview.visible && !noiseEditor.active && !noiseFitPanel.active && !noiseTrackingPanel.previewing) {
+    if (!preview.visible && !noiseEditor.active && !globalEvents.active && !noiseFitPanel.active && !noiseTrackingPanel.previewing) {
       timeline.draw(beat);
       multiEdit.drawTimeline();
       selectionOverlay.draw();
@@ -2059,6 +2117,7 @@ function frame(timestamp: number) {
       audioAnalysis.draw(offsetSeconds());
     }
     if (noiseEditor.active) noiseEditor.draw();
+    if (globalEvents.active) globalEvents.draw(beat);
     preview.duration = realtimePreview.duration = audio.duration;
     preview.selectedNoiseArea = realtimePreview.selectedNoiseArea = noiseEditor.active ? noiseEditor.selected : -1;
     const viewSession = timeline.getSession();
@@ -2068,15 +2127,17 @@ function frame(timestamp: number) {
     const textView = textLinesPanel.view();
     const noiseFitView = noiseFitPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
     const trackingView = noiseTrackingPanel.tick(timestamp, chartSeconds(), audio.playing);
-    const viewChart = trackingView?.chart ?? noiseView?.chart ?? eventSampleView?.chart ?? noiseFitView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
-    const viewSeconds = trackingView?.seconds ?? noiseView?.seconds ?? eventSampleView?.seconds ?? noiseFitView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds();
+    const modView=emitModHook('preview:before',{chart:trackingView?.chart ?? noiseView?.chart ?? eventSampleView?.chart ?? noiseFitView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart),seconds:trackingView?.seconds ?? noiseView?.seconds ?? eventSampleView?.seconds ?? noiseFitView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds(),lineIndex:viewSession.lineIndex});
+    const viewChart = modView.chart;
+    const viewSeconds = modView.seconds;
     const previewAllLines = preview.allLines; const previewEffects = preview.showHitEffects;
     const previewNumbers = preview.lineNumbers; const previewArrows = preview.lineArrows;
     const forcedLineOpacity = preview.forceLineOpacity;
     preview.forceLineOpacity = Boolean(trackingView?.forceLineOpacity);
     if (trackingView) { preview.allLines = true; preview.showHitEffects = false; }
     if (textView || noiseFitView) { preview.allLines = true; preview.showHitEffects = false; preview.lineNumbers = false; preview.lineArrows = false; }
-    preview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+    preview.draw(viewChart, tempo, viewSeconds, modView.lineIndex);
+    if(preview.visible)mods?.runtime.draw(preview,{target:'preview',chart:viewChart,tempo,seconds:viewSeconds,timestamp});
     preview.allLines = previewAllLines; preview.showHitEffects = previewEffects;
     preview.lineNumbers = previewNumbers; preview.lineArrows = previewArrows;
     preview.forceLineOpacity = forcedLineOpacity;
@@ -2092,7 +2153,8 @@ function frame(timestamp: number) {
       if (trackingView) realtimePreview.allLines = true;
       if (textView || noiseFitView) { realtimePreview.allLines = true; realtimePreview.lineNumbers = false; realtimePreview.lineArrows = false; }
       if (trackingView || noiseEditor.sampleMode || eventSampler.active || noiseFitView) realtimePreview.opacity = 1;
-      realtimePreview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+      realtimePreview.draw(viewChart, tempo, viewSeconds, modView.lineIndex);
+      if(realtimePreview.visible)mods?.runtime.draw(realtimePreview,{target:'realtime',chart:viewChart,tempo,seconds:viewSeconds,timestamp});
       realtimePreview.opacity = opacity;
       realtimePreview.allLines = allLines;
       realtimePreview.lineNumbers = lineNumbers; realtimePreview.lineArrows = lineArrows;
@@ -2349,3 +2411,27 @@ for (const [id, key] of displayFields) {
   });
 }
 timeline.eventPlacementType = timeline.eventTypes[0];
+
+const modEditor: ModEditor = {
+  get session(){return session;},get chart(){return session.chart;},get tempo(){return tempo;},get assets(){return assets;},get preferences(){return preferences;},get editorPreferences(){return editorPreferences;},get chartName(){return chartName;},
+  get hasDocument(){return hasDocument&&!atHome;},get home(){return atHome;},get activePane(){return activePaneName;},
+  get dirty(){return session.history.dirty||assetDirty;},get libraryProject(){return libraryProject;},get loop(){return loop;},set loop(value){loop=value;},
+  audio,playback,preview,realtimePreview,timeline,skin,images,hitSounds,editorSkins,noteSkins,noiseEditor,eventSampler,trajectoryPanel,textLinesPanel,noiseFitPanel,noiseTrackingPanel,multiEdit,batchControls,collaboration,globalEvents,globalEventRegistry,openGlobalEvents,
+  chartSeconds,offsetSeconds,currentBeat,invalidate,render:renderSession,notify,save,activatePane,
+  commit:(label: string,chart: Chart)=>session.commit(label,chart),replace:(chart: Chart,name=chartName)=>replaceChart(chart,name),
+  seek:(seconds: number,{music=false,pause=true}: { music?: boolean; pause?: boolean } = {})=>{playback.seek(seconds+(music?0:offsetSeconds()),pause);invalidate();},
+  seekBeat,selectLine:(index: number)=>{session.selectLine(index);renderSession();},setPreview:(visible: boolean, options: { stay?: boolean; autoplay?: boolean } = {})=>togglePreview(visible,options.stay??true,false,{autoplay:options.autoplay??false}),
+  play:async()=>{if(!audio.playing&&!playback.pending)await togglePlayback();},pause:()=>playback.pause(),
+  addAsset:(path: string,bytes: Uint8Array)=>{assets.set(path,bytes);assetDirty=true;images.load(session.chart,assets,chartName);invalidate();},
+  removeAsset:(path: string)=>{assets.delete(path);assetDirty=true;images.load(session.chart,assets,chartName);invalidate();},
+  raw:{get session(){return session;},get chart(){return session.chart;},set chart(value){session.history.document=value;session.notify();},get assets(){return assets;},get tempo(){return tempo;},set tempo(value){tempo=value;timeline.tempo=value;invalidate();},renderSession,replaceChart,activatePane,togglePlayback,togglePreview,save,applyDisplaySettings,persistEditor,setHome},
+  beginPreviewSession(){
+    if(atHome||!hasDocument)throw Error('请先打开谱面');
+    const snapshot={visible:preview.visible,pane:activePaneName,allLines:preview.allLines,lineNumbers:preview.lineNumbers,lineArrows:preview.lineArrows,lineTint:preview.lineTint,cameraX:preview.cameraX,viewDivisor:preview.viewDivisor,collisionGeometry:preview.collisionGeometry};
+    playback.pause();timeline.cancelPlacement();batchControls.cancel();pasteGesture.cancel();heldPreview=null;playbackSpaceHeld=false;clearNoteSourceToast();
+    eventSampler.finish?.(false);noiseEditor.endSample(false);noiseEditor.flush();noiseTrackingPanel.endSample();activatePane('chart');
+    preview.allLines=true;preview.lineNumbers=false;preview.lineArrows=false;preview.lineTint=false;preview.collisionGeometry=true;togglePreview(true,true,false,{autoplay:false});
+    let done=false;return()=>{if(done)return;done=true;playback.pause();togglePreview(snapshot.visible,true,false,{autoplay:false});preview.allLines=snapshot.allLines;preview.lineNumbers=snapshot.lineNumbers;preview.lineArrows=snapshot.lineArrows;preview.lineTint=snapshot.lineTint;preview.cameraX=snapshot.cameraX;preview.viewDivisor=snapshot.viewDivisor;preview.collisionGeometry=snapshot.collisionGeometry;activatePane(snapshot.pane);invalidate();};
+  },
+};
+mods=new ModManager(modEditor,{notify,invalidate});

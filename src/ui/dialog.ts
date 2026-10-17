@@ -102,4 +102,4 @@ export function confirmAction(title: string, action: () => void): void {
   apply.onclick = () => { modal.close(); action(); };
 }
 
-export function dialogOpen(): boolean { return Boolean(modal.open || (document.querySelector('#settings-modal') as HTMLDialogElement | null)?.open); }
+export function dialogOpen(): boolean { return Boolean(modal.open || document.querySelector('dialog[open]')); }

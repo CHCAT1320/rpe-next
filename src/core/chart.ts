@@ -5,6 +5,8 @@ import { sampleCurveTrajectory } from './curve-trajectory.ts';
 import { trajectorySplitSettings } from './trajectory-simplify.ts';
 import { validateNoiseAreas, diagnoseNoiseAreas, normalizeNoiseAreas, NOISE_VERSION } from './noise-areas.ts';
 import { validateNoiseLayers, NOISE_LAYER_VERSION } from './noise-skin.ts';
+import { emitModHook } from './mod-hooks.ts';
+import { validateGlobalEvents, GLOBAL_EVENT_VERSION } from './global-events.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, ChartMeta, ControlPoint, EventLayer, EventType, EventValue, ExtendedType, JudgeLine, NoiseArea, Note, NoteType } from './types.ts';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'] as const satisfies readonly EventType[];
@@ -129,12 +131,16 @@ export function noteIsAbove(note: Note): boolean {
 }
 
 export function serializeChart(chart: Chart, { compact = false }: { compact?: boolean } = {}): string {
+  const custom = emitModHook('chart:serialize', { chart, compact, text: null as string | null });
+  if (custom.text !== null) return String(custom.text);
+  chart = custom.chart; compact = custom.compact;
   assertChart(chart);
   chart = integerChartAlpha(chart);
   // Areas carry the version that introduced them, so a chart that uses them records the bump even if
   // its own `META.RPEVersion` was written by an older build. Layered noise areas are a later feature
   // still, so they record the higher layer version instead.
-  const snapshot = chart.blockAreaList?.length || chart.noiseAreaLayers ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : NOISE_VERSION) } } : chart;
+  const version = Math.max(chart.META.RPEVersion ?? 0, chart.globalEvents ? GLOBAL_EVENT_VERSION : 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : chart.blockAreaList?.length ? NOISE_VERSION : 0);
+  const snapshot = version !== chart.META.RPEVersion ? { ...chart, META: { ...chart.META, RPEVersion: version } } : chart;
   return stringifyPreservingNumbers(snapshot, compact ? 0 : 2) + (compact ? '' : '\n');
 }
 
@@ -146,6 +152,9 @@ export function stringifyPreservingNumbers(value: unknown, space: number | strin
 }
 
 export function assertChart(chart: unknown): asserts chart is Chart {
+  const validation = emitModHook('chart:validate', { chart, handled: false });
+  if (validation.handled) return;
+  chart = validation.chart;
   // The document is untrusted JSON, so no branch below can be proved statically and the object is
   // never asserted into a shape before it has been checked. The accessors narrow one member at a
   // time; `RawLine`/`RawNote`/`RawEvent` are the validation-only views of the shared domain types.
@@ -165,6 +174,7 @@ export function assertChart(chart: unknown): asserts chart is Chart {
   if (document.blockAreaList != null) validateNoiseAreas(document.blockAreaList as Parameters<typeof validateNoiseAreas>[0]);
   // Layered noise areas are validated by the skin module, which owns their shape.
   validateNoiseLayers(document as unknown as Chart);
+  validateGlobalEvents(document);
   if (document.noiseAreaOptions !== undefined) {
     const options = document.noiseAreaOptions;
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('noiseAreaOptions 必须为对象');
