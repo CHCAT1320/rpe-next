@@ -1,5 +1,6 @@
 import { readZip, writeZip } from './archive.ts';
 import { parseEditorSkin, EDITOR_SKIN_LIMITS } from '../core/editor-skin.ts';
+import type { EditorSkinPackage } from '../core/editor-skin.ts';
 import { assetUrl } from '../core/asset-url.ts';
 
 /** One stored skin package: its id plus the files the importer kept. */
@@ -10,10 +11,7 @@ interface StoredSkin {
 }
 
 /** The skin record `parseEditorSkin` returns, with the built-in flag the catalogue adds. */
-interface ParsedSkin {
-  skin: Record<string, unknown> & { id: string };
-  files: Map<string, Uint8Array>;
-  bytes: number;
+interface ParsedSkin extends EditorSkinPackage {
   builtin?: boolean;
 }
 

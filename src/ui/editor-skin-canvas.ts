@@ -15,9 +15,8 @@ interface CanvasSettings {
 }
 
 /** The skin document fields the canvas layer reads. */
-interface CanvasSkin {
-  canvas?: EditorSkinCanvasConfig;
-}
+/** A resolved skin document, or a canvas config passed on its own. */
+type CanvasSkin = EditorSkinCanvasConfig & { canvas?: EditorSkinCanvasConfig };
 
 /** The per-context proxy cache, keyed by the role it was built for. */
 const contexts = new WeakMap<CanvasRenderingContext2D, Map<string, CanvasRenderingContext2D>>();
@@ -33,7 +32,7 @@ const palette = (value: Record<string, string> | undefined): CanvasPalette => Ob
  * `fonts` maps an asset id to the family name the runtime registered, so a target that references
  * a skin font resolves to the family that is actually available on the page.
  */
-export function setEditorCanvasSkin(skin: CanvasSkin | null, font = '', fonts: Map<string, string> = new Map()): void {
+export function setEditorCanvasSkin(skin: CanvasSkin | null | undefined, font = '', fonts: Map<string, string> = new Map()): void {
   // A resolved skin carries its settings on the document itself, while a variant's settings may still
   // sit under `canvas`; both shapes are accepted so callers never have to unwrap a variant.
   const document = skin as (EditorSkinCanvasConfig & { canvas?: EditorSkinCanvasConfig | null }) | null | undefined;

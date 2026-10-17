@@ -1,7 +1,7 @@
 export const EDITOR_SKIN_VERSION = 1;
 export const EDITOR_SKIN_API = 3;
 export const EDITOR_SKIN_LIMITS = Object.freeze({ files: 512, bytes: 32 * 1024 * 1024, fileBytes: 12 * 1024 * 1024 });
-export const EDITOR_SKIN_COMPONENTS = Object.freeze({
+export const EDITOR_SKIN_COMPONENTS: Readonly<Record<string, string>> = Object.freeze({
   root: ':root', app: 'body', header: 'header', brand: '.brand', 'document-name': '#document-name', 'file-actions': 'header nav',
   transport: '.transport', 'transport-actions': '.transport-group', workspace: '.workspace', editor: '.editor', toolbar: '.editor-toolbar',
   tools: '.tools', 'view-controls': '.view-controls-inline', 'timeline-header': '.timeline-head', stage: '.stage',
@@ -32,10 +32,69 @@ export const EDITOR_SKIN_MOVABLE = ['new', 'open', 'save', 'export', 'library', 
   'seek', 'notes-only', 'game-ui', 'reset-camera', 'mute-current-line', 'tools', 'view-controls', 'view-buttons', 'line-controls', 'beat-controls',
   'offset-control', 'rate-control', 'pitch-control', 'time-readouts', 'multi-line-controls', 'tab-notes', 'tab-events', 'tab-lines', 'tab-chart', 'tab-noise',
   'tool-select', 'tool-tap', 'tool-hold', 'tool-flick', 'tool-drag'];
-export const EDITOR_SKIN_CANVASES = Object.freeze({ notes: '#notes', events: '#events', noise: '#noise-editor-canvas', density: '#note-density', history: '#history-strip', audio: '#audio-analysis-overlay', selection: '.selection-overlay', 'batch-preview': '', easing: '.easing-preview', bezier: '.bezier-editor', curve: '.curve-preview', 'text-lines': '.text-lines-preview', trajectory: '.trajectory-preview,.trajectory-preset-thumbnail', 'noise-fit': '.noise-fit-source', 'line-thumbnail': '.line-switcher-card canvas', 'clipboard-thumbnail': '.clipboard-thumbnail' });
-export const EDITOR_SKIN_BUILTINS = Object.freeze(Object.fromEntries(['folder', 'save', 'setting', 'help', 'play', 'replay', 'showback', 'jump', 'copy', 'shear', 'paste', 'delete0', 'switch', 'layout', 'return', 'info', 'waves', 'bezier', 'addline', 'mute'].map(name => [name, `rpe/Texture/icon/${name}.png`])));
+export const EDITOR_SKIN_CANVASES: Readonly<Record<string, string>> = Object.freeze({ notes: '#notes', events: '#events', noise: '#noise-editor-canvas', density: '#note-density', history: '#history-strip', audio: '#audio-analysis-overlay', selection: '.selection-overlay', 'batch-preview': '', easing: '.easing-preview', bezier: '.bezier-editor', curve: '.curve-preview', 'text-lines': '.text-lines-preview', trajectory: '.trajectory-preview,.trajectory-preset-thumbnail', 'noise-fit': '.noise-fit-source', 'line-thumbnail': '.line-switcher-card canvas', 'clipboard-thumbnail': '.clipboard-thumbnail' });
+export const EDITOR_SKIN_BUILTINS: Readonly<Record<string, string>> = Object.freeze(Object.fromEntries(['folder', 'save', 'setting', 'help', 'play', 'replay', 'showback', 'jump', 'copy', 'shear', 'paste', 'delete0', 'switch', 'layout', 'return', 'info', 'waves', 'bezier', 'addline', 'mute'].map(name => [name, `rpe/Texture/icon/${name}.png`])));
+/** One asset a skin package declares. */
+export interface EditorSkinAsset {
+  type: 'image' | 'font';
+  path?: string;
+  builtin?: string;
+  sources?: { path: string; scale: number }[];
+}
+
+/** One text override. */
+export interface EditorSkinText {
+  selector: string;
+  text?: string;
+  title?: string;
+  ariaLabel?: string;
+  placeholder?: string;
+}
+
+/** One icon override. */
+export interface EditorSkinIcon { selector: string; asset: string }
+
+/** One control group a skin declares in `organize`. */
+export interface EditorSkinGroup {
+  slot: string;
+  id?: string;
+  label?: string;
+  direction?: 'row' | 'column';
+  collapsible?: boolean;
+  items: string[];
+}
+
 /** A parsed `skin.json` whose members are validated one by one, so it stays indexable. */
-type SkinDocument = Record<string, unknown>;
+export interface SkinDocument {
+  [key: string]: unknown;
+  id?: string;
+  name?: string;
+  author?: string;
+  description?: string;
+  skinVersion?: string;
+  license?: string;
+  colorScheme?: 'light' | 'dark';
+  assets?: Record<string, EditorSkinAsset>;
+  styles?: EditorSkinRule[];
+  variants?: Record<string, EditorSkinVariant>;
+  systemVariants?: Record<string, string>;
+  texts?: EditorSkinText[];
+  hide?: string[];
+  icons?: EditorSkinIcon[] | Record<string, string>;
+  decorations?: EditorSkinDecoration[];
+  organize?: EditorSkinGroup[];
+  canvas?: EditorSkinCanvasConfig;
+  tokens?: Record<string, string>;
+  parameters?: Record<string, EditorSkinParameter>;
+  preview?: string;
+}
+
+/** A validated skin package together with the files it was parsed from. */
+export interface EditorSkinPackage {
+  skin: SkinDocument;
+  files: Map<string, Uint8Array>;
+  bytes: number;
+}
 
 export const EDITOR_SKIN_IMPORTANT = /^(?:--(?:rpen|skin)-[a-z0-9-]+|color|background(?:-[a-z-]+)?|border(?:-[a-z-]+)?|outline(?:-[a-z-]+)?|font(?:-[a-z-]+)?|line-height|letter-spacing|text-[a-z-]+|width|height|min-width|max-width|min-height|max-height|padding(?:-[a-z-]+)?|margin(?:-[a-z-]+)?|gap|row-gap|column-gap|flex(?:-[a-z-]+)?|grid(?:-[a-z-]+)?|order|box-shadow|filter)$/;
 
@@ -191,7 +250,7 @@ export function resolveEditorSkin(skin: Record<string, unknown>, { variant = 'ba
   const targets = { ...(skin.canvas as EditorSkinCanvasConfig | undefined)?.targets, ...(selected.canvas as EditorSkinCanvasConfig | undefined)?.targets };
   return { ...skin, colorScheme: selected.colorScheme ?? skin.colorScheme, tokens: { ...(skin.tokens as Record<string, string> | undefined), ...(selected.tokens as Record<string, string> | undefined), ...values }, styles: [...(skin.styles as EditorSkinRule[] | undefined ?? []), ...(selected.styles as EditorSkinRule[] | undefined ?? [])], canvas: { ...canvas, palette: palette({ ...(skin.canvas as EditorSkinCanvasConfig | undefined)?.palette, ...(selected.canvas as EditorSkinCanvasConfig | undefined)?.palette }) as Record<string, string> | undefined, targets: Object.fromEntries(Object.entries(targets).map(([role, target]) => [role, { ...target, palette: palette(target.palette) }])) } };
 }
-export function parseEditorSkin(files: Map<string, Uint8Array>): { skin: Record<string, unknown>; files: Map<string, Uint8Array>; bytes: number } {
+export function parseEditorSkin(files: Map<string, Uint8Array>): EditorSkinPackage {
   if (!(files instanceof Map) || files.size > EDITOR_SKIN_LIMITS.files) fail('皮肤文件数量超限');
   let total = 0; const paths = new Set<string>();
   for (const [path, bytes] of files) {
