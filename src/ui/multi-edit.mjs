@@ -1,3 +1,4 @@
+import { localPreferences } from '../platform/local-preferences.mjs';
 import { captureSelection, commitSelectionEdit } from '../application/batch-edit.mjs';
 import { previewMultiEdit, previewEventClones, NOTE_BATCH_FIELDS, EVENT_BATCH_FIELDS, EVENT_BATCH_TYPES, BATCH_OPERATIONS } from '../application/multi-edit.mjs';
 import { beatValue } from '../core/beat.mjs';
@@ -37,7 +38,7 @@ export class MultiEditPanel {
     this.close = close; this.invalidate = invalidate; this.notify = notify; this.active = false; this.previewHovered = false;
     root.addEventListener('pointerenter', () => { this.previewHovered = true; this.invalidate(); });
     root.addEventListener('pointerleave', () => { this.previewHovered = false; this.invalidate(); });
-    this.parameters = new MultiEditParameters(globalThis.localStorage, message => notify(message, 'warning'));
+    this.parameters = new MultiEditParameters(localPreferences, message => notify(message, 'warning'));
   }
 
   open(kind) {
@@ -223,7 +224,7 @@ export class MultiEditPanel {
       if (top > canvas.clientHeight || bottom < 0) continue;
       if (this.kind === 'notes') {
         context.strokeStyle = NOTE_COLORS[item.type] ?? '#fff';
-        const noteWidth = timeline.noteWidth(item);
+        const noteWidth = timeline.noteWidth(item, timeline.highlight !== false && timeline.simultaneous?.has(change.before));
         const horizontal = timeline.clampNoteHorizontal(timeline.noteHorizontal(item.positionX, lineIndex), noteWidth, canvas.clientWidth, lineIndex);
         if (horizontal != null) context.strokeRect(horizontal - noteWidth / 2 - 3, Math.max(-10, top - 7), noteWidth + 6, Math.min(canvas.clientHeight + 20, Math.max(14, bottom - Math.max(-10, top) + 14)));
       } else {

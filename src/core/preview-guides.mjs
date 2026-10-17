@@ -20,6 +20,11 @@ export function mergeGuides(guides, scale, enabled = true) {
 
 export function pickGuide(guides, point, selected, radius = 10) {
   const matches = guides.filter(guide => {
+    if (guide.segment) {
+      const [start, end] = guide.segment, dx = end.x - start.x, dy = end.y - start.y, length = dx * dx + dy * dy;
+      const amount = length ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / length)) : 0;
+      return Math.hypot(point.x - start.x - amount * dx, point.y - start.y - amount * dy) <= radius;
+    }
     const angle = guide.rotation * Math.PI / 180;
     const deltaX = point.x - guide.x; const deltaY = point.y - guide.y;
     const across = deltaX * Math.cos(angle) + deltaY * Math.sin(angle);

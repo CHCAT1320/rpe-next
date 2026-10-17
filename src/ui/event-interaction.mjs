@@ -26,6 +26,8 @@ export class EventInteraction {
     return Math.round(target * this.timeline.division) / this.timeline.division - beatValue(start);
   }
 
+  createEvent(...args) { return this.timeline.createPlacedEvent ? this.timeline.createPlacedEvent(...args) : placedEvent(...args); }
+
   place(type, beat, easingType, inst = false) {
     const session = this.timeline.getSession();
     if (!session.line) return false;
@@ -33,7 +35,8 @@ export class EventInteraction {
     if (beat === undefined && !point) return false;
     const lineIndex = this.timeline.lineIndexAt(point?.x ?? 0, this.canvas.clientWidth, 'events');
     const panelWidth = this.timeline.panelWidth(this.canvas.clientWidth, 'events'); const panelOffset = this.timeline.panelIndex(lineIndex, 'events') * this.timeline.panelStride(this.canvas.clientWidth, 'events') - this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
-    const channel = Math.max(0, Math.min(this.timeline.eventTypes.length - 1, Math.floor(((point?.x ?? 0) - panelOffset) / (panelWidth / this.timeline.eventTypes.length))));
+    const channel = this.timeline.eventChannelAt ? this.timeline.eventChannelAt((point?.x ?? 0) - panelOffset) : Math.max(0, Math.min(this.timeline.eventTypes.length - 1, Math.floor(((point?.x ?? 0) - panelOffset) / (panelWidth / this.timeline.eventTypes.length))));
+    if (channel < 0 && !this.pending && !type) return false;
     const eventType = this.pending?.type ?? type ?? this.timeline.eventTypes[channel];
     const at = beat ?? this.timeline.eventBeatAt(point.y, eventType, true);
     session.focus = 'events'; session.eventLayer = this.timeline.layer; session.selection.clear();
@@ -42,7 +45,7 @@ export class EventInteraction {
       session.notify();
     } else {
       let event;
-      try { event = placedEvent(session, this.pending.type, this.pending.beat, at, easingType, this.pending.lineIndex, this.pending.inst); }
+      try { event = this.createEvent(session, this.pending.type, this.pending.beat, at, easingType, this.pending.lineIndex, this.pending.inst); }
       catch (error) { this.timeline.notify?.(error.message, 'error'); return false; }
       if (event) insertEventAt(session, this.pending.lineIndex ?? lineIndex, this.pending.type, event);
       this.pending = null;
@@ -73,13 +76,14 @@ export class EventInteraction {
     }
     session.focus = 'events'; session.eventLayer = this.timeline.layer;
     if (!event.ctrlKey && !event.shiftKey && event.button !== 1) { session.selection.clear(); if (!rectangle) session.eventSelection.clear(); }
-    this.canvas.focus(); this.canvas.setPointerCapture(event.pointerId);
+    this.canvas.focus({ preventScroll: true }); this.canvas.setPointerCapture(event.pointerId);
     const multiMode = session.multiLineActive;
     const multiPanel = multiMode && this.timeline.panelCount('events') > 1;
-    if (multiPanel && (event.shiftKey || event.button === 1)) {
+    const panColumns = typeof this.timeline.panEventColumns === 'function';
+    if ((multiPanel || panColumns) && (event.shiftKey || event.button === 1)) {
       const worldX = point.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
       this.drag = { kind: 'rectangle', area: 'events', start: point, startWorldX: worldX, current: point, currentWorldX: worldX, startFactor: this.timeline.factorForLine(panelLineIndex), startSeconds: this.timeline.timeAt(point.y), append: true, remove: false };
-    } else if (multiPanel && (!rectangle && !this.timeline.tool)) this.drag = { kind: 'multi-pan', start: point, current: point };
+    } else if ((multiPanel || panColumns) && (!rectangle && !this.timeline.tool)) this.drag = { kind: 'multi-pan', start: point, current: point, clientX: event.clientX };
     else if (!multiMode && (event.shiftKey || event.button === 1)) this.drag = { kind: 'rectangle', area: 'events', start: point, startFactor: this.timeline.factorForLine(session.lineIndex), startSeconds: this.timeline.timeAt(point.y), current: point, append: true, remove: false };
     else if (rectangle && event.button === 0) {
       selectEvent(session, rectangle.lineIndex ?? session.lineIndex, rectangle.type, rectangle.index, { toggle: event.ctrlKey });
@@ -99,6 +103,12 @@ export class EventInteraction {
       const previous = this.drag.current; this.drag.current = point; this.drag.currentWorldX = point.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
       if (this.drag.startFactor !== undefined) this.drag.currentSeconds = this.timeline.tempo.seconds(this.timeline.origin, this.drag.startFactor) + (this.timeline.viewHeight() - (this.timeline.judgementOffset ?? 42) - this.drag.current.y) / this.timeline.scale;
       if (this.drag.kind === 'multi-pan') {
+        if (this.timeline.panEventColumns) {
+          this.timeline.panEventColumns(event.clientX - this.drag.clientX); this.drag.clientX = event.clientX;
+          const point = this.timeline.point(event, this.canvas); this.drag.current = point;
+          this.timeline.eventCursor = point; this.timeline.clipboardPointer = point;
+          this.canvas.style.cursor = 'grabbing'; this.timeline.changed(); return;
+        }
         const current = this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
         this.timeline.multiLineScroll.events = Math.max(0, current - (point.x - previous.x));
         this.timeline.changed();
@@ -114,14 +124,14 @@ export class EventInteraction {
       }
     }
     const hit = this.hit(point);
-    this.canvas.style.cursor = hit && (Math.abs(point.y - hit.y) < 6 || Math.abs(point.y - hit.y - hit.height) < 6) ? 'ns-resize' : hit ? 'move' : 'default';
+    this.canvas.style.cursor = hit && (Math.abs(point.y - hit.y) < 6 || Math.abs(point.y - hit.y - hit.height) < 6) ? 'ns-resize' : hit ? 'move' : this.timeline.panEventColumns ? 'grab' : 'default';
     this.timeline.changed();
   }
 
   up(event) {
     if (!this.drag) return;
     if (this.drag.kind === 'stroke') this.move(event);
-    if (this.drag.kind === 'multi-pan') { this.drag = null; this.timeline.changed(); return; }
+    if (this.drag.kind === 'multi-pan') { this.drag = null; this.canvas.style.cursor = this.timeline.panEventColumns ? 'grab' : 'default'; this.timeline.changed(); return; }
     if (this.drag.kind === 'stroke' && !this.drag.remove && !this.drag.tracing && this.timeline.previewPick?.(event)) { this.drag = null; this.timeline.changed(); return; }
     this.drag.current = this.timeline.point(event, this.canvas);
     this.drag.currentWorldX = this.drag.current.x + this.timeline.multiLineViewportOffset(this.canvas.clientWidth, 'events');
@@ -194,7 +204,7 @@ export class EventInteraction {
     if (channel < 0) return;
     const end = this.timeline.eventCursor ? this.timeline.eventBeatAt(this.timeline.eventCursor.y, this.pending.type, true) : this.pending.beat;
     let valid = true;
-    try { placedEvent(this.timeline.getSession(), this.pending.type, this.pending.beat, end, undefined, this.pending.lineIndex); } catch { valid = false; }
+    try { this.createEvent(this.timeline.getSession(), this.pending.type, this.pending.beat, end, undefined, this.pending.lineIndex, this.pending.inst, true); } catch { valid = false; }
     const lineIndex = this.timeline.lineIndexAt(this.timeline.eventCursor?.x ?? 0, width, 'events');
     const vertical = session.multiLineActive && session.multiLineMode === 'events' ? beat => this.timeline.verticalForLine(beat, lineIndex, this.canvas.clientHeight) : beat => this.timeline.eventVertical(beat, this.pending.type);
     const top = Math.min(vertical(this.pending.beat), vertical(end));

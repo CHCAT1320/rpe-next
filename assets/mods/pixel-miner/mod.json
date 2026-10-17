@@ -1,0 +1,12 @@
+{
+  "protocol":"rpen-mod","api":1,"id":"pixel-miner","name":"像素矿工","version":"1.0.0","author":"rpe-next",
+  "description":"用像素钻石镐挖走编辑器控件，收集掉落物与经验，再把真正的控件放回屏幕。九格快捷栏，1–9 选择；关闭工具状态保留布局，恢复快捷键或停用模组会全部复原。图像与音效均由程序生成。",
+  "entry":"main.mjs",
+  "conflicts":["sky-dodge"],
+  "settings":{
+    "toggle-key":{"type":"shortcut","label":"开启 / 关闭工具状态","default":"F9","description":"收起工具栏和手持物品，保留已挖走或重新放置的控件。"},
+    "restore-key":{"type":"shortcut","label":"恢复全部控件","default":"CTRL&SHIFT&F9","description":"恢复控件原位置，清空掉落物、物品栏和经验。停用模组也会执行恢复。"},
+    "mine-duration":{"type":"number","label":"挖掘时长（秒）","default":0.9,"min":0.25,"max":3,"step":0.05},
+    "sound-volume":{"type":"number","label":"挖掘与拾取音量","default":0.35,"min":0,"max":1,"step":0.05}
+  }
+}

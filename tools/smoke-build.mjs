@@ -26,7 +26,12 @@ try {
   }
   // The bundle must replace the raw sources; a served module means the build leaked them.
   if ((await get('/src/ui/app.mjs')).status === 200) throw new Error('构建产物暴露了未打包的源码');
-  console.log('dist 入口、打包脚本与样式、内置素材读取通过；未暴露源码。');
+  for (const path of ['/protocols/MOD-PROTOCOL.zh-CN.md', '/protocols/GLOBAL-EVENTS-PROTOCOL.zh-CN.md', '/schemas/mod-v1.schema.json', '/schemas/mod-api-v1.d.ts', '/assets/mods/index.json', '/assets/mods/sky-dodge/main.mjs', '/assets/note-skins/index.json']) {
+    const response = await get(path);
+    if (response.status !== 200 || !(await response.arrayBuffer()).byteLength) throw new Error(`${path} 缺少运行时资源`);
+  }
+  for (const path of ['/desktop/main.cjs', '/package-lock.json', '/tools/test-mods-electron.cjs']) if ((await get(path)).status !== 404) throw new Error(`${path} 不应公开`);
+  console.log('dist 入口、打包脚本与样式、内置素材与运行时资源读取通过；未暴露源码。');
 } finally {
   await server.close();
 }

@@ -36,6 +36,7 @@ export class NoisePreview {
       this.lifetimes = new IntervalIndex(this.source, area => tempo.seconds(area.appearTime), area => tempo.seconds(area.disappearTime));
     }
     this.guides = this.lifetimes.query(seconds, seconds).filter(entry => seconds < entry.end && !this.hiddenLayers?.has(noiseLayerId(entry.item))).map(entry => ({ area: entry.item, index: entry.index, ...noiseRuntime(entry.item, tempo).sample(seconds) }));
+    if (this.transformGeometry) this.guides = this.guides.map(entry => this.transformGeometry(entry, { width, height, scale, viewport, seconds })).filter(Boolean);
     const margin = Math.max(2, scale * 5);
     const entries = this.guides.filter(entry => entry.scaleX !== 0 && entry.scaleY !== 0 &&
       !entry.points.every(point => width / 2 + point.x * scale < -margin) && !entry.points.every(point => width / 2 + point.x * scale > width + margin) &&

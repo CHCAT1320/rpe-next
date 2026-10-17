@@ -1,3 +1,4 @@
+import { localPreferences } from './local-preferences.mjs';
 import { validFpsLimit } from '../core/frame-timing.mjs';
 
 const ranges = { scale: [20, 2000], division: [1, 100], gridCount: [2, 100], volume: [0, 1], hitVolume: [0, 1], realtimeAlpha: [0, 1], ratioWidth: [1, 100], ratioHeight: [1, 100], barWidth: [0.5, 10], barAlpha: [0.1, 2], judgementOffset: [42, 240], eventValueSize: [8, 28], eventValueThreshold: [10, 180], eventCurveThreshold: [8, 180], eventOpacity: [0.05, 1], eventBarWidth: [0.35, 1], multiLineWidth: [30, 2400], multiLineEventWidth: [30, 2400], scrollSpeed: [0.1, 100], autoSaveSeconds: [1, 3600], autoSaveLimit: [1, 100] };
@@ -17,7 +18,7 @@ export function normalizeEditorPreferences(value) {
   if (value.analysisMode === 'waveform' || value.analysisMode === 'spectrum') result.analysisMode = value.analysisMode;
   return result;
 }
-export function readEditorPreferences(storage = localStorage) {
+export function readEditorPreferences(storage = localPreferences) {
   try { return normalizeEditorPreferences(JSON.parse(storage.getItem('rpe-next-editor-v1') ?? '{}')); } catch { return {}; }
 }
-export function writeEditorPreferences(value, storage = localStorage) { storage.setItem('rpe-next-editor-v1', JSON.stringify(normalizeEditorPreferences(value))); }
+export function writeEditorPreferences(value, storage = localPreferences) { storage.setItem('rpe-next-editor-v1', JSON.stringify(normalizeEditorPreferences(value))); }

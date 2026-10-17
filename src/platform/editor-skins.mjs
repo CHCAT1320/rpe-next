@@ -1,13 +1,11 @@
+import { openDatabase, ensureStore } from './storage.mjs';
 import { readZip, writeZip } from './archive.mjs';
 import { parseEditorSkin, EDITOR_SKIN_LIMITS } from '../core/editor-skin.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
+import { nativeStorage, nativePackages } from './native.mjs';
 
 async function access(mode, action) {
-  const connection = await new Promise((resolve, reject) => {
-    const request = indexedDB.open('rpe-next-editor-skins', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('packages', { keyPath: 'id' });
-    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-  });
+  const connection = await openDatabase('rpe-next-editor-skins', 1, (connection, transaction) => ensureStore(connection, transaction, 'packages', { keyPath: 'id' }));
   return new Promise((resolve, reject) => {
     const transaction = connection.transaction('packages', mode); let request;
     try { request = action(transaction.objectStore('packages')); } catch (error) { connection.close(); reject(error); return; }
@@ -15,9 +13,9 @@ async function access(mode, action) {
     transaction.onabort = transaction.onerror = () => { connection.close(); reject(transaction.error ?? new Error('皮肤存储已中止')); };
   });
 }
-export const readEditorSkins = () => access('readonly', store => store.getAll());
-export const storeEditorSkin = record => access('readwrite', store => store.put({ id: record.skin.id, files: [...record.files], imported: Date.now() }));
-export const deleteEditorSkin = id => access('readwrite', store => store.delete(id));
+export const readEditorSkins = () => nativeStorage ? nativePackages('editor-skins', 'read') : access('readonly', store => store.getAll());
+export const storeEditorSkin = record => { const stored = { id: record.skin.id, files: [...record.files], imported: Date.now() }; return nativeStorage ? nativePackages('editor-skins', 'write', stored.id, stored) : access('readwrite', store => store.put(stored)); };
+export const deleteEditorSkin = id => nativeStorage ? nativePackages('editor-skins', 'delete', id) : access('readwrite', store => store.delete(id));
 export const exportEditorSkin = record => writeZip(record.files);
 
 export async function importEditorSkin(files, directory = false) {

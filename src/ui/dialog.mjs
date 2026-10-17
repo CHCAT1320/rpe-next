@@ -64,5 +64,5 @@ export function confirmAction(title, action) {
   apply.onclick = () => { modal.close(); action(); };
 }
 
-export function dialogOpen() { return Boolean(modal.open || document.querySelector('#settings-modal')?.open); }
+export function dialogOpen() { return Boolean(modal.open || document.querySelector('dialog[open]')); }
 

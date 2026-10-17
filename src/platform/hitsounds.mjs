@@ -21,6 +21,7 @@ export class HitSounds {
     this.maxVoices = 192;
     this.maxBurst = 96;
     this.maxSameTime = 64;
+    this.skinBuffers = new Map();
   }
 
   async prepare() {
@@ -46,6 +47,7 @@ export class HitSounds {
 
   setProject(chart, assets, chartName) { this.stop(); this.generation++; this.buffers.clear(); this.chart = chart; this.assets = assets; this.chartName = chartName; this.compiled = null; this.compiledLine = null; this.onlyCurrentLine = false; }
   setVolume(value) { this.volume = Math.max(0, Math.min(1, value)); if (this.gain) this.gain.gain.value = this.volume; }
+  setSoundPack(buffers = new Map()) { this.stop(); this.skinBuffers = new Map(buffers); }
   stop() { for (const source of this.sources) { source.stop(); source.disconnect(); } this.sources.clear(); this.revision = -1; }
 
   tick(chart, tempo, currentLine = null) {
@@ -64,7 +66,7 @@ export class HitSounds {
     let burst = 0;
     const sameTime = new Map();
     while (this.next < this.entries.length && this.entries[this.next].time <= until && this.entries[this.next].time < (this.transport.scheduleHorizon ?? Infinity)) {
-      const entry = this.entries[this.next++]; const buffer = this.buffers.get(entry.sound);
+      const entry = this.entries[this.next++]; const buffer = this.skinBuffers.get(entry.sound) ?? this.buffers.get(entry.sound);
       if (!buffer || !this.gain) continue;
       const timeKey = Math.round(entry.time * 1000);
       const timeCount = sameTime.get(timeKey) ?? 0;

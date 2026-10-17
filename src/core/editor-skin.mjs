@@ -8,8 +8,10 @@ export const EDITOR_SKIN_COMPONENTS = Object.freeze({
   'editor-actions': '.editor-footer', inspector: '.inspector', 'inspector-tabs': '.inspector-tabs', 'chart-tools': '[data-panel="chart"] .action-grid',
   'project-home': '#home', 'project-list': '#project-cards', footer: 'body > footer', status: '#status', notifications: '#notifications',
   dialog: '#modal', settings: '#settings-modal', 'settings-body': '.settings-body', 'theme-settings': '#editor-skin-settings',
+  'note-skin-settings': '#note-skin-settings', 'note-skins-open': '#note-skins-open', 'note-skin-manager': '#note-skin-modal', 'note-skin-gallery': '.note-skin-gallery',
+  'mod-manager': '#mod-manager', 'mod-list': '.mod-manager-list', 'mod-details': '.mod-manager-details', 'mod-status': '#mods-status', 'mod-warning': '#mod-import-warning',
   'context-menu': '.timeline-context-menu', 'line-overview': '.line-switcher', 'clipboard-history': '#clipboard-results',
-  ...Object.fromEntries(['new', 'open', 'save', 'export', 'library', 'migrate', 'recover', 'preferences', 'help', 'play', 'rewind', 'view-toggle',
+  ...Object.fromEntries(['new', 'open', 'save', 'export', 'library', 'migrate', 'recover', 'mods-open', 'preferences', 'help', 'play', 'rewind', 'view-toggle',
     'seek', 'undo', 'redo', 'copy', 'cut', 'paste', 'mirror', 'delete', 'notes-only', 'game-ui', 'reset-camera', 'mute-current-line',
     'metadata', 'bpm', 'assets', 'audio-analysis-tool', 'noise-areas-tool', 'curve-notes', 'curve-trajectory', 'text-lines-tool',
     'noise-fit-tool', 'noise-tracking-tool', 'multi-line-tool', 'diagnose', 'history-panel', 'collaboration-tool'].map(id => [id, '#' + id])),
@@ -18,6 +20,8 @@ export const EDITOR_SKIN_COMPONENTS = Object.freeze({
   'time-progress': '.scrubber-wrap', 'time-readouts': '.time-readouts', clock: '#clock', 'beat-display': '#beat-display', 'bpm-display': '#bpm-display',
   'note-properties': '#properties', 'event-properties': '#event-properties', 'line-properties': '.line-properties-form',
   'noise-properties': '#noise-properties', 'noise-layers': '.noise-layer-panel', 'noise-list': '.noise-list',
+  'global-events-panel': '#global-events-panel', 'global-event-properties': '#global-event-properties', 'global-event-inspector': '#global-event-inspector', 'global-event-types': '.global-events-types', 'global-event-density': '.global-event-density',
+  'global-events-tool': '#global-events-tool', 'close-global-events': '#close-global-events',
   'line-list': '#line-list', 'multi-line-list': '.multi-line-list', 'asset-tree': '.asset-tree', 'asset-details': '.asset-details',
   'sample-bar': '.noise-sample-bar', 'sample-panel': '.event-sample-panel', field: ':is(.field,.noise-field)', hint: '.hint',
   'panel-title': '.panel-title', 'panel-actions': ':is(.batch-panel-actions,.trajectory-footer,.text-lines-footer,.noise-fit-footer,.noise-tracking-footer)',
@@ -26,13 +30,13 @@ export const EDITOR_SKIN_COMPONENTS = Object.freeze({
   ...Object.fromEntries([['select', 0], ['tap', 1], ['hold', 2], ['flick', 3], ['drag', 4]].map(([name, type]) => [`tool-${name}`, `[data-tool="${type}"]`])),
 });
 export const EDITOR_SKIN_SLOTS = ['file-actions', 'transport-actions', 'editor-actions', 'chart-tools', 'toolbar', 'inspector-tabs', 'timeline-header', 'footer'];
-export const EDITOR_SKIN_MOVABLE = ['new', 'open', 'save', 'export', 'library', 'migrate', 'recover', 'preferences', 'help', 'play', 'rewind', 'view-toggle',
+export const EDITOR_SKIN_MOVABLE = ['new', 'open', 'save', 'export', 'library', 'migrate', 'recover', 'mods-open', 'preferences', 'help', 'play', 'rewind', 'view-toggle',
   'undo', 'redo', 'copy', 'cut', 'paste', 'mirror', 'delete', 'metadata', 'bpm', 'assets', 'audio-analysis-tool', 'noise-areas-tool',
   'curve-notes', 'curve-trajectory', 'text-lines-tool', 'noise-fit-tool', 'noise-tracking-tool', 'multi-line-tool', 'diagnose', 'history-panel', 'collaboration-tool',
   'seek', 'notes-only', 'game-ui', 'reset-camera', 'mute-current-line', 'tools', 'view-controls', 'view-buttons', 'line-controls', 'beat-controls',
   'offset-control', 'rate-control', 'pitch-control', 'time-readouts', 'multi-line-controls', 'tab-notes', 'tab-events', 'tab-lines', 'tab-chart', 'tab-noise',
-  'tool-select', 'tool-tap', 'tool-hold', 'tool-flick', 'tool-drag'];
-export const EDITOR_SKIN_CANVASES = Object.freeze({ notes: '#notes', events: '#events', noise: '#noise-editor-canvas', density: '#note-density', history: '#history-strip', audio: '#audio-analysis-overlay', selection: '.selection-overlay', 'batch-preview': '', easing: '.easing-preview', bezier: '.bezier-editor', curve: '.curve-preview', 'text-lines': '.text-lines-preview', trajectory: '.trajectory-preview,.trajectory-preset-thumbnail', 'noise-fit': '.noise-fit-source', 'line-thumbnail': '.line-switcher-card canvas', 'clipboard-thumbnail': '.clipboard-thumbnail' });
+  'tool-select', 'tool-tap', 'tool-hold', 'tool-flick', 'tool-drag', 'global-events-tool'];
+export const EDITOR_SKIN_CANVASES = Object.freeze({ notes: '#notes', events: '#events', 'global-events': '#global-events-canvas', 'global-density': '.global-event-density', noise: '#noise-editor-canvas', density: '#note-density', history: '#history-strip', audio: '#audio-analysis-overlay', selection: '.selection-overlay', 'batch-preview': '', easing: '.easing-preview', bezier: '.bezier-editor', curve: '.curve-preview', 'text-lines': '.text-lines-preview', trajectory: '.trajectory-preview,.trajectory-preset-thumbnail', 'noise-fit': '.noise-fit-source', 'line-thumbnail': '.line-switcher-card canvas', 'clipboard-thumbnail': '.clipboard-thumbnail' });
 export const EDITOR_SKIN_BUILTINS = Object.freeze(Object.fromEntries(['folder', 'save', 'setting', 'help', 'play', 'replay', 'showback', 'jump', 'copy', 'shear', 'paste', 'delete0', 'switch', 'layout', 'return', 'info', 'waves', 'bezier', 'addline', 'mute'].map(name => [name, `rpe/Texture/icon/${name}.png`])));
 export const EDITOR_SKIN_IMPORTANT = /^(?:--(?:rpen|skin)-[a-z0-9-]+|color|background(?:-[a-z-]+)?|border(?:-[a-z-]+)?|outline(?:-[a-z-]+)?|font(?:-[a-z-]+)?|line-height|letter-spacing|text-[a-z-]+|width|height|min-width|max-width|min-height|max-height|padding(?:-[a-z-]+)?|margin(?:-[a-z-]+)?|gap|row-gap|column-gap|flex(?:-[a-z-]+)?|grid(?:-[a-z-]+)?|order|box-shadow|filter)$/;
 const plain = value => value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));

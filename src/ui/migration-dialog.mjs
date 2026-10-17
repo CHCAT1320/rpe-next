@@ -1,6 +1,7 @@
 import { showDialog } from './dialog.mjs';
 import { materializeProject, migrationConflicts } from '../platform/migration.mjs';
-import { listProjects, storeProject, storePreferences } from '../platform/library.mjs';
+import { listProjects, storeProject, storePreferences, readProjectRevision } from '../platform/library.mjs';
+import { storageFailure } from '../platform/storage.mjs';
 import { download } from '../platform/files.mjs';
 
 function resolveConflicts(content, conflicts) {
@@ -70,9 +71,10 @@ export function migrationDialog(plan, applyPreferences) {
         progress.textContent = `正在迁移 ${index + 1}/${prepared.length}：${entry.project.name}`;
         try {
           const project = await materializeProject(plan, entry.project);
-          if (existingProject) project.id = existingProject.id;
+          if (existingProject) { project.id = existingProject.id; project.storageRevision = existingProject.storageRevision; }
+          else { const previous = await readProjectRevision(project.id); if (previous?.deleted) project.storageRevision = previous.revision; }
           await storeProject(project); result.imported.push({ source: project.source, bytes: project.bytes, overwritten: Boolean(existingProject), extra: entry.project.extra });
-        } catch (error) { result.failed.push({ path: entry.project.path, message: error.message }); }
+        } catch (error) { result.failed.push({ path: entry.project.path, message: storageFailure(error) }); }
       }
       progress.textContent = `已迁移 ${result.imported.length} 个项目，${result.failed.length} 项未迁移${result.skipped?.length ? `，跳过 ${result.skipped.length} 项` : ''}。关闭后点击“谱面库”打开；数据保存在当前浏览器，建议另导出 PEZ。`;
       migrate.textContent = '下载迁移报告'; migrate.disabled = false;

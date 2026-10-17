@@ -10,6 +10,6 @@ self.onmessage = async ({ data }) => {
     else if (data.kind === 'commit') await saveSnapshotDirect(snapshot.projectId, snapshot.name, chart, snapshot.assets, snapshot.limit, snapshot.viewState);
     self.postMessage({ ok: true });
   }
-  catch (error) { self.postMessage({ ok: false, message: error.message }); }
+  catch (error) { self.postMessage({ ok: false, name: error.name, message: error.message }); }
 };
 self.postMessage({ ready: true });

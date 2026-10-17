@@ -5,6 +5,8 @@ import { sampleCurveTrajectory } from './curve-trajectory.mjs';
 import { trajectorySplitSettings } from './trajectory-simplify.mjs';
 import { validateNoiseAreas, diagnoseNoiseAreas, normalizeNoiseAreas, NOISE_VERSION } from './noise-areas.mjs';
 import { validateNoiseLayers, NOISE_LAYER_VERSION } from './noise-skin.mjs';
+import { emitModHook } from './mod-hooks.mjs';
+import { validateGlobalEvents, GLOBAL_EVENT_VERSION } from './global-events.mjs';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'];
 export const EXTENDED_TYPES = ['scaleXEvents', 'scaleYEvents', 'colorEvents', 'paintEvents', 'textEvents', 'inclineEvents', 'gifEvents'];
@@ -45,9 +47,11 @@ export function noteIsAbove(note) {
 }
 
 export function serializeChart(chart, { compact = false } = {}) {
+  const custom=emitModHook('chart:serialize',{chart,compact,text:null});if(custom.text!==null)return String(custom.text);chart=custom.chart;compact=custom.compact;
   assertChart(chart);
   chart = integerChartAlpha(chart);
-  const snapshot = chart.blockAreaList?.length || chart.noiseAreaLayers ? { ...chart, META: { ...chart.META, RPEVersion: Math.max(chart.META.RPEVersion ?? 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : NOISE_VERSION) } } : chart;
+  const version = Math.max(chart.META.RPEVersion ?? 0, chart.globalEvents ? GLOBAL_EVENT_VERSION : 0, chart.noiseAreaLayers ? NOISE_LAYER_VERSION : chart.blockAreaList?.length ? NOISE_VERSION : 0);
+  const snapshot = version !== chart.META.RPEVersion ? { ...chart, META: { ...chart.META, RPEVersion: version } } : chart;
   return stringifyPreservingNumbers(snapshot, compact ? 0 : 2) + (compact ? '' : '\n');
 }
 
@@ -59,12 +63,14 @@ export function stringifyPreservingNumbers(value, space = 2) {
 }
 
 export function assertChart(chart) {
+  const validation=emitModHook('chart:validate',{chart,handled:false});if(validation.handled)return validation.chart;
   if (!chart || typeof chart !== 'object' || !chart.META || typeof chart.META !== 'object' || Array.isArray(chart.META)) throw new Error('缺少 META：不是 RPE 谱面');
   if (chart.judgeLineList != null && !Array.isArray(chart.judgeLineList)) throw new Error('judgeLineList 必须为数组');
   new TempoMap(chart.BPMList);
   if (chart.META.offset !== undefined && !Number.isFinite(chart.META.offset)) throw new Error('META.offset 必须为毫秒数');
   if (chart.blockAreaList != null) validateNoiseAreas(chart.blockAreaList);
   validateNoiseLayers(chart);
+  validateGlobalEvents(chart);
   if (chart.noiseAreaOptions !== undefined) {
     if (!chart.noiseAreaOptions || typeof chart.noiseAreaOptions !== 'object' || Array.isArray(chart.noiseAreaOptions)) throw new Error('noiseAreaOptions 必须为对象');
     for (const key of ['ignoreTripleInversion']) if (chart.noiseAreaOptions[key] !== undefined && typeof chart.noiseAreaOptions[key] !== 'boolean') throw new Error('noiseAreaOptions.' + key + ' 必须为布尔值');
@@ -73,6 +79,7 @@ export function assertChart(chart) {
     const path = `judgeLineList[${lineIndex}]`;
     if (!line || typeof line !== 'object') throw new Error(`${path}: 无效判定线`);
     if (line.bpmfactor !== undefined && (!Number.isFinite(line.bpmfactor) || line.bpmfactor <= 0)) throw new Error(`${path}.bpmfactor 必须大于零`);
+    if (line.anchor !== undefined && (!Array.isArray(line.anchor) || line.anchor.length !== 2 || !line.anchor.every(Number.isFinite))) throw new Error(`${path}.anchor 必须为两个有限数字`);
     if (line.notes != null && !Array.isArray(line.notes)) throw new Error(`${path}.notes 必须为数组`);
     for (const [index, note] of (line.notes ?? []).entries()) {
       if (!note || typeof note !== 'object') throw new Error(`${path}.notes[${index}]: 无效音符`);

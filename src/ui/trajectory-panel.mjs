@@ -1,3 +1,4 @@
+import { localPreferences } from '../platform/local-preferences.mjs';
 import { CURVE_PRESETS, TRAJECTORY_DEFAULTS, sampleCurveTrajectory, presetOptions, validateCurvePreset, editableTrajectoryOptions } from '../core/curve-trajectory.mjs';
 import { createTrajectoryEvent, trajectoryChart, splitTrajectoryChart } from '../application/trajectory-commands.mjs';
 import { parseBeat, formatBeat } from '../core/beat.mjs';
@@ -67,7 +68,7 @@ export class TrajectoryPanel {
     this.overlay = document.createElement('canvas'); this.overlay.className = 'trajectory-overlay'; this.overlay.hidden = true;
     document.querySelector('.stage').append(this.overlay);
     this.custom = [];
-    try { this.custom = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]').map(validateCurvePreset); } catch { this.custom = []; }
+    try { this.custom = JSON.parse(localPreferences.getItem(STORAGE_KEY) ?? '[]').map(validateCurvePreset); } catch { this.custom = []; }
   }
 
   open(event = null, lineIndex, layerIndex) {
@@ -164,7 +165,7 @@ export class TrajectoryPanel {
       panel.append(action('编辑预设定义', () => this.loadCustom(preset, preset.name)), action('删除此预设', () => {
         try {
           const custom = deleteCurvePreset(this.custom, preset.name);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
+          localPreferences.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
           if (this.customEditingName === preset.name) { this.customEditingName = null; this.validateCustom(); }
           this.presetDraft = null; this.renderPresets(); this.refresh(); this.notify('自定义预设已删除', 'success');
         } catch (error) { this.customError(error); }
@@ -210,7 +211,7 @@ export class TrajectoryPanel {
     const guarded = callback => () => { try { callback(); } catch (error) { this.customError(error); } };
     const save = (preset, originalName) => {
       const custom = saveCurvePreset(this.custom, preset, originalName);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
+      localPreferences.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
       this.customEditingName = preset.name; source.value = JSON.stringify(preset, null, 2);
       this.presetDraft = null; this.renderPresets(); this.refresh(); this.validateCustom();
       this.gallery.querySelector('[data-category="自定义"]').open = true;

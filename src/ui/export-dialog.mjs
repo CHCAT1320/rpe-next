@@ -1,5 +1,6 @@
 import { showDialog } from './dialog.mjs';
-import { createChartExport, download } from '../platform/files.mjs';
+import { createChartExport, download, suggestDownloadName } from '../platform/files.mjs';
+import { chartExportStem } from '../core/export-filename.mjs';
 import { DEFAULT_TRAJECTORY_SPLIT } from '../core/trajectory-simplify.mjs';
 import { diagnoseNoiseAreas } from '../core/noise-areas.mjs';
 
@@ -17,9 +18,20 @@ export function showExportDialog(chart, assets, chartName, onExport, identifier)
   const acknowledgementLabel = document.createElement('label'); acknowledgementLabel.className = 'field'; acknowledgementLabel.append(acknowledgement, '已了解噪域警告，保留原始内部时间后导出'); acknowledgementLabel.hidden = !noiseIssues.length; host.append(acknowledgementLabel);
   const removeNoise = document.createElement('input'); removeNoise.type = 'checkbox';
   const removeLabel = document.createElement('label'); removeLabel.className = 'field'; removeLabel.append(removeNoise, '原 RPE 不支持噪域：仅在导出副本中移除全部噪域'); host.append(removeLabel);
+  const hasGlobalEvents = Object.values(chart.globalEvents?.types ?? {}).some(type => Object.values(type.columns).some(column => column.events.length));
+  const removeGlobal = document.createElement('input'); removeGlobal.type = 'checkbox';
+  const removeGlobalLabel = document.createElement('label'); removeGlobalLabel.className = 'field'; removeGlobalLabel.append(removeGlobal, '原 RPE 不支持全局事件：仅在导出副本中移除全部全局事件'); host.append(removeGlobalLabel);
   if (noiseIssues.length) { const heading = document.createElement('p'); heading.textContent = '噪域检查：' + noiseIssues.length + ' 项。内部事件超出生命周期时仅限制显示，原始时间不会被裁剪。'; noiseWarning.append(heading); for (const issue of noiseIssues.slice(0, 20)) { const item = document.createElement('p'); item.textContent = issue.path + '：' + issue.message; noiseWarning.append(item); } }
   const name = field('文件名（不含扩展名）', document.createElement('input'));
-  name.value = chartName.replaceAll('\\', '/').split('/').at(-1).replace(/\.(json|pez|pec|zip)$/i, '');
+  const defaultStem = chartExportStem(chart, chartName);
+  let suggestedStem;
+  const suggestName = () => {
+    if (suggestedStem !== undefined && name.value !== suggestedStem) return;
+    const extension = '.' + format.value.split(':')[1];
+    suggestedStem = suggestDownloadName(defaultStem + extension).slice(0, -extension.length);
+    name.value = suggestedStem;
+  };
+  suggestName();
   const settings = document.createElement('fieldset'); const legend = document.createElement('legend'); legend.textContent = '整体轨迹兼容转换'; settings.append(legend);
   const simplify = document.createElement('input'); simplify.type = 'checkbox'; simplify.checked = DEFAULT_TRAJECTORY_SPLIT.simplify;
   const simplifyLabel = document.createElement('label'); simplifyLabel.className = 'field'; simplifyLabel.append(simplify, '以较少的缓动事件近似'); simplify.setAttribute('aria-label', '以较少的缓动事件近似');
@@ -27,16 +39,17 @@ export function showExportDialog(chart, assets, chartName, onExport, identifier)
   const toleranceLabel = document.createElement('label'); toleranceLabel.className = 'field'; toleranceLabel.append('拆分容忍度', tolerance);
   const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '相对原始等分碎事件的每轴最大误差：X/Y 为坐标单位，旋转为度。越小越精确；关闭优化则保留各轨迹设定的全部等分段。';
   settings.append(simplifyLabel, toleranceLabel, hint); host.append(settings);
-  const sync = () => { settings.hidden = format.value.startsWith('next:'); tolerance.disabled = !simplify.checked; removeLabel.hidden = !chart.blockAreaList?.length || format.value.startsWith('next:'); };
-  format.onchange = sync; simplify.onchange = sync; sync();
+  const sync = () => { settings.hidden = format.value.startsWith('next:'); tolerance.disabled = !simplify.checked; removeLabel.hidden = !chart.blockAreaList?.length || format.value.startsWith('next:'); removeGlobalLabel.hidden = !hasGlobalEvents || format.value.startsWith('next:'); };
+  format.onchange = () => { suggestName(); sync(); }; simplify.onchange = sync; sync();
   const apply = document.querySelector('#modal-apply'); apply.hidden = false; apply.textContent = '导出';
   apply.onclick = () => {
     try {
       const [compatibility, container] = format.value.split(':');
       if (noiseIssues.length && !acknowledgement.checked) throw new Error('请先阅读并勾选确认噪域检查提示');
       if (compatibility === 'rpe' && chart.blockAreaList?.length && !removeNoise.checked) throw new Error('原 RPE 无法表示噪域，请改用 Next 格式，或勾选移除噪域');
-      const result = createChartExport(chart, assets, chartName, { compatibility, format: container, compact: compact.checked, name: name.value, identifier, removeNoiseAreas: compatibility === 'rpe' && removeNoise.checked, split: { simplify: simplify.checked, tolerance: Number(tolerance.value) } });
-      download(result.blob, result.name); document.querySelector('#modal').close(); onExport(result.name);
+      if (compatibility === 'rpe' && hasGlobalEvents && !removeGlobal.checked) throw Error('原 RPE 无法表示全局事件，请改用 Next 格式，或勾选移除全局事件');
+      const result = createChartExport(chart, assets, chartName, { compatibility, format: container, compact: compact.checked, name: name.value, identifier, removeNoiseAreas: compatibility === 'rpe' && removeNoise.checked, removeGlobalEvents: compatibility === 'rpe' && removeGlobal.checked, split: { simplify: simplify.checked, tolerance: Number(tolerance.value) } });
+      const filename = download(result.blob, result.name); document.querySelector('#modal').close(); onExport(filename, container);
     } catch (error) { document.querySelector('#modal-error').textContent = error.message; }
   };
 }

@@ -43,11 +43,15 @@ app.whenReady().then(async () => {
       const manager = window.themeManager; const record = manager.records.get('inkline');
       if (!record?.builtin || ![...manager.select.options].some(option => option.value === 'inkline' && option.textContent === '墨线 Inkline(cmdysj)')) throw Error('Inkline is unavailable without import');
       await manager.use('inkline'); if (!manager.deleteButton.disabled || getComputedStyle(manager.recovery).display !== 'none') throw Error('builtin skin deletion or persistent recovery state incorrect');
+      if (manager.appearanceDisclosure.hidden || manager.appearanceDisclosure.open || manager.appearanceDisclosure.tagName !== 'DETAILS') throw Error('editor skin parameters must start collapsed');
+      manager.appearanceDisclosure.querySelector('summary').click();
+      if (!manager.appearanceDisclosure.open) throw Error('editor skin parameters cannot expand');
       const beatDisplay = document.querySelector('#beat-display');
       if (!beatDisplay.textContent.endsWith(' 拍') || beatDisplay.dataset.ui !== 'beat-display' || getComputedStyle(beatDisplay).display === 'none') throw Error('Inkline is missing the current beat readout');
       const parameter = manager.appearance.querySelector('[data-skin-parameter=event-fill]'); parameter.value = '#12db86'; parameter.dispatchEvent(new Event('change', { bubbles: true }));
       for (let count = 0; count < 50 && manager.runtime.prepared.record.skin.canvas.palette['#e58d24'] !== '#12db86'; count++) await new Promise(resolve => requestAnimationFrame(resolve));
       if (manager.runtime.prepared.record.skin.canvas.palette['#e58d24'] !== '#12db86') throw Error('builtin Inkline parameter failed');
+      if (!manager.appearanceDisclosure.open) throw Error('editing a skin parameter must keep its disclosure open');
       await manager.resetParameters('inkline'); if (manager.runtime.prepared.record.skin.canvas.palette['#e58d24'] !== '#4d6476') throw Error('builtin Inkline defaults failed');
       document.querySelector('#settings-modal').close(); document.querySelector('#noise-areas-tool').click();
       await new Promise(resolve => requestAnimationFrame(resolve));
@@ -62,7 +66,8 @@ app.whenReady().then(async () => {
       const confirm = window.confirm; window.confirm = () => { throw Error('builtin deletion must be rejected before confirmation'); };
       try { await manager.remove(); } finally { window.confirm = confirm; }
       if (!manager.records.has('inkline')) throw Error('builtin skin was deleted');
-      await manager.use('default'); manager.select.value = 'test-skin'; manager.showDetails(); return true;
+      await manager.use('default'); if (!manager.appearanceDisclosure.hidden) throw Error('default skin should not show an empty parameter disclosure');
+      manager.select.value = 'test-skin'; manager.showDetails(); if (manager.appearanceDisclosure.open) throw Error('switching skins must start with collapsed parameters'); return true;
     });
     await run(() => [...document.querySelectorAll('.editor-skin-actions button')].find(button => button.textContent === '应用').click());
     await until(() => document.documentElement.dataset.editorSkin === 'test-skin'); await wait(200);

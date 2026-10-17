@@ -1,3 +1,4 @@
+import { localPreferences } from '../platform/local-preferences.mjs';
 import { CollaborationTransport } from '../platform/collaboration-transport.mjs';
 import { sendCollaborationAsset } from '../platform/collaboration-assets.mjs';
 import { digestBytes } from '../platform/collaboration-media.mjs';
@@ -61,9 +62,9 @@ export class CollaborationPanel {
   createForm() {
     const title = node('h3', '联机协作'); this.host.append(title);
     const intro = node('p', '创建房间后复制邀请；伙伴粘贴邀请并等待房主批准。编辑自动同步，各自播放位置独立。', 'hint'); this.host.append(intro);
-    this.name = input(this.host, '昵称', 'text', localStorage.getItem('rpe-collab-name') ?? '制谱者'); this.name.maxLength = 32;
-    this.color = input(this.host, '我的远端鼠标颜色', 'color', localStorage.getItem('rpe-collab-color') ?? '#64dba5');
-    this.server = input(this.host, '服务器地址', 'url', localStorage.getItem('rpe-collab-server') ?? 'ws://127.0.0.1:4182/collab');
+    this.name = input(this.host, '昵称', 'text', localPreferences.getItem('rpe-collab-name') ?? '制谱者'); this.name.maxLength = 32;
+    this.color = input(this.host, '我的远端鼠标颜色', 'color', localPreferences.getItem('rpe-collab-color') ?? '#64dba5');
+    this.server = input(this.host, '服务器地址', 'url', localPreferences.getItem('rpe-collab-server') ?? 'ws://127.0.0.1:4182/collab');
     this.server.placeholder = '由维护者提供，通常为 wss://域名/collab';
     this.creationKey = input(this.host, '创建房间密钥（可选）', 'password');
     this.invitation = input(this.host, '粘贴邀请链接');
@@ -100,7 +101,7 @@ export class CollaborationPanel {
       const url = new URL(invitation?.server ?? this.server.value.trim());
       if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password || url.hash || url.search) throw new Error('请使用有效的 ws:// 或 wss:// 服务器地址');
       if (location.protocol === 'https:' && url.protocol !== 'wss:') throw new Error('在线 HTTPS 编辑器须使用 wss:// 公网入口');
-      localStorage.setItem('rpe-collab-name', this.name.value); localStorage.setItem('rpe-collab-color', this.color.value); localStorage.setItem('rpe-collab-server', url.href);
+      localPreferences.setItem('rpe-collab-name', this.name.value); localPreferences.setItem('rpe-collab-color', this.color.value); localPreferences.setItem('rpe-collab-server', url.href);
       this.client.connect(url.href, { name: this.name.value, color: this.color.value }, invitation, this.creationKey.value); this.creationKey.value = '';
     } catch (error) { this.notify(error.message, 'error'); }
   }

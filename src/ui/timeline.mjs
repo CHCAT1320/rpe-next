@@ -20,8 +20,7 @@ const isHookedEvent = event => event?.inst === true || Number(event?.inst) === 1
 const labels = ['X', 'Y', '旋转', '透明', '速度'];
 const extendedLabels = SPECIAL_TRACKS.map(track => track.label);
 
-export function prepareCanvas(canvas) {
-  const rectangle = canvas.getBoundingClientRect();
+export function prepareCanvas(canvas, rectangle = canvas.getBoundingClientRect()) {
   const ratio = globalThis.devicePixelRatio || 1;
   const width = Math.round(rectangle.width * ratio);
   const height = Math.round(rectangle.height * ratio);
@@ -129,7 +128,7 @@ export class Timeline {
   eventColumnBounds(channel, width) {
     const channelWidth = width / this.eventTypes.length;
     const barWidth = channelWidth * Math.max(0.35, Math.min(1, this.eventBarWidth ?? 0.82));
-    return { channelWidth, x: channel * channelWidth + (channelWidth - barWidth) / 2, width: barWidth };
+    return { channelWidth, left: channel * channelWidth, x: channel * channelWidth + (channelWidth - barWidth) / 2, width: barWidth };
   }
 
   get factor() { return this.getSession().line?.bpmfactor ?? 1; }
@@ -204,7 +203,8 @@ export class Timeline {
   }
   horizontal(position) { return this.noteHorizontal(position); }
   noteInset(width = this.panelWidth(this.notesCanvas.clientWidth, 'notes')) { return Math.min(48 * this.renderNoteScale, Math.max(0, width / 2 - 1)); }
-  noteWidth(note) { return 68 * this.renderNoteScale * Math.min(3, Math.max(0.2, note.size ?? 1)); }
+  noteBaseWidth(note) { return 68 * this.renderNoteScale * Math.abs(note.size ?? 1); }
+  noteWidth(note, highlight = this.highlight !== false && this.simultaneous?.has(note)) { return this.noteBaseWidth(note) * (this.skin?.noteScale?.(highlight) ?? 1); }
   snapXPosition(value) {
     if (!this.snapX) return value;
     const snapped = snapPosition(value, this.gridCount);
@@ -488,7 +488,7 @@ export class Timeline {
     const localBeatHeight = Math.abs(this.vertical(this.origin + 1) - this.vertical(this.origin));
     const stride = Math.max(1, Math.ceil(6 * this.division / localBeatHeight));
     context.font = '12px RPE, sans-serif';
-    context.lineWidth = Math.max(0.5, (this.barWidth ?? 3) * 2 * width / 1920);
+    context.lineWidth = Math.max(0.5, (this.barWidth ?? 3) * 2 * (this.gridReferenceWidth ?? width) / 1920);
     for (let tick = first; tick <= last; tick += stride) {
       const beat = tick / this.division;
       const vertical = this.vertical(beat, height);
@@ -614,13 +614,13 @@ export class Timeline {
       const horizontal = this.noteHorizontal(note.positionX);
       const vertical = this.vertical(beatValue(note.startTime));
       const endVertical = this.vertical(beatValue(note.endTime));
-      const noteWidth = 68 * this.renderNoteScale * Math.min(3, Math.max(0.2, note.size ?? 1));
+      const highlight = this.highlight !== false && this.simultaneous.has(entry.item);
+      const noteWidth = this.noteWidth(note, highlight), baseWidth = this.noteBaseWidth(note);
       const renderedHorizontal = this.clampNoteHorizontal(horizontal, noteWidth, width);
       if (renderedHorizontal == null) continue;
       context.globalAlpha = note.isFake ? 0.45 : noteIsAbove(note) ? 1 : 0.7;
       context.fillStyle = NOTE_COLORS[note.type];
-      const highlight = this.highlight !== false && this.simultaneous.has(entry.item);
-      const textured = note.type === 2 ? this.skin?.hold(context, renderedHorizontal, vertical, endVertical, noteWidth, highlight, true, note.tint ?? note.color) : this.skin?.head(context, note.type, renderedHorizontal, vertical, noteWidth, highlight, note.tint ?? note.color);
+      const textured = note.type === 2 ? this.skin?.hold(context, renderedHorizontal, vertical, endVertical, baseWidth, highlight, true, note.tint ?? note.color, 68 * this.renderNoteScale) : this.skin?.head(context, note.type, renderedHorizontal, vertical, baseWidth, highlight, note.tint ?? note.color, 5, 68 * this.renderNoteScale);
       if (!textured && note.type === 2) {
         context.globalAlpha *= 0.45;
         const top = Math.max(-10, endVertical);
@@ -686,14 +686,14 @@ export class Timeline {
         const note = selectedSet.has(index) && this.drag?.lineIndex === lineIndex && !this.bulkPreview ? this.movedNote(sourceNote) : sourceNote;
         const beat = beatValue(note.startTime); const endBeat = beatValue(note.endTime);
         if (Math.max(beat, endBeat) < bottomBeat || Math.min(beat, endBeat) > topBeat) continue;
-        const horizontal = this.noteHorizontal(note.positionX, lineIndex); const noteWidth = this.noteWidth(note); const rendered = this.clampNoteHorizontal(horizontal, noteWidth, width, lineIndex);
+        const highlight = this.highlight !== false && this.simultaneous?.has(sourceNote);
+        const horizontal = this.noteHorizontal(note.positionX, lineIndex); const noteWidth = this.noteWidth(note, highlight), baseWidth = this.noteBaseWidth(note); const rendered = this.clampNoteHorizontal(horizontal, noteWidth, width, lineIndex);
         if (rendered == null) continue;
         const vertical = this.verticalForLine(beat, lineIndex, height); const endVertical = this.verticalForLine(beatValue(note.endTime), lineIndex, height);
         const selected = selectedSet.has(index);
-        const highlight = this.highlight !== false && this.simultaneous?.has(sourceNote);
         context.globalAlpha = note.isFake ? 0.45 : noteIsAbove(note) ? 1 : 0.7;
         context.fillStyle = NOTE_COLORS[note.type] ?? '#b8c8ff';
-        const textured = note.type === 2 ? this.skin?.hold(context, rendered, vertical, endVertical, noteWidth, highlight, true, note.tint ?? note.color) : this.skin?.head(context, note.type, rendered, vertical, noteWidth, highlight, note.tint ?? note.color);
+        const textured = note.type === 2 ? this.skin?.hold(context, rendered, vertical, endVertical, baseWidth, highlight, true, note.tint ?? note.color, 68 * this.renderNoteScale) : this.skin?.head(context, note.type, rendered, vertical, baseWidth, highlight, note.tint ?? note.color, 5, 68 * this.renderNoteScale);
         if (!textured && note.type === 2) { const alpha = context.globalAlpha; context.globalAlpha = alpha * 0.45; context.fillRect(rendered - noteWidth / 2, Math.min(vertical, endVertical), noteWidth, Math.abs(vertical - endVertical)); context.globalAlpha = alpha; }
         if (!textured) context.fillRect(rendered - noteWidth / 2, vertical - 4, noteWidth, 8);
         if (selected) { context.strokeStyle = '#fff'; context.lineWidth = 2; context.strokeRect(rendered - noteWidth / 2 - 3, vertical - 7, noteWidth + 6, 14); context.lineWidth = 1; }
@@ -861,8 +861,7 @@ export class Timeline {
     }
     this.eventRects = [];
     this.eventTypes.forEach((type, channel) => {
-      const { channelWidth, x: barX, width: barWidth } = this.eventColumnBounds(channel, width);
-      const horizontal = channel * channelWidth;
+      const { channelWidth, left: horizontal = channel * channelWidth, x: barX, width: barWidth } = this.eventColumnBounds(channel, width);
       context.strokeStyle = '#334154'; context.beginPath(); context.moveTo(horizontal, 0); context.lineTo(horizontal, height); context.stroke();
       const entries = this.eventIndexes[channel].query(this.eventBeatAt(height, type), this.eventBeatAt(0, type));
       if (type === 'paintEvents') {
@@ -907,6 +906,7 @@ export class Timeline {
           context.globalAlpha = 1;
         }
         if (entry.item.trajectory) this.drawTrajectoryEvent(context, rectangle, entry.item);
+        if (this.decorateEvent) { context.save(); context.beginPath(); context.rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height); context.clip(); try { this.decorateEvent(context, rectangle, entry.item, selected); } finally { context.restore(); } }
         if (this.drawEventCurves !== false && !entry.item.trajectory && channelWidth >= (this.eventCurveThreshold ?? 24)) {
           if (seamless) {
             if (!curveBatches.has(chain)) curveBatches.set(chain, []);
@@ -922,7 +922,7 @@ export class Timeline {
       }
       context.lineWidth = 1;
       const visibleGroups = new Set(entries.map(entry => ranges.get(entry.index)));
-      const formatValue = value => typeof value === 'number' ? value.toFixed(2) : Array.isArray(value) ? value.join(',') : value;
+      const formatValue = value => this.formatEventValue ? this.formatEventValue(value, type) : typeof value === 'number' ? value.toFixed(2) : Array.isArray(value) ? value.join(',') : value;
        const valueThreshold = this.eventValueThreshold ?? 30;
        if (channelWidth >= valueThreshold) {
          context.font = `${this.eventValueFontSize ?? 13}px RPE, sans-serif`;
@@ -938,7 +938,7 @@ export class Timeline {
          }
        }
       context.fillStyle = '#303030'; context.fillRect(horizontal, 0, channelWidth, 23);
-      context.fillStyle = '#f5f5f5'; context.fillText((this.extended ? extendedLabels : labels)[channel], horizontal + 6, 16);
+      context.fillStyle = '#f5f5f5'; context.fillText(this.eventLabels?.[channel] ?? (this.extended ? extendedLabels : labels)[channel], horizontal + 6, 16, Math.max(1, channelWidth - 12));
     });
     const drag = this.eventInteraction.drag;
     if (drag?.kind === 'rectangle') {

@@ -1,0 +1,75 @@
+name: Build release packages
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-packages-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm ci --prefix collaboration-server --ignore-scripts
+      - run: npm run test:collaboration-server
+      - run: npm run build:pages
+      - run: node tools/smoke-pages.mjs
+  desktop:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            platform: windows
+            arch: x64
+          - runner: windows-11-arm
+            platform: windows
+            arch: arm64
+          - runner: macos-15-intel
+            platform: macos
+            arch: x64
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          architecture: ${{ matrix.arch }}
+      - run: npm ci
+      - if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        run: npm ci --prefix collaboration-server --ignore-scripts
+      - if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2t64
+          xvfb-run -a node tools/build-release.mjs
+      - if: matrix.platform != 'linux'
+        run: node tools/build-release.mjs
+      - if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        run: node tools/build-release.mjs --server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/v*/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

@@ -3,6 +3,7 @@ import { integerChartAlpha } from '../core/alpha-values.mjs';
 import { createChart, createLine } from '../core/chart.mjs';
 import { beatValue, fromNumber } from '../core/beat.mjs';
 import { selectionState, sameSelection, remapSelection, restoreSelection } from './selection-history.mjs';
+import { emitModHook } from '../core/mod-hooks.mjs';
 
 export class EditorSession extends EventTarget {
   constructor(chart = createChart()) {
@@ -112,14 +113,17 @@ export class EditorSession extends EventTarget {
   }
 
   commit(label, chart, beforeSelection = this.selectionState()) {
-    chart = integerChartAlpha(chart, this.chart);
-    if (this.collaboration) return this.collaboration.commit(label, chart, beforeSelection);
+    const change=emitModHook('session:before-commit',{session:this,label,chart,beforeSelection,cancel:false,normalizeAlpha:true});
+    if(change.cancel)return false;label=change.label;chart=change.chart;beforeSelection=change.beforeSelection;
+    if(change.normalizeAlpha!==false)chart = integerChartAlpha(chart, this.chart);
+    if (this.collaboration) {const result=this.collaboration.commit(label, chart, beforeSelection);emitModHook('session:after-commit',{session:this,label,chart:this.chart});return result;}
     if (this.history.commit(label, chart, { beforeSelection, afterSelection: this.selectionState() })) {
       const time = Number.isFinite(this.editSeconds) ? Math.max(0, this.editSeconds) : 0;
       this.recentEdits.push({ start: time, end: time, label });
       if (this.recentEdits.length > 50) this.recentEdits.shift();
     }
     this.notify();
+    emitModHook('session:after-commit',{session:this,label,chart:this.chart});
   }
 
   updateLine(label, change, beforeSelection = this.selectionState()) {
@@ -275,6 +279,8 @@ export class EditorSession extends EventTarget {
   }
 
   travel(direction) {
+    const auxiliary = (direction === 'undo' ? this.history.undoStack : this.history.redoStack).at(-1);
+    if (auxiliary?.auxiliaryOnly) { this.history[direction](); this.notify(); return; }
     if (this.collaboration) return this.collaboration.travel(direction);
     const command = (direction === 'undo' ? this.history.undoStack : this.history.redoStack).at(-1);
     if (!command) return;

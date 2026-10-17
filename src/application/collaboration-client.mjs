@@ -98,7 +98,8 @@ export class CollaborationClient extends EventTarget {
           if (own.travel) {
             const { direction, entry } = own.travel;
             (direction === 'undo' ? this.undo : this.redo).pop(); (direction === 'undo' ? this.redo : this.undo).push(entry);
-          } else if (own.recordHistory !== false) { this.undo.push({ label: own.label, changes: own.changes }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
+            entry.auxiliary?.[direction]();
+          } else if (own.recordHistory !== false) { this.undo.push({ label: own.label, changes: own.changes, ...(own.auxiliary ? { auxiliary: own.auxiliary } : {}) }); this.redo = []; if (this.undo.length > 150) this.undo.shift(); }
         }
         const member = this.members.find(member => member.id === message.id); if (member) member.stats = message.stats;
         this.rebase();

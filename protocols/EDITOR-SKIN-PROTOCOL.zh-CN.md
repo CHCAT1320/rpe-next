@@ -1,10 +1,12 @@
 # RPEN 编辑器皮肤协议 v1
 
+模组管理界面提供 `@mods-open/@mod-manager/@mod-list/@mod-details/@mod-status/@mod-warning` 别名，沿用 API 3。模组入口可参与 organize；皮肤不会改变外部模组导入的确认流程。
+
 本文同时是皮肤作者的实现规范和 AI agent 的制作指南。协议标识为 `rpen-editor-skin`，协议版本为整数 `1`。编辑器皮肤管理位于 **设置 → 编辑器皮肤**，适用于网页端和桌面端。
 
 当前界面契约版本为 **API 3**。旧的 v1 清单继续有效；使用 API 2 能力（响应式规则、参数、变体等）的皮肤应声明 `"compatibility":{"minApi":2}`，在画布色板中引用参数（API 3）的皮肤应声明 `"minApi":3`。API 版本针对编辑器皮肤接口，与应用版本、皮肤自身版本和文件协议 version 各自独立。
 
-本文描述已经实现的能力。结构校验参见 [`schemas/editor-skin-v1.schema.json`](schemas/editor-skin-v1.schema.json)，组件、变量及静态控件清单参见 [`schemas/editor-skin-components.v1.json`](schemas/editor-skin-components.v1.json)。最终导入还会进行文件、引用、CSS、图片和字体校验；只通过 JSON Schema 不代表包一定有效。
+本文描述已经实现的能力。结构校验参见 [`schemas/editor-skin-v1.schema.json`](../schemas/editor-skin-v1.schema.json)，组件、变量及静态控件清单参见 [`schemas/editor-skin-components.v1.json`](../schemas/editor-skin-components.v1.json)。最终导入还会进行文件、引用、CSS、图片和字体校验；只通过 JSON Schema 不代表包一定有效。
 
 ## 1. 范围与设计原则
 
@@ -186,6 +188,7 @@ tokens 是初始默认值，不是只能读取的常量。可在 `@root` 状态/
 | `view-buttons` / `multi-line-controls` | 视图按钮组 / 多线头栏按钮组 |
 | `time-progress` | 横向时间滑条及标记整体 |
 | `time-readouts` | 当前秒数与当前拍数的组合，可整体重排 |
+| `note-skin-settings` / `note-skins-open` / `note-skin-manager` / `note-skin-gallery` | 音符皮肤设置入口区域 / 管理按钮 / 独立管理界面 / 皮肤卡片列表；管理界面保留图片预览本色，不经过 Canvas 色板换色 |
 | `clock` / `beat-display` / `bpm-display` | 当前秒数 / 当前拍数 / 当前 BPM 读数，可分别设置样式或隐藏 |
 | `note-properties` / `event-properties` / `line-properties` / `noise-properties` | 四类属性表单 |
 | `noise-layers` / `noise-list` / `line-list` / `multi-line-list` | 对应层/物件列表 |
@@ -455,7 +458,7 @@ opacity 范围 0–1，在绘制时乘以原 globalAlpha；lineWidthScale 范围
 
 1. 设置中导入 `.rpenskin`/`.zip` 或文件夹。完整解析和素材解码成功后存入本机皮肤库，导入本身不会切换外观。
 2. 选择皮肤，点击“预览 15 秒”。倒计时结束会回到预览前已保存的皮肤；可点浮动条“保留”或设置里的“应用”确认。
-3. “应用”保存当前选择，重新打开编辑器仍使用它。皮肤包存入单独的 IndexedDB，当前 id 存入 localStorage。
+3. “应用”保存当前选择，重新打开编辑器仍使用它。网页端皮肤包存入单独的 IndexedDB，当前 id 与个人参数存入 localStorage；桌面端通过统一存储接口分别保存到谱面库的 `editor-skins` 与 `preferences`，沿用原生安全写入与更新继承规则。
 4. “恢复默认皮肤”不删除已导入的包，也不清除其他皮肤已保存的参数。删除皮肤会同时移除包、该 id 的本机参数/变体偏好和未确认草稿；再次导入时使用包内默认值。删除已应用的导入皮肤会恢复默认；内置皮肤不能删除。
 
 Ctrl+Alt+Shift+F12 是独立捕获的恢复快捷键，也可在设置中恢复默认。右下浮动确认条仅在限时预览期间显示，正式应用或保留皮肤后消失，不常驻恢复按钮；布局写坏时仍可使用快捷键。也可以在应用 URL 查询参数加入 `skin=default` 临时跳过自定义皮肤，例如 `?skin=default`。该参数不会删除皮肤包，也不会自行清掉保存的选择。
@@ -468,7 +471,7 @@ Ctrl+Alt+Shift+F12 是独立捕获的恢复快捷键，也可在设置中恢复�
 
 开发时，如果浏览器支持目录句柄，点击“导入文件夹”只读选择一次目录，此后“重读开发目录”会重新读取、校验并更新同 id 的包，当前正在使用它时自动进入预览。不重复弹出同包替换确认。目录授权仅在本次运行保留，不后台扫描或持续监听；不支持该 API 的环境继续使用普通文件夹导入。默认包的导入、重读和导出不包含个人参数，它们单独保存在本机；替换包的动作本身不由预览超时回滚。
 
-皮肤是个人编辑器偏好，不进入谱面 JSON/PEZ，不发送给联机成员，不修改谱面未保存标记。网页端、桌面端、不同地址/端口的存储独立，清理网站数据也会清理导入的皮肤。
+皮肤是个人编辑器偏好，不进入谱面 JSON/PEZ，不发送给联机成员，不修改谱面未保存标记。网页端、桌面端、不同同源地址的存储独立。网页端清理网站数据也会清理导入的皮肤；桌面端更新或移动程序仍沿用原谱面库中的包、选择和参数，切换谱面库时使用目标库的个人设置。
 
 应用维护者若要增加内置皮肤，将同样结构的目录放入 `assets/editor-skins/paper-example/`，再在 `assets/editor-skins/index.json` 中登记 `{ "directory":"paper-example", "files":["skin.json","images/icon.svg"] }`。目录名使用小写英文字母、数字或连字符，files 列出所有包内文件。内置与导入皮肤共用同一解析器和呈现协议，以平级列表显示名称与作者；内置包不接受同 id 的导入覆盖。
 
@@ -587,7 +590,7 @@ variants 的每个条目需要 name，可覆盖 colorScheme、tokens、styles、
 | data-rpen-playing | true / false |
 | data-rpen-dirty | true / false，包含素材未保存状态 |
 | data-rpen-pane | 当前右侧页面名 |
-| data-rpen-mode | notes、notes-events、multi-notes、multi-events、noise |
+| data-rpen-mode | notes、notes-events、multi-notes、multi-events、noise、global-events |
 | data-rpen-location | home、editor、preview |
 | data-rpen-collaboration | offline、connecting、ready |
 | data-rpen-beat | 当前拍数向下取整的整数 |
@@ -597,6 +600,8 @@ variants 的每个条目需要 name，可覆盖 colorScheme、tokens、styles、
 信号以约 180ms 的根属性脉冲呈现，属性名为 `data-rpen-event-信号名=true`。登记信号：beat（播放跨越整数拍）、save-started、save-succeeded、save-failed、error、warning、collaboration-changed。信号再次触发会先清除再在下一帧置为 true，可用属性选择器重新启动 motion。它们用于装饰和反馈，不是完整事件总线；快进跨多拍只发当前跨越信号，不回放中途每拍，减少动态效果偏好仍生效。不要依赖信号执行谱面操作。需要完整的逐拍动画可依据 beat 状态设计，但协议不提供任意 JS 回调。
 
 ### 13.4 内置图标、高 DPI 与素材复用
+
+全局事件新增稳定别名 `global-events-tool`、`close-global-events`、`global-events-panel`、`global-event-types`、`global-event-density`、`global-event-inspector`、`global-event-properties`；页面名为 `global-events`（总览）和 `global-event-properties`（独立属性），没有常驻标签。画布角色 `global-events` 和 `global-density` 分别控制事件时间轴和横向密度条，沿用全局色板并可在 canvas.targets 单独覆盖。全局事件列宽由普通事件基准或提供方注册项决定，总览不提供调宽控件。
 
 ```json
 {

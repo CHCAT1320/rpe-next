@@ -128,7 +128,7 @@ export class NoiseSkinRenderer {
       for (const entry of entries) {
         if (Boolean(entry.area.isInvert) !== inverted || !(group === 0 ? entry.state === 'active' : group === 1 ? entry.state !== 'active' : entry.state === 'ready')) continue;
         const points = entry.points.map(point => [2*((canvasWidth/2 + point.x*scale - viewport.left)/viewport.width)-1, 1-2*((canvasHeight/2-point.y*scale-viewport.top)/viewport.height)]);
-        for (const index of [0,1,2,0,2,3]) vertices.push(...points[index]);
+        for (let index = 1; index + 1 < points.length; index++) vertices.push(...points[0], ...points[index], ...points[index + 1]);
       }
       if (!vertices.length) continue;
       gl.enable(gl.STENCIL_TEST); gl.stencilMask(255); gl.clearStencil(0); gl.clear(gl.STENCIL_BUFFER_BIT); gl.stencilFunc(gl.ALWAYS,0,255); gl.stencilOp(gl.KEEP,gl.KEEP,gl.INCR); gl.colorMask(false,false,false,false);

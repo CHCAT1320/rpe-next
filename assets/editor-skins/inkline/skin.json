@@ -441,6 +441,7 @@
     { "selector": "@multi-line-controls button.active", "set": { "color": "var(--rpen-ink-accent-text)", "background": "color-mix(in srgb, var(--rpen-ink-accent) 17%, transparent)", "border-color": "color-mix(in srgb, var(--rpen-ink-accent) 45%, transparent)", "box-shadow": "none" } },
     { "selector": ".editor.multi-notes .timeline-head > span:first-child,.editor.multi-events .timeline-head > span:nth-child(2)", "set": { "padding-right": "270px" } },
     { "selector": ".editor.noise-mode .timeline-head::before", "set": { "content": "\"噪域编辑\"", "color": "#9cc3aa", "font-weight": "400", "font-size": "13px", "padding-left": "14px", "display": "flex", "align-items": "center" } },
+    { "selector": ".editor.global-events-mode .timeline-head::before", "set": { "content": "\"全局事件\"", "color": "var(--rpen-text)", "font-weight": "400", "font-size": "13px", "padding-left": "14px", "display": "flex", "align-items": "center" } },
     { "selector": "@stage", "set": { "background": "var(--rpen-ink-gutter)" } },
     { "selector": "#notes", "set": { "border-right": "1px solid var(--rpen-ink-line)", "background": "#ffffff05" } },
     { "selector": "#events", "set": { "border-left": "1px solid var(--rpen-ink-line)", "background": "#ffffff05" } },
@@ -854,6 +855,7 @@
       "label": "编辑模式",
       "items": [
         "noise-areas-tool",
+        "global-events-tool",
         "multi-line-tool"
       ]
     },

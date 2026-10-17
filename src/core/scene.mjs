@@ -80,11 +80,12 @@ export class LineRuntime {
     const speed = note.speed ?? 1;
     const side = noteIsAbove(note) ? 1 : -1;
     const isHold = note.type === 2;
+    const sizeY = isHold ? 1 : this.controls.size.value(distance);
     let horizontal = note.positionX * (isHold ? 1 : this.controls.pos.value(distance));
     const vertical = distance * speed * side * (isHold ? 1 : this.controls.y.value(distance));
     if (!isHold && Math.abs(state.incline) > 0.01) horizontal -= Math.tan(note.positionX / 675 * state.incline * Math.PI / 180) * distance * speed * side;
     return { x: horizontal, y: vertical, tail: (entry.tail - state.floor) * speed * side,
-      size: (note.size ?? 1) * (isHold ? 1 : this.controls.size.value(distance)),
+      size: (note.size ?? 1) * sizeY, sizeY,
       alpha: (note.alpha ?? 255) / 255 * this.controls.alpha.value(distance),
       skew: isHold ? 0 : note.positionX * this.controls.skew.value(distance), showHead: !activeHold };
   }

@@ -13,10 +13,13 @@ import { renderProperties } from './inspector.mjs';
 import { showDialog, editJson, choose, confirmAction, dialogOpen } from './dialog.mjs';
 import { migratePreferences, shortcutAction, shortcutReleased, shortcutMatches, DEFAULT_HOTKEYS } from '../core/preferences.mjs';
 import { directoryEntries, uploadedEntries, scanMigration } from '../platform/migration.mjs';
-import { readProject, readPreferences, storePreferences, storeProject, readClipboardHistory, storeClipboardHistory } from '../platform/library.mjs';
+import { readProject, readPreferences, storePreferences, storeProject, readClipboardHistory, storeClipboardHistory, subscribeLibrary } from '../platform/library.mjs';
+import { storageFailure, requestPersistence } from '../platform/storage.mjs';
+import { StoragePanel, noteLibrarySave, noteExternalBackup } from './storage-panel.mjs';
 import { migrationDialog } from './migration-dialog.mjs';
 import { LinePanel } from './line-panel.mjs';
 import { AssetLibraryPanel } from './asset-library.mjs';
+import { remapAssetReferences } from '../platform/asset-library.mjs';
 import { HELP_TEXT } from './help.mjs';
 import { download } from '../platform/files.mjs';
 import { RpeSkin } from './skin.mjs';
@@ -65,11 +68,33 @@ import { CollaborationPanel } from './collaboration.mjs';
 import { NoiseAreaEditor } from './noise-area.mjs';
 import { EventSampler } from './event-sampler.mjs';
 import { EditorSkins } from './editor-skins.mjs';
+import { NoteSkins } from './note-skins.mjs';
 import { editorSkinContext, editorCanvasRevision } from './editor-skin-canvas.mjs';
 import { editorSkinState, editorSkinSignal } from './editor-skin-state.mjs';
 import { pcmWave } from '../platform/pcm-wave.mjs';
+import { ModManager } from './mod-manager.mjs';
+import { emitModHook } from '../core/mod-hooks.mjs';
+import { GlobalEventRegistry, registerPlaceholderGlobalEvent } from '../core/global-events.mjs';
+import { GlobalEventsEditor } from './global-events.mjs';
+import { initializeLocalPreferences, flushLocalPreferences } from '../platform/local-preferences.mjs';
+import { nativeStorage } from '../platform/native.mjs';
+
+try { await initializeLocalPreferences(); }
+catch (error) {
+  const host = document.createElement('div'); host.className = 'native-storage-migration';
+  const message = document.createElement('p'); message.textContent = '桌面存储未能完成初始化：' + error.message + '。旧数据仍保留。请检查磁盘空间和文件夹权限后重试。';
+  const retry = document.createElement('button'); retry.textContent = '重试'; retry.onclick = () => location.reload();
+  host.append(message, retry); document.body.append(host); throw error;
+}
+if (globalThis.rpenDesktopStorage) globalThis.rpenFlushPreferences = flushLocalPreferences;
 
 const element = selector => document.querySelector(selector);
+let mods;
+globalThis.__rpenModInputGate=true;
+for(const type of ['keydown','keyup','wheel','pointerdown','pointerup','mousedown','mouseup','click','dblclick','contextmenu','drop','dragstart','input','change','submit'])window.addEventListener(type,event=>{
+  const runtime=mods?.runtime;if(!runtime)return;
+  if(type==='keydown'&&event.ctrlKey&&event.altKey&&event.shiftKey&&event.key==='F11'){event.preventDefault();event.stopImmediatePropagation();runtime.emergency?.();return;}runtime.handleInput(event);
+},{capture:true,passive:false});
 const displayFields = [
   ['text-selection-drag', 'textSelectionDrag', false],
   ['event-cut-density', 'cutDensity', 4],
@@ -102,8 +127,10 @@ let tempo = new TempoMap(session.chart.BPMList);
 let tempoEntries = session.chart.BPMList;
 let dirtyFrame = true;
 let lastDraftDocument;
+let lastDraftAssets = [], lastDraftFolders = [];
 let preferences = migratePreferences();
 let libraryProject = null;
+let persistenceRequested = false;
 const manualSaves = new ManualSaveQueue(storeProject);
 let editorPreferences = readEditorPreferences();
 let atHome = true;
@@ -142,6 +169,11 @@ const noiseEditor = new NoiseAreaEditor(element('#noise-panel'), element('#noise
   getAssets: () => assets,
   onAssets: entries => { for (const [name, bytes] of entries) assets.set(name, bytes); assetDirty = true; images.load(session.chart, assets, chartName); invalidate(); },
 });
+const globalEventRegistry = new GlobalEventRegistry();
+registerPlaceholderGlobalEvent(globalEventRegistry);
+const globalEvents = new GlobalEventsEditor(element('#global-events-panel'), element('#global-events-canvas'), globalEventRegistry,
+  () => ({ session, tempo, timeline, previewVisible: preview.visible, seconds: () => chartSeconds(), duration: () => audio.duration }),
+  { activate: activatePane, invalidate, notify, seek: beat => seekBeat(beat), wheel: event => previewWheel(event) });
 for (const renderer of [preview, realtimePreview]) {
   renderer.noisePreview.hiddenLayers = noiseEditor.hiddenLayers;
   renderer.noisePreview.simpleLayers = noiseEditor.simpleLayers;
@@ -207,7 +239,7 @@ const stopMultiLineScrollDrag = event => {
 timeline.multiLineScrollElement.addEventListener('pointerup', stopMultiLineScrollDrag);
 timeline.multiLineScrollElement.addEventListener('pointercancel', stopMultiLineScrollDrag);
 timeline.multiLineScrollElement.addEventListener('lostpointercapture', stopMultiLineScrollDrag);
-const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible && !noiseEditor.active, error => reportError(error));
+const batchControls = new BatchControls(element('.stage'), timeline, () => session, () => !atHome && !preview.visible && !noiseEditor.active && !globalEvents.active, error => reportError(error));
 const multiEdit = new MultiEditPanel(element('#multi-editor'), () => session, timeline, {
   close: () => activatePane('chart'), invalidate, notify: (message, severity) => notify(message, severity),
 });
@@ -216,29 +248,26 @@ const textLinesPanel = new TextLinesPanel(element('#text-lines-editor'), () => (
 const noiseFitPanel = new NoiseFitPanel(element('#noise-fit-editor'), element('.stage'), () => ({ session, tempo, timeline, previewVisible: preview.visible, seconds: () => chartSeconds() }), { invalidate, notify, activate: activatePane, pause: () => playback.pause() });
 const noiseTrackingPanel = new NoiseTrackingPanel(element('#noise-tracking-editor'), element('.stage'), () => ({ session, tempo, timeline, preview, realtimePreview, previewVisible: preview.visible, seconds: () => chartSeconds(), wheel: event => previewWheel(event) }), { invalidate, notify, activate: activatePane, pause: () => playback.pause() });
 const multiLinePanel = new MultiLinePanel(element('#multi-line-editor'), () => session, { timeline, render: renderSession, notify, persist: persistEditor });
-const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, afterTexture: () => images.load(session.chart, assets, chartName) });
+const linePanel = new LinePanel(element('#line-panel'), () => session, { render: renderSession, notify, getAssets: () => assets, getChartName: () => chartName, afterTexture: () => images.load(session.chart, assets, chartName) });
 const editorSkins = new EditorSkins(element('#editor-skin-settings'), { invalidate, notify });
+const noteSkins = new NoteSkins(element('#note-skin-settings'), { skin, hitSounds, audio, invalidate, notify, settings: settingsDialog, pause: () => playback.pause() });
 document.addEventListener('rpen-editor-skin-changed', () => {
   lineSwitcher.lastFrame = -Infinity; lineSwitcher.cache.clear(); renderSession();
   if (activePaneName === 'clipboard') renderClipboardPanel();
 });
+document.addEventListener('rpen-note-skin-changed', () => { if (textLinesPanel.active) textLinesPanel.refresh(); });
 const assetLibrary = new AssetLibraryPanel(element('#asset-library'), () => ({ assets, folders: assetFolders, chart: session.chart, chartName }), {
   notify,
-  onChange: (nextAssets, nextFolders) => {
-    assets = nextAssets; assetFolders = new Set(nextFolders ?? []); images.load(session.chart, assets, chartName); assetDirty = true; status('素材库已修改，请保存谱面以保留资源'); renderSession();
+  onChange: (nextAssets, nextFolders, paths) => {
+    const nextChart = remapAssetReferences(session.chart, assets, nextAssets, paths, chartName);
+    assets = nextAssets; assetFolders = new Set(nextFolders ?? []); assetDirty = true;
+    if (nextChart !== session.chart) session.commit('同步图片资源路径', nextChart);
+    images.load(session.chart, assets, chartName); status('素材库已修改，请保存谱面以保留资源'); renderSession();
   },
-  onTexture: (oldName, newName = oldName) => {
-    const lines = [...session.chart.judgeLineList];
-    if (newName !== oldName) {
-      let changed = false; for (let index = 0; index < lines.length; index++) if (lines[index]?.Texture === oldName) { lines[index] = { ...lines[index], Texture: newName }; changed = true; }
-      if (changed) session.commit('同步重命名判定线贴图', { ...session.chart, judgeLineList: lines });
-      images.load(session.chart, assets, chartName);
-      return;
-    }
-    const index = session.lineIndex; if (!lines[index]) return;
-    lines[index] = { ...lines[index], Texture: newName }; session.commit('更改判定线贴图', { ...session.chart, judgeLineList: lines });
-    images.load(session.chart, assets, chartName);
-  },
+  openFolder: nativeStorage ? async (path, folder) => {
+    if (!libraryProject || assetDirty) throw Error('请先保存谱面和素材修改，再打开本地位置');
+    await nativeStorage.call('openAssetFolder', libraryProject.id, path, folder);
+  } : undefined,
 });
 const clipboardHistory = new ClipboardHistory();
 const selectionOverlay = new SelectionOverlay(element('.stage'), timeline);
@@ -246,7 +275,7 @@ const lineSwitcher = new LineSwitcher(element('.stage'), () => ({
   chart: session.chart, tempo, seconds: chartSeconds(), selected: session.lineIndex,
   layer: timeline.layer, extended: timeline.extended,
   start: timeline.timeAt(timeline.viewHeight()), end: timeline.timeAt(0),
-  visible: hasDocument && !atHome && !preview.visible && !noiseEditor.active && !dialogOpen(),
+  visible: hasDocument && !atHome && !preview.visible && !noiseEditor.active && !globalEvents.active && !dialogOpen(),
 }), { select: index => selectOverviewLine(index) });
 function clipboardTargetLine() {
   return timeline.hoverArea === 'events'
@@ -354,7 +383,18 @@ function notify(message, level = 'success', duration = 2800) {
   const timer = setTimeout(() => { item.classList.add('leaving'); setTimeout(() => item.remove(), 260); notificationTimers.delete(timer); }, duration); notificationTimers.add(timer);
 }
 timeline.notify = (message, level = 'warning') => notify(message, level);
-const reportError = error => { status(error.message); notify(error.message, 'error', 5000); showDialog('操作未完成', error.message); };
+const reportError = error => {
+  const message = storageFailure(error); status(message); notify(message, 'error', 7000);
+  const host = showDialog(error.name === 'ProjectConflictError' ? '保存冲突，已保留当前编辑' : '操作未完成', message);
+  if (error.name === 'ProjectConflictError' && libraryProject?.id === error.projectId && hasDocument) {
+    for (const [label, run] of [['导出当前谱面 PEZ', () => showExportDialog(session.chart, assets, chartName, (_name, format) => { if (format === 'pez') noteExternalBackup(); }, libraryProject?.identifier)],
+      ['另存为新项目', async () => { libraryProject = null; session.history.savedDocument = null; await save(); }]]) {
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+      button.onclick = async () => { element('#modal').close(); try { await run(); } catch (failure) { reportError(failure); } }; host.append(button);
+    }
+  }
+};
+document.addEventListener('rpen-storage-blocked', () => notify('数据库正在等待其他编辑器窗口释放，请关闭旧窗口后重试。', 'warning', 7000));
 const tips = [
   'Tips: 坐标系范围为 [-675,675]x[-450,450]', 'Tips: 速度为10表示每秒移动 1200 像素~', 'Tips: 编辑器的分辨率正比于 1920*1080', 'Tips: 很多金色的组件都是可以被点击的',
   'Tips: 谱面名可不为英文，但标识名只能是一串数字', 'Tips: 添加资源文件时闪退可能是其损坏，常见于直接改后缀名', 'Tips: CTRL+滚轮 可以快速切换线',
@@ -393,7 +433,7 @@ const advanceEditClock = timestamp => {
   editClockTick = timestamp;
 };
 const formatEditTime = seconds => `${String(Math.floor(seconds / 3600)).padStart(2, '0')} h, ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')} m, ${String(Math.floor(seconds) % 60).padStart(2, '0')} s`;
-const currentBeat = () => tempo.beat(chartSeconds(), noiseEditor.active ? 1 : session.line?.bpmfactor ?? 1);
+const currentBeat = () => tempo.beat(chartSeconds(), noiseEditor.active || globalEvents.active ? 1 : session.line?.bpmfactor ?? 1);
 let collaborationJoining = false;
 const collaborationTool = document.createElement('button'); collaborationTool.id = 'collaboration-tool'; collaborationTool.textContent = '联机协作'; element('[data-panel="chart"] .action-grid').append(collaborationTool);
 const collaboration = new CollaborationPanel(element('#collaboration-panel'), () => ({
@@ -431,9 +471,10 @@ const playback = new EditorPlayback(audio, hitSounds, () => {
 timeline.onDragScroll = seconds => playback.seek(audio.time + seconds);
 const autoSave = new AutoSaveClock(async () => {
   const current = session; const document = current.chart; const snapshot = { ...document }; delete snapshot.chartTime;
-  await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, [...assets], editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit, { lineIndex: current.lineIndex });
-  if (current === session) { lastDraftDocument = document; status('自动备份已保存（包含音乐、曲绘与编辑位置）'); notify('自动备份已保存', 'success'); }
-}, error => status(`自动保存失败：${error.message}，请手动保存或导出 PEZ`));
+  const media = [...assets], folders = [...assetFolders];
+  await saveSnapshot(libraryProject?.id ?? recoveryId, chartName, snapshot, media, editorPreferences.autoSaveLimit ?? preferences.settings.autoSaveLimit, { lineIndex: current.lineIndex });
+  if (current === session) { lastDraftDocument = document; lastDraftAssets = media; lastDraftFolders = folders; status('自动备份已保存（包含音乐、曲绘与编辑位置）'); notify('自动备份已保存', 'success'); }
+}, error => { const message = `自动备份失败：${storageFailure(error)}，请导出 PEZ 保留当前修改`; status(message); notify(message, 'error', 7000); });
 timeline.onWheel = event => {
   if (event.ctrlKey) {
     if (event.deltaY) {
@@ -497,12 +538,32 @@ const home = new ProjectHome(async id => {
   guardReplace(() => loadCandidate({ chart: project.chart, name: project.chartName, info: project.info, project }, new Map(project.assets)).catch(reportError));
 }, reportError, project => {
   if (libraryProject?.id === project.id) {
+    if (project.deleted) {
+      libraryProject = null;
+      if (atHome) {
+        hasDocument = false; session.history.markSaved(); assetDirty = false;
+        setHome(true);
+      } else {
+        session.history.savedDocument = null; renderSession();
+      }
+      return;
+    }
     const renamed = libraryProject.chart.META.name !== project.chart.META.name;
     libraryProject = project;
     if (!session.history.dirty) {
       session.commit('更新项目信息', project.chart); session.history.markSaved(); renderSession();
     } else if (renamed) session.commit('更新项目名称', { ...session.chart, META: { ...session.chart.META, name: project.chart.META.name } });
   }
+});
+const storagePanel = new StoragePanel(settingsDialog, { reportError, notify, canSwitchLibrary: () => {
+  if (hasDocument && (session.history.dirty || assetDirty)) { notify('请先保存或放弃当前谱面的修改，再切换谱面库', 'warning'); return false; }
+  return true;
+} });
+document.addEventListener('rpen-preference-error', event => reportError(event.detail));
+document.addEventListener('rpen-library-refresh', () => home.refresh().catch(reportError));
+subscribeLibrary(change => {
+  if (atHome) home.refresh().catch(reportError);
+  if (libraryProject?.id === change.id && change.revision !== libraryProject.storageRevision) notify(change.deleted ? '当前项目已在另一个窗口删除。这里的编辑仍保留，可另存为新项目或导出 PEZ。' : '当前项目已在另一个窗口保存。这里再次保存时会检查冲突，避免覆盖。', 'warning', 7000);
 });
 
 function setHome(visible) {
@@ -589,6 +650,8 @@ function persistEditor() {
 }
 
 function activatePane(name) {
+  if (name === 'global-event-properties' && (!globalEvents.active || globalEvents.selection.size !== 1)) name = 'global-events';
+  if (name === 'global-events' && !globalEvents.active) { openGlobalEvents(); return; }
   if (name !== 'events' && eventSampler.active) eventSampler.finish(false);
   if (name !== 'multi') multiEdit.hide();
   if (name !== 'trajectory') trajectoryPanel.hide();
@@ -598,8 +661,11 @@ function activatePane(name) {
   activePaneName = name;
   editorSkinState({ pane: name });
   noiseEditor.syncChrome();
+  globalEvents.syncChrome();
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
   for (const button of document.querySelectorAll('[data-pane]')) button.classList.toggle('active', button.dataset.pane === name);
+  if (globalEvents.active && ['global-events', 'global-event-properties'].includes(name)) globalEvents.render();
+  invalidate();
 }
 for (const button of document.querySelectorAll('[data-pane]')) button.onclick = () => {
   const pane = button.dataset.pane;
@@ -607,8 +673,17 @@ for (const button of document.querySelectorAll('[data-pane]')) button.onclick = 
   activatePane(pane);
   if (pane === 'lines') linePanel.render();
 };
-function openMultiLinePanel() { activatePane('multi-line'); multiLinePanel.render(); }
-function openNoisePanel() { timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false; noiseEditor.open(); }
+function openMultiLinePanel() { if (globalEvents.active) globalEvents.close(); activatePane('multi-line'); multiLinePanel.render(); }
+function openNoisePanel() { if (globalEvents.active) globalEvents.close(); timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false; noiseEditor.open(); }
+function openGlobalEvents() {
+  if (noiseEditor.active) noiseEditor.close();
+  eventSampler.finish?.(false); timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); multiEdit.hide(); trajectoryPanel.hide(); curveEditorOpen = false;
+  globalEvents.open();
+  renderSession();
+}
+const globalEventsTool = document.createElement('button'); globalEventsTool.id = 'global-events-tool'; globalEventsTool.textContent = '全局事件'; element('#noise-areas-tool').after(globalEventsTool);
+globalEventsTool.onclick = openGlobalEvents;
+element('#close-global-events').onclick = () => { globalEvents.close(); renderSession(); };
 element('#noise-areas-tool').addEventListener('click', openNoisePanel);
 element('#close-noise-editor').addEventListener('click', () => noiseEditor.close());
 element('#noise-tab').addEventListener('click', () => { activatePane('noise'); noiseEditor.render(); });
@@ -627,18 +702,19 @@ element('#multi-line-merge').addEventListener('click', () => session.setMultiLin
 for (const button of document.querySelectorAll('[data-return-chart]')) button.onclick = () => activatePane('chart');
 for (const form of document.querySelectorAll('#properties, #event-properties')) form.addEventListener('submit', event => { event.preventDefault(); document.activeElement?.blur(); });
 for (const button of document.querySelectorAll('[data-icon]')) button.style.setProperty('--icon', `url('${assetUrl(`rpe/Texture/icon/${button.dataset.icon}.png`)}')`);
-function togglePreview(force, stay = false, replay = false) {
+function togglePreview(force, stay = false, replay = false, { autoplay = true } = {}) {
   const visible = force ?? !preview.visible;
   if (visible) clearNoteSourceToast();
   if (visible && (!preview.visible || replay)) {
     previewReturnTime = audio.time; timeline.cancelPlacement();
     if (replay) playback.seek(0);
-    if ((editorPreferences.autoplayView ?? preferences.settings.autoplayView) && !audio.playing && !playback.pending) togglePlayback().catch(reportError);
+    if (autoplay && (editorPreferences.autoplayView ?? preferences.settings.autoplayView) && !audio.playing && !playback.pending) togglePlayback().catch(reportError);
   }
   if (!visible && preview.visible) playback.seek(stay ? audio.time : previewReturnTime);
   preview.visible = visible;
   element('.preview-wrap').hidden = !preview.visible;
   element('#view-toggle').classList.toggle('active', preview.visible);
+  globalEvents.syncChrome();
   element('#multi-line-labels').hidden = preview.visible;
   element('#multi-line-scroll').hidden = preview.visible;
   element('#preview-title').textContent = session.chart.META.name ?? '';
@@ -719,7 +795,7 @@ function updateLineInfo() {
 }
 
 function renderSession() {
-  editorSkinState({ dirty: session.history.dirty || assetDirty, location: atHome ? 'home' : 'editor', mode: noiseEditor.active ? 'noise' : session.multiLineActive ? 'multi-' + session.multiLineMode : timeline.notesOnly ? 'notes' : 'notes-events' });
+  editorSkinState({ dirty: session.history.dirty || assetDirty, location: atHome ? 'home' : 'editor', mode: globalEvents.active ? 'global-events' : noiseEditor.active ? 'noise' : session.multiLineActive ? 'multi-' + session.multiLineMode : timeline.notesOnly ? 'notes' : 'notes-events' });
   const editor = element('.editor');
   noiseEditor.syncChrome();
   editor.classList.toggle('multi-notes', session.multiLineActive && session.multiLineMode === 'notes');
@@ -755,6 +831,7 @@ function renderSession() {
   if (materialHint) materialHint.textContent = missingMedia.length ? `缺少${missingMedia.join('、')} · 进入谱面信息添加` : '';
   const mediaStatus = element('#metadata-media-status');
   if (mediaStatus) mediaStatus.textContent = `音乐：${songName && assets.has(songName) ? songName : '未载入'}　封面：${backgroundName && assets.has(backgroundName) ? backgroundName : '未载入'}`;
+  syncProjectFolderButton();
   if (!session.liveBeatEdit) element('#offset').value = session.chart.META.offset ?? 0;
   element('#selection-info').textContent = session.focus === 'events' ? `${session.eventSelection.size} 个事件已选` : `${session.selection.size} 个音符已选`;
   element('#undo').disabled = !session.history.undoStack.length;
@@ -767,7 +844,7 @@ function renderSession() {
   element('#line-select').value = session.lineIndex;
   element('#multi-line-toggle').classList.toggle('active', session.multiLineActive);
   element('#multi-line-toggle').setAttribute('aria-pressed', String(session.multiLineActive));
-  element('#notes-only').disabled = session.multiLineActive || noiseEditor.active;
+  element('#notes-only').disabled = session.multiLineActive || noiseEditor.active || globalEvents.active;
   element('#multi-line-count').textContent = session.multiLineActive ? session.multiLineIndices.length : 0;
   element('#multi-line-merge').classList.toggle('active', session.multiLineMerge && session.multiLineMode === 'notes');
   element('#multi-line-merge').disabled = !session.multiLineActive || session.multiLineMode !== 'notes';
@@ -795,6 +872,7 @@ function renderSession() {
   if (noiseTrackingPanel.active) noiseTrackingPanel.sync();
   if (activePaneName === 'multi-line') multiLinePanel.render();
   if (noiseEditor.active) noiseEditor.render();
+  if (globalEvents.active) globalEvents.render();
   if (activePaneName === 'metadata') renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); });
   if (activePaneName === 'bpm') renderBpmPanel(session, element('#bpm-editor'));
   session.eventLayer = timeline.layer;
@@ -815,7 +893,8 @@ function renderSession() {
       : (session.multiLineActive && session.multiLineMode === 'notes'
         ? [...(session.multiLineSelection ?? new Map()).values()].reduce((total, values) => total + values.size, 0)
         : session.selection.size);
-    if (noiseEditor.active) noiseEditor.render();
+    if (globalEvents.active) globalEvents.render();
+    else if (noiseEditor.active) noiseEditor.render();
     else if (multiEdit.committing) multiEdit.sync();
     else if (activePaneName === 'collaboration') collaboration.renderState();
     else if (textLinesPanel.active) textLinesPanel.sync();
@@ -840,6 +919,7 @@ function renderSession() {
   const limits = previewLimitations(session.chart);
   element('#compatibility').textContent = '已使用原 RPE 音符素材与打击音；支持封面、静态纹理、多线与控制曲线。尚需原版逐帧对照。' + (limits.length ? `需进一步验证：${limits.join('、')}。` : '');
   invalidate();
+  globalEvents.syncChrome();
 }
 
 session.addEventListener('change', renderSession);
@@ -848,6 +928,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   assertChart(chart);
   if (eventSampler.active) eventSampler.finish(false);
   noiseEditor.reset();
+  globalEvents.reset();
   noiseFitPanel.reset();
   noiseTrackingPanel.reset();
   if (!collaborationJoining && collaboration.client.active) collaboration.client.leave();
@@ -863,7 +944,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
   session.history.limit = preferences.settings.historyLimit;
   session.addEventListener('change', renderSession);
   recoveryId = crypto.randomUUID();
-  lastDraftDocument = undefined;
+  lastDraftDocument = undefined; lastDraftAssets = []; lastDraftFolders = [];
   autoSave.reset(performance.now());
   heldPreview = null; curveStart = null; curveEnd = null; curveAnchorMode = null; curveEditorOpen = false; loop = null; element('#loop-enabled').checked = false;
   assets = nextAssets;
@@ -888,7 +969,7 @@ function replaceChart(chart, name, nextAssets = new Map(), nextFolders = []) {
 
 function guardReplace(action) {
   noiseEditor.flush();
-  if (session.history.dirty || assetDirty) confirmAction('切换谱面？', action);
+  if (hasDocument && (session.history.dirty || assetDirty)) confirmAction('切换谱面？', action);
   else action();
 }
 
@@ -896,6 +977,7 @@ async function loadCandidate(candidate, nextAssets) {
   attachExternalEffects([candidate], nextAssets);
   replaceChart(candidate.chart, candidate.name, nextAssets, candidate.project?.assetFolders ?? []);
   libraryProject = candidate.project ?? null;
+  syncProjectFolderButton();
   images.load(candidate.chart, assets, chartName, candidate.info);
   const references = resourceReferences(candidate.chart, assets, chartName, candidate.info);
   const bytes = assetBytes(assets, references.song, chartName);
@@ -958,7 +1040,7 @@ function prependAudioSilence() {
 }
 
 function seekBeat(value, pause = true) {
-  playback.seek(tempo.seconds(value, noiseEditor.active ? 1 : session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
+  playback.seek(tempo.seconds(value, noiseEditor.active || globalEvents.active ? 1 : session.line?.bpmfactor ?? 1) + (session.chart.META.offset ?? 0) / 1000, pause);
   invalidate();
 }
 
@@ -970,7 +1052,9 @@ async function togglePlayback() {
 
 function save() {
   noiseEditor.flush();
+  if (!persistenceRequested) { persistenceRequested = true; requestPersistence().then(() => storagePanel.refresh()).catch(() => {}); }
   editorSkinSignal('save-started');
+  mods?.runtime.emit('editor:save-started',{});
   const savingSession = session;
   return manualSaves.save(savingSession, () => {
     const document = session.chart; const snapshot = { ...document }; delete snapshot.chartTime;
@@ -982,12 +1066,13 @@ function save() {
     savingSession.history.markSaved(document);
     if (session !== savingSession) return;
     libraryProject = project;
+    noteLibrarySave(); storagePanel.refresh().catch(() => {});
     assetDirty = assets.size !== project.assets.length || project.assets.some(([name, bytes]) => assets.get(name) !== bytes)
       || assetFolders.size !== project.assetFolders.length || project.assetFolders.some(folder => !assetFolders.has(folder));
     renderSession();
     const message = session.history.dirty || assetDirty ? '已保存开始保存时的版本；后续修改尚未保存' : '已保存到谱面库';
-    status(message); notify(message, 'success'); editorSkinSignal('save-succeeded');
-  }).catch(error => { editorSkinSignal('save-failed'); throw error; });
+    status(message); notify(message, 'success'); editorSkinSignal('save-succeeded');mods?.runtime.emit('editor:save-succeeded',{message});
+  }).catch(error => { editorSkinSignal('save-failed');mods?.runtime.emit('editor:save-failed',{error}); throw error; });
 }
 
 function validateCommit(label, next) { assertChart(next); session.commit(label, next); }
@@ -1012,7 +1097,13 @@ listen('#resume-editor', () => setHome(false));
 listen('#open', () => { element('#file-input').click(); });
 element('#file-input').addEventListener('change', async event => {
   try {
-    const loaded = await openFiles(event.target.files);
+    const loaded = await openFiles(event.target.files, { confirmLargeArchive: info => new Promise(resolve => {
+      const host = showDialog('确认导入大谱面包', `目录声明解压后 ${(info.declaredBytes / 1024 ** 2).toFixed(1)} MiB，共 ${info.count} 个文件。大体积或异常压缩倍率可能耗尽内存；只继续导入来源可信的谱面。`);
+      const modal = host.closest('dialog'), apply = element('#modal-apply'); let decided = false;
+      modal.addEventListener('close', () => { if (!decided) resolve(false); }, { once: true });
+      apply.hidden = false; apply.textContent = '确认来源可信，继续导入';
+      apply.onclick = () => { decided = true; modal.close(); resolve(true); };
+    }) });
     if (!loaded) return;
     const proceed = () => {
       if (loaded.candidates.length === 1) loadCandidate(loaded.candidates[0], loaded.assets).catch(reportError);
@@ -1023,7 +1114,7 @@ element('#file-input').addEventListener('change', async event => {
   finally { event.target.value = ''; }
 });
 listen('#save', () => save());
-listen('#export', () => { noiseEditor.flush(); showExportDialog(session.chart, assets, chartName, name => status(`已发起下载：${name}`), libraryProject?.identifier ?? libraryProject?.info?.Path); });
+listen('#export', () => { noiseEditor.flush(); showExportDialog(session.chart, assets, chartName, (name, format) => { status(`已发起下载：${name}`); if (format === 'pez') { noteExternalBackup(); storagePanel.refresh().catch(() => {}); } }, libraryProject?.identifier ?? libraryProject?.info?.Path); });
 listen('#view-toggle', () => togglePreview());
 listen('#close-preview', () => togglePreview(false, true));
 listen('#background', () => element('#background-input').click());
@@ -1146,6 +1237,7 @@ for (const button of document.querySelectorAll('[data-tool]')) button.onclick = 
   invalidate();
 };
 function travel(direction, silent = false) {
+  globalEvents.timeline.cancelPlacement();
   noiseEditor.cancelGesture(); noiseEditor.endSample(false);
   timeline.cancelPlacement();
   const stack = direction === 'undo' ? session.history.undoStack : session.history.redoStack;
@@ -1159,21 +1251,24 @@ listen('#redo', () => travel('redo'));
 listen('#curve-notes', openCurvePanel);
 listen('#curve-trajectory', () => { curveEditorOpen = false; trajectoryPanel.open(); });
 listen('#text-lines-tool', () => {
+  if (globalEvents.active) globalEvents.close();
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; textLinesPanel.open();
 });
 listen('#noise-fit-tool', () => {
+  if (globalEvents.active) globalEvents.close();
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); curveEditorOpen = false; noiseFitPanel.open();
 });
 listen('#noise-tracking-tool', () => {
+  if (globalEvents.active) globalEvents.close();
   if (noiseEditor.active) noiseEditor.close();
   timeline.cancelPlacement(); batchControls.cancel(); pasteGesture.cancel(); clearNoteSourceToast(); curveEditorOpen = false; noiseTrackingPanel.open();
 });
 listen('#curve-start', () => captureCurve(false));
 listen('#curve-end', () => captureCurve(true));
 function switchNoteView() {
-  if (session.multiLineActive || noiseEditor.active) return;
+  if (session.multiLineActive || noiseEditor.active || globalEvents.active) return;
   timeline.cancelPlacement(); timeline.hoverArea = 'notes'; session.focus = 'notes';
   activatePane('notes');
   editorPreferences.notesOnly = !timeline.notesOnly;
@@ -1211,14 +1306,16 @@ element('#toolbar-mode').onclick = () => {
   applyDisplaySettings(); persistEditor();
 };
 function copySelection() {
+  if (globalEvents.active) { globalEvents.copy(); return; }
   if (noiseEditor.active) { noiseEditor.copy(); return; }
   const count = copyObjects(session);
   if (count) { clipboardHistory.remember(session); status(`已复制 ${count} 个物件`); }
   invalidate();
 }
-function deleteSelection() { if (noiseEditor.active) { noiseEditor.remove(); return; } deleteObjects(session); }
-function cutSelection() { if (noiseEditor.active) { noiseEditor.copy(true); return; } if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
+function deleteSelection() { if (globalEvents.active) { globalEvents.safely(() => globalEvents.remove()); return; } if (noiseEditor.active) { noiseEditor.remove(); return; } deleteObjects(session); }
+function cutSelection() { if (globalEvents.active) { globalEvents.safely(() => globalEvents.copy(true)); return; } if (noiseEditor.active) { noiseEditor.copy(true); return; } if (cutObjects(session)) clipboardHistory.remember(session); invalidate(); }
 function pasteSelection(mirror = false, keepTime = false) {
+  if (globalEvents.active) { globalEvents.safely(() => globalEvents.paste(keepTime)); return; }
   if (noiseEditor.active) { noiseEditor.action(keepTime ? 'KeepTimePaste' : 'Paste'); return; }
   timeline.clipboardMode = { mirror, keepTime };
   pasteObjects(session, clipboardBeat(timeline), { ...timeline.clipboardMode, targetLineIndex: clipboardTargetLine() });
@@ -1237,7 +1334,17 @@ listen('#mirror', () => {
   if (session.focus === 'events') transformEvents(session, '镜像 X / 旋转事件', (event, type) => ['moveXEvents', 'rotateEvents'].includes(type) ? { ...event, start: -event.start, end: -event.end } : event);
   else session.transformSelection('镜像音符', note => ({ ...note, positionX: -note.positionX }));
 });
+function syncProjectFolderButton() {
+  const button = element('#open-project-folder');
+  button.hidden = !nativeStorage;
+  button.disabled = !nativeStorage || !libraryProject?.id;
+  button.title = libraryProject?.id ? '打开当前谱面在本地谱面库中的存档文件夹' : '请先保存到谱面库，再打开所在文件夹';
+}
 listen('#metadata', () => { activatePane('metadata'); renderMetadataPanel(session, element('#metadata-editor'), () => { activatePane('chart'); renderSession(); }); });
+listen('#open-project-folder', async () => {
+  if (!nativeStorage || !libraryProject?.id) return;
+  await nativeStorage.call('openProjectFolder', libraryProject.id);
+});
 listen('#bpm', () => { activatePane('bpm'); renderBpmPanel(session, element('#bpm-editor')); });
 listen('#audio-leading-silence', prependAudioSilence);
 listen('#assets', () => { activatePane('assets'); assetLibrary.render(); });
@@ -1256,7 +1363,7 @@ function renderHistoryPanel() {
   }
 }
 listen('#history-panel', () => { activatePane('history'); renderHistoryPanel(); });
-listen('#clear-clipboard', () => { noiseEditor.clipboard = null; clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
+listen('#clear-clipboard', () => { if (globalEvents.active) { globalEvents.document.editor.eventClipboard = []; globalEvents.document.editor.clipboardVisible = false; invalidate(); return; } noiseEditor.clipboard = null; clipboardHistory.clearCurrent(session); timeline.clipboardMode = {}; invalidate(); });
 const clipboardButton = document.createElement('button'); clipboardButton.id = 'clipboard-history'; clipboardButton.textContent = '剪贴板历史'; clipboardButton.title = '长按 Ctrl+V';
 element('[data-panel="chart"] .action-grid').append(clipboardButton);
 function renderClipboardPanel() {
@@ -1411,6 +1518,7 @@ listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT
 
 let playbackSpaceHeld = false;
 window.addEventListener('keydown', event => {
+  if (mods?.runtime.locks.size) return;
   if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || usesNativeTextShortcut(event)) return;
   event.preventDefault();
   if (event.repeat) return;
@@ -1419,24 +1527,31 @@ window.addEventListener('keydown', event => {
 }, true);
 window.addEventListener('blur', () => { lineInfoVisible = false; element('#line-info-overlay')?.setAttribute('hidden', ''); });
 window.addEventListener('keydown', event => {
+  if (mods?.runtime.locks.size) return;
   if (atHome || !hasDocument || dialogOpen() || usesNativeTextShortcut(event) || isTextEntry(event.target) || !shortcutMatches(event, preferences.hotkeys.Pause)) return;
   event.preventDefault(); event.stopImmediatePropagation();
   playbackSpaceHeld = true;
   if (!event.repeat) togglePlayback().catch(reportError);
 }, true);
 window.addEventListener('keyup', event => {
+  if (mods?.runtime.locks.size) return;
   if (!shortcutReleased(event, preferences.hotkeys.Pause) || !playbackSpaceHeld) return;
   event.preventDefault(); event.stopImmediatePropagation(); playbackSpaceHeld = false;
 }, true);
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
 window.addEventListener('keydown', async event => {
+  if (mods?.runtime.locks.size) return;
   const target = event.target;
   if (atHome || !hasDocument || dialogOpen() || usesNativeTextShortcut(event)) return;
   if (batchControls.active) { event.preventDefault(); return; }
-  const area = timeline.hoverArea ?? session.focus;
+  const area = globalEvents.active ? 'events' : timeline.hoverArea ?? session.focus;
   const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
-  const hasSelection = noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
+  const hasSelection = globalEvents.active ? globalEvents.selection.size > 0 : noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
   const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
+  if (globalEvents.active) {
+    try { if (globalEvents.action(action, event)) { event.preventDefault(); event.stopImmediatePropagation(); return; } }
+    catch (error) { event.preventDefault(); reportError(error); return; }
+  }
   if (noiseFitPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
   if (noiseTrackingPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
   if (noiseEditor.active && (!preview.visible || noiseEditor.sampleMode)) {
@@ -1506,6 +1621,7 @@ window.addEventListener('keydown', async event => {
   } catch (error) { event.preventDefault(); reportError(error); }
 }, true);
 window.addEventListener('keyup', event => {
+  if (mods?.runtime.locks.size) return;
   pasteGesture.up(event);
   if (timeline.clipboardMode?.mirror || timeline.clipboardMode?.keepTime) { timeline.clipboardMode = {}; invalidate(); }
   if (heldPreview && (event.code === heldPreview.code || shortcutReleased(event, preferences.hotkeys[heldPreview.action]))) {
@@ -1514,7 +1630,7 @@ window.addEventListener('keyup', event => {
 }, true);
 window.addEventListener('blur', () => { if (heldPreview) { togglePreview(false); heldPreview = null; } });
 
-window.addEventListener('beforeunload', event => { if (session.history.dirty || assetDirty) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', event => { if (hasDocument && (session.history.dirty || assetDirty)) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('resize', invalidate);
 element('#modal').addEventListener('close', () => { if (atHome) home.refresh().catch(reportError); });
 const markerResizeObserver = new ResizeObserver(() => { renderTimelineMarkers(); invalidate(); });
@@ -1530,9 +1646,10 @@ let lastTick = 0;
 function frame(timestamp) {
   const elapsed = lastTick ? (timestamp - lastTick) / 1000 : 0; lastTick = timestamp;
   audio.update();
+  mods?.runtime.tick({timestamp,elapsed,chartSeconds:chartSeconds(),musicSeconds:audio.time,playing:audio.playing});
   batchControls.sync();
   lineSwitcher.draw(timestamp);
-  if (!atHome) { if (noiseEditor.active) noiseEditor.autoScroll(elapsed); else timeline.autoScroll(elapsed); }
+  if (!atHome) { if (globalEvents.active) globalEvents.autoScroll(elapsed); else if (noiseEditor.active) noiseEditor.autoScroll(elapsed); else timeline.autoScroll(elapsed); }
   if (timestamp - frameSampleStart >= 500) { measuredFps = frameSampleCount * 1000 / (timestamp - frameSampleStart); frameSampleStart = timestamp; frameSampleCount = 0; }
   advanceEditClock(timestamp);
   if (hasDocument && !atHome && timestamp - lastInfoTick > 500) {
@@ -1540,9 +1657,15 @@ function frame(timestamp) {
     if (info && !element('#chart-info').hidden) info.textContent = info.textContent.replace(/Time: .*$/, `Time: ${formatEditTime(editTimeSeconds)}  FPS: ${measuredFps.toFixed(1)}`);
     lastInfoTick = timestamp;
   }
-  if (hasDocument && !atHome && !document.hidden) autoSave.tick(timestamp, editorPreferences.autoSave ?? preferences.settings.autoSave,
-    editorPreferences.autoSaveSeconds ?? preferences.settings.autoSaveSeconds, session.history.dirty && session.chart !== lastDraftDocument);
-  if (audio.playing && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
+  if (hasDocument && !atHome && !document.hidden) {
+    const interval = editorPreferences.autoSaveSeconds ?? preferences.settings.autoSaveSeconds;
+    // Compare media only when a backup is due, not on every animation frame.
+    const mediaDirty = assetDirty && !autoSave.pending && timestamp - autoSave.last >= interval * 1000
+      && (assets.size !== lastDraftAssets.length || lastDraftAssets.some(([name, bytes]) => assets.get(name) !== bytes)
+        || assetFolders.size !== lastDraftFolders.length || lastDraftFolders.some(folder => !assetFolders.has(folder)));
+    autoSave.tick(timestamp, editorPreferences.autoSave ?? preferences.settings.autoSave, interval, session.history.dirty && session.chart !== lastDraftDocument || mediaDirty);
+  }
+  if (audio.playing && !mods?.runtime.locks.size && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
   if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active || noiseTrackingPanel.active && noiseTrackingPanel.animating || noiseFitPanel.active && noiseFitPanel.options.animate && noiseFitPanel.options.show && noiseFitPanel.previewChart && !noiseFitPanel.fullPreview) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
@@ -1552,7 +1675,7 @@ function frame(timestamp) {
     session.editSeconds = Math.max(0, chartSeconds());
     updateLineInfo();
     if (audio.playing) timeline.origin = beat;
-    if (!preview.visible && !noiseEditor.active && !noiseFitPanel.active && !noiseTrackingPanel.previewing) {
+    if (!preview.visible && !noiseEditor.active && !globalEvents.active && !noiseFitPanel.active && !noiseTrackingPanel.previewing) {
       timeline.draw(beat);
       multiEdit.drawTimeline();
       selectionOverlay.draw();
@@ -1561,6 +1684,7 @@ function frame(timestamp) {
       audioAnalysis.draw(offsetSeconds());
     }
     if (noiseEditor.active) noiseEditor.draw();
+    if (globalEvents.active) globalEvents.draw(beat);
     preview.duration = realtimePreview.duration = audio.duration;
     preview.selectedNoiseArea = realtimePreview.selectedNoiseArea = noiseEditor.active ? noiseEditor.selected : -1;
     const viewSession = timeline.getSession();
@@ -1570,15 +1694,17 @@ function frame(timestamp) {
     const textView = textLinesPanel.view();
     const noiseFitView = noiseFitPanel.tick(timestamp, chartSeconds(), audio.playing, realtimePreview);
     const trackingView = noiseTrackingPanel.tick(timestamp, chartSeconds(), audio.playing);
-    const viewChart = trackingView?.chart ?? noiseView?.chart ?? eventSampleView?.chart ?? noiseFitView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart);
-    const viewSeconds = trackingView?.seconds ?? noiseView?.seconds ?? eventSampleView?.seconds ?? noiseFitView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds();
+    const modView=emitModHook('preview:before',{chart:trackingView?.chart ?? noiseView?.chart ?? eventSampleView?.chart ?? noiseFitView?.chart ?? textView?.chart ?? trajectoryView?.chart ?? (multiEdit.active && multiEdit.previewHovered && multiEdit.previewEnabled.checked && multiEdit.result ? multiEdit.result.chart : viewSession.chart),seconds:trackingView?.seconds ?? noiseView?.seconds ?? eventSampleView?.seconds ?? noiseFitView?.seconds ?? textView?.seconds ?? trajectoryView?.seconds ?? chartSeconds(),lineIndex:viewSession.lineIndex});
+    const viewChart = modView.chart;
+    const viewSeconds = modView.seconds;
     const previewAllLines = preview.allLines; const previewEffects = preview.showHitEffects;
     const previewNumbers = preview.lineNumbers; const previewArrows = preview.lineArrows;
     const forcedLineOpacity = preview.forceLineOpacity;
     preview.forceLineOpacity = Boolean(trackingView?.forceLineOpacity);
     if (trackingView) { preview.allLines = true; preview.showHitEffects = false; }
     if (textView || noiseFitView) { preview.allLines = true; preview.showHitEffects = false; preview.lineNumbers = false; preview.lineArrows = false; }
-    preview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+    preview.draw(viewChart, tempo, viewSeconds, modView.lineIndex);
+    if(preview.visible)mods?.runtime.draw(preview,{target:'preview',chart:viewChart,tempo,seconds:viewSeconds,timestamp});
     preview.allLines = previewAllLines; preview.showHitEffects = previewEffects;
     preview.lineNumbers = previewNumbers; preview.lineArrows = previewArrows;
     preview.forceLineOpacity = forcedLineOpacity;
@@ -1594,7 +1720,8 @@ function frame(timestamp) {
       if (trackingView) realtimePreview.allLines = true;
       if (textView || noiseFitView) { realtimePreview.allLines = true; realtimePreview.lineNumbers = false; realtimePreview.lineArrows = false; }
       if (trackingView || noiseEditor.sampleMode || eventSampler.active || noiseFitView) realtimePreview.opacity = 1;
-      realtimePreview.draw(viewChart, tempo, viewSeconds, viewSession.lineIndex);
+      realtimePreview.draw(viewChart, tempo, viewSeconds, modView.lineIndex);
+      if(realtimePreview.visible)mods?.runtime.draw(realtimePreview,{target:'realtime',chart:viewChart,tempo,seconds:viewSeconds,timestamp});
       realtimePreview.opacity = opacity;
       realtimePreview.allLines = allLines;
       realtimePreview.lineNumbers = lineNumbers; realtimePreview.lineArrows = lineArrows;
@@ -1613,7 +1740,8 @@ function frame(timestamp) {
     element('#beat-display').textContent = `${(Math.abs(beat) < 0.0005 ? 0 : beat).toFixed(3)} 拍`;
     element('#scrubber').value = audio.time;
     const tempoPoint = tempo.points[Math.max(0, upperBound(tempo.points, beat, point => point.beat) - 1)];
-    element('#bpm-display').textContent = `${(60 / tempoPoint.secondsPerBeat).toFixed(2)} BPM`;
+    const lineTimeFactor = noiseEditor.active || globalEvents.active ? 1 : session.line?.bpmfactor ?? 1;
+    element('#bpm-display').textContent = `${(60 / (tempoPoint.secondsPerBeat * lineTimeFactor)).toFixed(2)} BPM`;
     const draggedLineIndex = Number.isInteger(timeline.drag?.lineIndex) ? timeline.drag.lineIndex : session.lineIndex;
     const draggedSource = session.chart.judgeLineList?.[draggedLineIndex]?.notes?.[timeline.drag?.anchor];
     const draggedNote = ['move', 'startTime', 'endTime'].includes(timeline.drag?.kind) ? timeline.movedNote(draggedSource) : null;
@@ -1805,3 +1933,27 @@ for (const [id, key] of displayFields) element(`#${id}`).addEventListener(elemen
   applyDisplaySettings(); persistEditor();
 });
 timeline.eventPlacementType = timeline.eventTypes[0];
+
+const modEditor={
+  get session(){return session;},get chart(){return session.chart;},get tempo(){return tempo;},get assets(){return assets;},get preferences(){return preferences;},get editorPreferences(){return editorPreferences;},get chartName(){return chartName;},
+  get hasDocument(){return hasDocument&&!atHome;},get home(){return atHome;},get activePane(){return activePaneName;},
+  get dirty(){return session.history.dirty||assetDirty;},get libraryProject(){return libraryProject;},get loop(){return loop;},set loop(value){loop=value;},
+  audio,playback,preview,realtimePreview,timeline,skin,images,hitSounds,editorSkins,noteSkins,noiseEditor,eventSampler,trajectoryPanel,textLinesPanel,noiseFitPanel,noiseTrackingPanel,multiEdit,batchControls,collaboration,globalEvents,globalEventRegistry,openGlobalEvents,
+  chartSeconds,offsetSeconds,currentBeat,invalidate,render:renderSession,notify,save,activatePane,
+  commit:(label,chart)=>session.commit(label,chart),replace:(chart,name=chartName)=>replaceChart(chart,name),
+  seek:(seconds,{music=false,pause=true}={})=>{playback.seek(seconds+(music?0:offsetSeconds()),pause);invalidate();},
+  seekBeat,selectLine:index=>{session.selectLine(index);renderSession();},setPreview:(visible,options={})=>togglePreview(visible,options.stay??true,false,{autoplay:options.autoplay??false}),
+  play:async()=>{if(!audio.playing&&!playback.pending)await togglePlayback();},pause:()=>playback.pause(),
+  addAsset:(path,bytes)=>{assets.set(path,bytes);assetDirty=true;images.load(session.chart,assets,chartName);invalidate();},
+  removeAsset:path=>{assets.delete(path);assetDirty=true;images.load(session.chart,assets,chartName);invalidate();},
+  raw:{get session(){return session;},get chart(){return session.chart;},set chart(value){session.history.document=value;session.notify();},get assets(){return assets;},get tempo(){return tempo;},set tempo(value){tempo=value;timeline.tempo=value;invalidate();},renderSession,replaceChart,activatePane,togglePlayback,togglePreview,save,applyDisplaySettings,persistEditor,setHome},
+  beginPreviewSession(){
+    if(atHome||!hasDocument)throw Error('请先打开谱面');
+    const snapshot={visible:preview.visible,pane:activePaneName,allLines:preview.allLines,lineNumbers:preview.lineNumbers,lineArrows:preview.lineArrows,lineTint:preview.lineTint,cameraX:preview.cameraX,viewDivisor:preview.viewDivisor,collisionGeometry:preview.collisionGeometry};
+    playback.pause();timeline.cancelPlacement();batchControls.cancel();pasteGesture.cancel();heldPreview=null;playbackSpaceHeld=false;clearNoteSourceToast();
+    eventSampler.finish?.(false);noiseEditor.endSample(false);noiseEditor.flush();noiseTrackingPanel.endSample();activatePane('chart');
+    preview.allLines=true;preview.lineNumbers=false;preview.lineArrows=false;preview.lineTint=false;preview.collisionGeometry=true;togglePreview(true,true,false,{autoplay:false});
+    let done=false;return()=>{if(done)return;done=true;playback.pause();togglePreview(snapshot.visible,true,false,{autoplay:false});preview.allLines=snapshot.allLines;preview.lineNumbers=snapshot.lineNumbers;preview.lineArrows=snapshot.lineArrows;preview.lineTint=snapshot.lineTint;preview.cameraX=snapshot.cameraX;preview.viewDivisor=snapshot.viewDivisor;preview.collisionGeometry=snapshot.collisionGeometry;activatePane(snapshot.pane);invalidate();};
+  },
+};
+mods=new ModManager(modEditor,{notify,invalidate});

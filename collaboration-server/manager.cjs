@@ -4,20 +4,14 @@ const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 const { networkInterfaces } = require('node:os');
 const { readFileSync, writeFileSync, mkdirSync } = require('node:fs');
-const { appendFile } = require('node:fs/promises');
+const { createDiagnostics } = require('./diagnostics.cjs');
 const smoke = process.argv.includes('--smoke-test');
 app.setPath('userData', join(app.getPath('appData'), smoke ? 'rpe-next-server-smoke' : 'rpe-next-server'));
 mkdirSync(app.getPath('userData'), { recursive: true });
 const configPath = join(app.getPath('userData'), 'preferences.json');
 const diagnosticPath = join(app.getPath('userData'), 'collaboration-diagnostics.log');
-writeFileSync(diagnosticPath, '');
-let diagnosticBytes = 0; let diagnosticWrites = Promise.resolve();
-const diagnostic = entry => {
-  const line = JSON.stringify({ time: new Date().toISOString(), ...entry }) + '\n';
-  if (diagnosticBytes + line.length > 1024 * 1024) return;
-  diagnosticBytes += line.length;
-  diagnosticWrites = diagnosticWrites.then(() => appendFile(diagnosticPath, line)).catch(() => {});
-};
+const diagnostics = createDiagnostics(diagnosticPath);
+const diagnostic = entry => diagnostics.write(entry);
 let preferences = {};
 try { preferences = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
 let window; let service; let tunnel; let tunnelPath = ''; let publicAddress = ''; let counts = { rooms: 0, users: 0 }; let message = '服务未启动';
@@ -38,7 +32,7 @@ ipcMain.handle('server-action', async (event, action, values = {}) => {
     } else if (action === 'stop') {
       tunnel?.kill(); tunnel = null; if (service) await service.close(); service = null; counts = { rooms: 0, users: 0 }; publicAddress = ''; message = '服务已停止';
     } else if (action === 'diagnostics') {
-      await diagnosticWrites; await shell.showItemInFolder(diagnosticPath);
+      await diagnostics.flush(); await shell.showItemInFolder(diagnosticPath);
     } else if (action === 'download-tunnel') {
       await shell.openExternal('https://github.com/cloudflare/cloudflared/releases/latest');
     } else if (action === 'choose-tunnel') {
@@ -47,8 +41,9 @@ ipcMain.handle('server-action', async (event, action, values = {}) => {
     } else if (action === 'tunnel') {
       if (!service || !tunnelPath) throw new Error('请先启动服务并选择 cloudflared.exe');
       if (tunnel) return state();
-      const args = values.token ? ['tunnel', '--no-autoupdate', 'run', '--token', String(values.token)] : ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${service.port}`];
-      const child = spawn(tunnelPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); tunnel = child;
+      const args = values.token ? ['tunnel', '--no-autoupdate', 'run'] : ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${service.port}`];
+      const env = { ...process.env }; delete env.TUNNEL_TOKEN; if (values.token) env.TUNNEL_TOKEN = String(values.token);
+      const child = spawn(tunnelPath, args, { windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] }); tunnel = child;
       message = values.token ? '固定隧道正在启动；请使用已配置的域名。令牌仅在本次运行使用。' : '临时公网入口正在申请，通常需要数秒。';
       const onData = bytes => {
         const text = String(bytes); const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);

@@ -20,7 +20,8 @@ export class History {
     const command = this.undoStack.pop();
     if (!command) return false;
     this.redoStack.push(command);
-    this.document = command.before;
+    if (!command.auxiliaryOnly) this.document = command.before;
+    command.auxiliary?.undo();
     return true;
   }
 
@@ -28,10 +29,16 @@ export class History {
     const command = this.redoStack.pop();
     if (!command) return false;
     this.undoStack.push(command);
-    this.document = command.after;
+    if (!command.auxiliaryOnly) this.document = command.after;
+    command.auxiliary?.redo();
     return true;
   }
 
   markSaved(document = this.document) { this.savedDocument = document; }
+  commitAuxiliary(label, auxiliary) {
+    this.undoStack.push({ label, before: this.document, after: this.document, auxiliary, auxiliaryOnly: true });
+    if (this.undoStack.length > this.limit) this.undoStack.shift();
+    this.redoStack = [];
+  }
   get dirty() { return this.document !== this.savedDocument; }
 }

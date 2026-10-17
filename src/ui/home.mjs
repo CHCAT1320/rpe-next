@@ -1,4 +1,5 @@
-import { listProjects, readProject, storeProject, projectSummary, updateSummary } from '../platform/library.mjs';
+import { listProjects, readProject, storeProject, projectSummary, updateSummary, deleteProject } from '../platform/library.mjs';
+import { deleteProjectDrafts } from '../platform/recovery.mjs';
 import { showDialog } from './dialog.mjs';
 import { projectThumbnail } from '../platform/thumbnail.mjs';
 
@@ -39,8 +40,8 @@ export class ProjectHome {
       const open = document.createElement('button'); open.className = 'project-open primary'; open.textContent = '打开谱面'; open.onclick = () => this.openProject(project.id).catch(this.reportError);
       const actions = document.createElement('div'); actions.className = 'project-actions';
       for (const [label, action] of [['名称 / 分组', () => this.edit(project)], [project.pinned ? '取消置顶' : '置顶', () => this.modify(project.id, source => ({ ...source, pinned: !source.pinned }))],
-        ['复制', () => this.modify(project.id, source => ({ ...source, id: crypto.randomUUID(), source: 'Next 项目副本', pinned: false, archived: false, chart: { ...source.chart, META: { ...source.chart.META, name: `${source.chart.META.name} 副本` } } }))],
-        [project.archived ? '恢复' : '归档', () => this.modify(project.id, source => ({ ...source, archived: !source.archived }))]]) {
+        ['复制', () => this.modify(project.id, source => ({ ...source, id: crypto.randomUUID(), storageRevision: null, source: 'Next 项目副本', pinned: false, archived: false, chart: { ...source.chart, META: { ...source.chart.META, name: `${source.chart.META.name} 副本` } } }))],
+        [project.archived ? '恢复' : '归档', () => this.modify(project.id, source => ({ ...source, archived: !source.archived }))], ['删除', () => this.remove(project)]]) {
         const button = document.createElement('button'); button.textContent = label; button.onclick = () => Promise.resolve(action()).catch(this.reportError); actions.append(button);
       }
       const information = document.createElement('div'); information.className = 'project-information'; information.append(name, detail, credits, date, open, actions);
@@ -72,6 +73,21 @@ export class ProjectHome {
     const project = transform(source); project.updated = Date.now();
     await storeProject(project); this.changed(project); await this.refresh();
   }
+  remove(project) {
+    const host = showDialog('删除项目', nativeStorage ? `将“${project.name}”移入回收站。可在设置 → 本地存储 → 管理回收站恢复；素材在仍被历史版本引用时保留。` : `永久删除“${project.name}”及其音乐、曲绘等附属资源。归档不会释放空间；删除前建议导出 PEZ。`);
+    const backups = document.createElement('input'); backups.type = 'checkbox'; backups.setAttribute('aria-label', '同时删除此项目的恢复备份');
+    const label = document.createElement('label'); label.className = 'field'; label.append(backups, '同时删除此项目的恢复备份'); host.append(label);
+    const apply = document.getElementById('modal-apply'); apply.hidden = false; apply.textContent = nativeStorage ? '移入回收站' : '确认永久删除';
+    apply.onclick = async () => {
+      apply.disabled = true;
+      try {
+        await deleteProject(project.id, project.storageRevision);
+        this.coverCache.delete(project.id); this.changed({ ...project, deleted: true });
+        if (backups.checked) await deleteProjectDrafts(project.id);
+        document.getElementById('modal').close(); await this.refresh();
+      } catch (error) { apply.disabled = false; document.getElementById('modal-error').textContent = error.message; }
+    };
+  }
   edit(project) {
     const content = showDialog('项目名称与分组', '修改本地副本信息；原 RPE 文件不变。');
     const name = document.createElement('input'); name.value = project.name; name.setAttribute('aria-label', '项目名称');
@@ -87,3 +103,4 @@ export class ProjectHome {
     };
   }
 }
+import { nativeStorage } from '../platform/native.mjs';

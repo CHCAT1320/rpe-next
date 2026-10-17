@@ -1,9 +1,13 @@
+import { storageError } from './storage.mjs';
+
 const ITEMS_PER_CHUNK = 128;
 const BYTES_PER_CHUNK = 1024 * 1024;
 const scalar = value => value === null || typeof value !== 'object';
 const smallArray = value => Array.isArray(value) && value.length <= 16 && value.every(scalar);
 
-function compact(value) {
+function binary(value) { return value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value); }
+function compact(value, binaries) {
+  if (binaries && binary(value)) return false;
   if (scalar(value) || smallArray(value)) return true;
   if (Array.isArray(value)) return false;
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return true;
@@ -12,25 +16,26 @@ function compact(value) {
 
 // Keep each structured-clone operation small, including on charts with one very
 // large note/event list. Beat arrays and ordinary note/event records stay whole.
-export function* snapshotParts(value, path = []) {
-  if (compact(value)) { yield { path, value }; return; }
+export function* snapshotParts(value, path = [], binaries) {
+  if (binaries && binary(value)) { binaries.push({ path, value }); yield { path, value: null }; return; }
+  if (compact(value, binaries)) { yield { path, value }; return; }
   if (Array.isArray(value)) {
     yield { path, length: value.length };
     let offset = 0;
     while (offset < value.length) {
-      if (!compact(value[offset])) { yield* snapshotParts(value[offset], [...path, offset]); offset++; continue; }
+      if (!compact(value[offset], binaries)) { yield* snapshotParts(value[offset], [...path, offset], binaries); offset++; continue; }
       const start = offset; const values = [];
-      while (offset < value.length && values.length < ITEMS_PER_CHUNK && compact(value[offset])) values.push(value[offset++]);
+      while (offset < value.length && values.length < ITEMS_PER_CHUNK && compact(value[offset], binaries)) values.push(value[offset++]);
       yield { path, offset: start, values };
     }
   } else {
     const header = {}; const children = [];
     for (const key of Object.keys(value)) {
-      if (compact(value[key])) Object.defineProperty(header, key, { value: value[key], enumerable: true, configurable: true, writable: true });
+      if (compact(value[key], binaries)) Object.defineProperty(header, key, { value: value[key], enumerable: true, configurable: true, writable: true });
       else children.push(key);
     }
     yield { path, value: header };
-    for (const key of children) yield* snapshotParts(value[key], [...path, key]);
+    for (const key of children) yield* snapshotParts(value[key], [...path, key], binaries);
   }
 }
 
@@ -48,19 +53,23 @@ export function applySnapshotPart(root, part) {
   return root;
 }
 
-export async function transferSnapshot(worker, [projectId, name, chart, assets, limit, viewState]) {
-  let reply;
-  const receive = () => new Promise((resolve, reject) => { reply = { resolve, reject }; });
+async function transferPayload(worker, metadata, chart, assets) {
+  let reply, timer;
+  const receive = () => new Promise((resolve, reject) => {
+    reply = { resolve, reject };
+    timer = setTimeout(() => reject(new Error('后台存储长时间没有响应，请重试；当前编辑仍保留。')), 60000);
+  });
   worker.onmessage = ({ data }) => {
-    if (data.ok === false) reply?.reject(new Error(data.message || '后台备份失败，请重试'));
-    else reply?.resolve();
+    clearTimeout(timer);
+    if (data.ok === false) reply?.reject(storageError(data, '后台存储失败，请重试'));
+    else reply?.resolve(data.result);
   };
   worker.onerror = event => reply?.reject(new Error(event.message || '后台备份失败，请重试'));
   worker.onmessageerror = () => reply?.reject(new Error('后台备份数据无法读取'));
   const send = (data, transfer = []) => { const response = receive(); worker.postMessage(data, transfer); return response; };
   try {
     await receive();
-    await send({ kind: 'begin', projectId, name, limit, viewState, assets: assets.map(([name, bytes]) => [name, bytes.byteLength]) });
+    await send({ kind: 'begin', ...metadata, assets: assets.map(([name, bytes]) => [name, bytes.byteLength]) });
     for (const part of snapshotParts(chart)) await send({ kind: 'chart', part });
     for (let index = 0; index < assets.length; index++) {
       const bytes = assets[index][1];
@@ -69,6 +78,9 @@ export async function transferSnapshot(worker, [projectId, name, chart, assets, 
         await send({ kind: 'asset', index, offset, bytes: chunk }, [chunk.buffer]);
       }
     }
-    await send({ kind: 'commit' });
-  } finally { reply = null; worker.terminate(); }
+    return await send({ kind: 'commit' });
+  } finally { clearTimeout(timer); reply = null; worker.terminate(); }
 }
+
+export const transferSnapshot = (worker, [projectId, name, chart, assets, limit, viewState]) => transferPayload(worker, { projectId, name, limit, viewState }, chart, assets);
+export function transferProject(worker, { chart, assets, ...project }) { return transferPayload(worker, { project }, chart, assets ?? []); }

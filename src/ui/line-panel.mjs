@@ -3,19 +3,23 @@ import { groupLineIndices, groupNames, lineDisplayLabel, lineFeatureLabels, line
 import { deleteLine, duplicateLine, reorderLine, setLineParent } from '../application/line-commands.mjs';
 import { UI_BINDINGS } from '../core/game-ui.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
+import { libraryImages } from '../core/asset-library.mjs';
+import { assetPath } from '../platform/files.mjs';
+import { assetReference } from '../platform/asset-library.mjs';
 
 const value = input => String(input?.value ?? '').trim();
 
 export class LinePanel {
-  constructor(host, getSession, { render = () => {}, notify = () => {}, getAssets = () => new Map(), afterTexture = () => {} } = {}) {
-    this.host = host; this.getSession = getSession; this.renderSession = render; this.notify = notify; this.getAssets = getAssets; this.afterTexture = afterTexture; this.selectedGroup = 0; this.textureUrls = []; this.textureLibraryOpen = false;
+  constructor(host, getSession, { render = () => {}, notify = () => {}, getAssets = () => new Map(), getChartName = () => '', afterTexture = () => {} } = {}) {
+    this.host = host; this.getSession = getSession; this.renderSession = render; this.notify = notify; this.getAssets = getAssets; this.getChartName = getChartName; this.afterTexture = afterTexture; this.selectedGroup = 0; this.textureUrls = []; this.textureLibraryOpen = false;
   }
 
   clearTextureUrls() { for (const url of this.textureUrls) URL.revokeObjectURL(url); this.textureUrls = []; }
 
   setTexture(name) {
     const session = this.getSession(); const line = session.line; if (!line) return;
-    const lines = [...session.chart.judgeLineList]; lines[session.lineIndex] = { ...line, Texture: name || 'line.png' };
+    const texture = this.getAssets().has(name) ? assetReference(this.getAssets(), name, this.getChartName()) : name || 'line.png';
+    const lines = [...session.chart.judgeLineList]; lines[session.lineIndex] = { ...line, Texture: texture };
     session.commit('更改判定线贴图', { ...session.chart, judgeLineList: lines });
     this.afterTexture();
   }
@@ -35,14 +39,18 @@ export class LinePanel {
   applyLine(values) {
     const session = this.getSession(); const index = session.lineIndex; const line = session.line;
     if (!line) return;
-    const parent = Number(value(values.parent)); const group = Number(value(values.group)); const zOrder = Number(value(values.zOrder)); const bpmfactor = Number(value(values.bpmfactor));
+    const parent = Number(value(values.parent)); const group = Number(value(values.group)); const zOrder = Number(value(values.zOrder));
+    const multiplier = Number(value(values.bpmfactor));
+    const bpmfactor = value(values.bpmfactor) === String(1 / (line.bpmfactor ?? 1)) ? line.bpmfactor ?? 1 : 1 / multiplier;
+    const anchor = [values.anchorX === undefined ? line.anchor?.[0] ?? 0.5 : Number(value(values.anchorX)), values.anchorY === undefined ? line.anchor?.[1] ?? 0.5 : Number(value(values.anchorY))];
     if (!Number.isInteger(parent) || parent < -1 || parent >= session.chart.judgeLineList.length || parent === index) throw new Error('父线无效');
     if (!Number.isInteger(group) || group < 0 || group >= groupNames(session.chart).length) throw new Error('分组无效');
-    if (!Number.isFinite(zOrder) || !Number.isFinite(bpmfactor) || bpmfactor <= 0) throw new Error('zOrder 或 BPM 倍率无效');
+    if (!Number.isFinite(zOrder) || !Number.isFinite(multiplier) || multiplier <= 0 || !Number.isFinite(bpmfactor) || bpmfactor <= 0) throw new Error('zOrder 或 BPM 倍率无效');
+    if (!anchor.every(Number.isFinite) || [values.anchorX, values.anchorY].some(input => input !== undefined && !value(input))) throw new Error('锚点必须为有限数字');
     const chart = setLineParent(session.chart, index, parent);
     const lines = [...chart.judgeLineList];
     lines[index] = { ...lines[index], Name: value(values.name), Group: group, isCover: values.isCover ? 1 : 0,
-      attachUI: value(values.attachUI) || undefined, zOrder: Math.trunc(zOrder), bpmfactor,
+      attachUI: value(values.attachUI) || undefined, zOrder: Math.trunc(zOrder), bpmfactor, anchor,
       rotateWithFather: Boolean(values.rotateWithFather), Texture: value(values.texture) || 'line.png' };
     this.commit('更新判定线属性', { ...chart, judgeLineList: lines });
     this.afterTexture();
@@ -94,22 +102,23 @@ export class LinePanel {
       const parent = document.createElement('select'); parent.setAttribute('aria-label', '父判定线'); parent.append(new Option('-1 · 无父线', '-1')); lines.forEach((candidate, index) => { if (index !== session.lineIndex) parent.append(new Option(`${index} · ${lineDisplayLabel(chart, index, { includeIndex: false })}`, index)); }); parent.value = String(line.father ?? -1); this.field(form, '父线', parent);
       const attachUI = document.createElement('select'); attachUI.setAttribute('aria-label', '绑定游戏 UI'); attachUI.append(new Option('不绑定', ''), ...UI_BINDINGS.map(([key, label]) => new Option(label, key))); if (line.attachUI && !UI_BINDINGS.some(([key]) => key === line.attachUI)) attachUI.append(new Option(`保留：${line.attachUI}`, line.attachUI)); attachUI.value = line.attachUI ?? ''; this.field(form, '绑定 UI', attachUI);
       const zOrder = document.createElement('input'); zOrder.type = 'number'; zOrder.step = '1'; zOrder.value = Number(line.zOrder ?? 0); zOrder.setAttribute('aria-label', 'zOrder'); this.field(form, 'zOrder', zOrder);
-      const bpmfactor = document.createElement('input'); bpmfactor.type = 'number'; bpmfactor.min = '0.01'; bpmfactor.step = '0.01'; bpmfactor.value = Number(line.bpmfactor ?? 1); bpmfactor.setAttribute('aria-label', 'BPM 倍率'); this.field(form, 'BPM 倍率', bpmfactor);
+      const bpmfactor = document.createElement('input'); bpmfactor.type = 'number'; bpmfactor.min = '0'; bpmfactor.step = 'any'; bpmfactor.value = 1 / (line.bpmfactor ?? 1); bpmfactor.setAttribute('aria-label', 'BPM 倍率'); this.field(form, 'BPM 倍率', bpmfactor);
+      const anchors = ['X', 'Y'].map((axis, index) => { const input = document.createElement('input'); input.type = 'number'; input.step = 'any'; input.value = line.anchor?.[index] ?? 0.5; input.setAttribute('aria-label', '锚点 ' + axis); this.field(form, '锚点 ' + axis, input); return input; });
       const texture = document.createElement('input'); texture.value = line.Texture ?? 'line.png'; texture.setAttribute('aria-label', '判定线贴图'); texture.setAttribute('list', 'line-texture-suggestions'); this.field(form, '贴图', texture);
-      const suggestions = document.createElement('datalist'); suggestions.id = 'line-texture-suggestions'; suggestions.append(new Option('line.png', 'line.png')); for (const name of this.getAssets().keys()) if (/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(name) && name !== 'line.png') suggestions.append(new Option(name, name)); form.append(suggestions);
+      const textureEntries = libraryImages(this.getAssets(), chart, this.getChartName());
+      const suggestions = document.createElement('datalist'); suggestions.id = 'line-texture-suggestions'; suggestions.append(new Option('line.png', 'line.png')); for (const [name] of textureEntries) if (name !== 'line.png') suggestions.append(new Option(name, name)); form.append(suggestions);
       const textureLibrary = document.createElement('details'); textureLibrary.className = 'line-texture-library'; textureLibrary.open = this.textureLibraryOpen; textureLibrary.addEventListener('toggle', () => { this.textureLibraryOpen = textureLibrary.open; }); const textureSummary = document.createElement('summary'); textureSummary.textContent = '素材库图片'; textureLibrary.append(textureSummary);
       const textureGrid = document.createElement('div'); textureGrid.className = 'line-texture-grid';
-      const textureEntries = [...this.getAssets()];
       if (!textureEntries.some(([name]) => name === 'line.png')) textureEntries.unshift(['line.png', null]);
       for (const [name, bytes] of textureEntries) {
         if (!/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(name)) continue;
-        const button = document.createElement('button'); button.type = 'button'; button.className = name === texture.value ? 'selected' : ''; button.title = name;
+        const button = document.createElement('button'); button.type = 'button'; button.className = name === assetPath(this.getAssets(), texture.value, this.getChartName()) || name === texture.value ? 'selected' : ''; button.title = name;
         const image = document.createElement('img'); const url = bytes ? URL.createObjectURL(new Blob([bytes], { type: `image/${name.split('.').at(-1).replace('jpg', 'jpeg')}` })) : assetUrl('rpe/Texture/line.png'); if (bytes) this.textureUrls.push(url); image.src = url; image.alt = name; button.dataset.texture = name; button.append(image, document.createTextNode(name.split('/').at(-1))); button.onclick = () => { texture.value = name; this.setTexture(name); }; textureGrid.append(button);
       }
       textureLibrary.append(textureGrid); form.append(textureLibrary);
       if (this.textureLibraryOpen) queueMicrotask(() => textureGrid.querySelector(`[data-texture="${CSS.escape(texture.value)}"]`)?.scrollIntoView({ block: 'nearest' }));
       const rotate = document.createElement('input'); rotate.type = 'checkbox'; rotate.checked = line.rotateWithFather ?? ((chart.META?.RPEVersion ?? 0) >= 163); rotate.setAttribute('aria-label', '继承父线旋转'); const rotateLabel = document.createElement('label'); rotateLabel.className = 'field checkbox-field'; rotateLabel.append(rotate, '继承父线旋转'); form.append(rotateLabel);
-      const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'wide-button primary'; apply.textContent = '应用判定线属性'; apply.onclick = () => { try { this.applyLine({ name, group, isCover: mask.checked, parent, attachUI, zOrder, bpmfactor, texture, rotateWithFather: rotate.checked }); } catch (error) { this.notify(error.message, 'error'); } }; form.append(apply);
+      const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'wide-button primary'; apply.textContent = '应用判定线属性'; apply.onclick = () => { try { this.applyLine({ name, group, isCover: mask.checked, parent, attachUI, zOrder, bpmfactor, anchorX: anchors[0], anchorY: anchors[1], texture, rotateWithFather: rotate.checked }); } catch (error) { this.notify(error.message, 'error'); } }; form.append(apply);
       const reorder = document.createElement('div'); reorder.className = 'line-reorder-actions';
       const up = document.createElement('button'); up.type = 'button'; up.textContent = '上移'; up.disabled = session.lineIndex === 0; up.onclick = () => this.commit('上移判定线', reorderLine(chart, session.lineIndex, session.lineIndex - 1), session.lineIndex - 1);
       const down = document.createElement('button'); down.type = 'button'; down.textContent = '下移'; down.disabled = session.lineIndex >= lines.length - 1; down.onclick = () => this.commit('下移判定线', reorderLine(chart, session.lineIndex, session.lineIndex + 1), session.lineIndex + 1);

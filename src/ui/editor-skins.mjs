@@ -1,8 +1,10 @@
+import { localPreferences } from '../platform/local-preferences.mjs';
 import { parseEditorSkin, resolveEditorSkin, EDITOR_SKIN_BUILTINS } from '../core/editor-skin.mjs';
 import { importEditorSkin, readEditorSkins, storeEditorSkin, deleteEditorSkin, builtinEditorSkins, exportEditorSkin } from '../platform/editor-skins.mjs';
 import { EditorSkinRuntime } from './editor-skin-runtime.mjs';
 import { download } from '../platform/files.mjs';
 import { assetUrl } from '../core/asset-url.mjs';
+import { storageFailure } from '../platform/storage.mjs';
 
 const ACTIVE_KEY = 'rpe-next-active-editor-skin-v1';
 const OPTIONS_KEY = 'rpe-next-editor-skin-options-v1';
@@ -10,7 +12,7 @@ const action = (text, handler) => { const button = document.createElement('butto
 export class EditorSkins {
   constructor(host, { invalidate, notify }) {
     this.host = host; this.invalidate = invalidate; this.notify = notify; this.records = new Map(); this.current = 'default'; this.generation = 0;
-    try { this.options = JSON.parse(localStorage.getItem(OPTIONS_KEY)) ?? {}; if (typeof this.options !== 'object' || Array.isArray(this.options)) this.options = {}; } catch { this.options = {}; }
+    try { this.options = JSON.parse(localPreferences.getItem(OPTIONS_KEY)) ?? {}; if (typeof this.options !== 'object' || Array.isArray(this.options)) this.options = {}; } catch { this.options = {}; }
     this.drafts = structuredClone(this.options); this.systemScheme = matchMedia('(prefers-color-scheme: dark)');
     this.systemScheme.addEventListener('change', () => { if (this.drafts[this.current]?.variant === 'auto') this.use(this.current, Boolean(this.previewTimer), true).catch(error => this.error(error)); });
     this.runtime = new EditorSkinRuntime(() => { document.dispatchEvent(new Event('rpen-editor-skin-changed')); invalidate(); });
@@ -42,9 +44,9 @@ export class EditorSkins {
       this.persistOptions();
       this.updateOptions();
       const requestedDefault = new URL(location.href).searchParams.get('skin') === 'default';
-      const id = requestedDefault ? 'default' : localStorage.getItem(ACTIVE_KEY) ?? 'default';
+      const id = requestedDefault ? 'default' : localPreferences.getItem(ACTIVE_KEY) ?? 'default';
       if (id !== 'default' && this.records.has(id)) await this.use(id);
-      else if (id !== 'default') { const message = `找不到已保存的皮肤“${id}”，已恢复默认皮肤。`; this.message.textContent = message; this.notify(message, 'warning'); localStorage.setItem(ACTIVE_KEY, 'default'); }
+      else if (id !== 'default') { const message = `找不到已保存的皮肤“${id}”，已恢复默认皮肤。`; this.message.textContent = message; this.notify(message, 'warning'); localPreferences.setItem(ACTIVE_KEY, 'default'); }
     } catch (error) { this.message.textContent = '皮肤载入失败，使用默认：' + error.message; this.notify(this.message.textContent, 'warning'); }
   }
   render() {
@@ -67,9 +69,11 @@ export class EditorSkins {
     controls.append(action('导入皮肤包', () => this.zip.click()), action('导入文件夹', () => this.pickDirectory()), this.reloadButton, this.previewButton, this.applyButton, this.resetParametersButton, this.exportButton, this.deleteButton, action('恢复默认皮肤', () => this.reset()));
     this.previewImage = document.createElement('img'); this.previewImage.className = 'editor-skin-preview'; this.previewImage.hidden = true; this.previewImage.alt = '所选皮肤预览';
     this.appearance = document.createElement('div'); this.appearance.className = 'editor-skin-parameters';
+    this.appearanceDisclosure = document.createElement('details'); this.appearanceDisclosure.className = 'editor-skin-options';
+    const appearanceSummary = document.createElement('summary'); appearanceSummary.textContent = '外观与可选参数'; this.appearanceDisclosure.append(appearanceSummary, this.appearance);
     this.details = document.createElement('p'); this.details.className = 'hint'; this.message = document.createElement('p'); this.message.className = 'hint'; this.message.setAttribute('role', 'status');
     const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '皮肤只保存在本机，不随谱面分享。预览 15 秒后自动复原；Ctrl+Alt+Shift+Backspace 恢复当前皮肤原始参数；Ctrl+Alt+Shift+F12 切回默认皮肤。';
-    this.host.append(controls, this.zip, this.directory, this.previewImage, this.appearance, this.details, this.message, hint); this.updateOptions();
+    this.host.append(controls, this.zip, this.directory, this.previewImage, this.appearanceDisclosure, this.details, this.message, hint); this.updateOptions();
   }
   updateOptions(selected = this.current) {
     this.select.replaceChildren(new Option('默认皮肤', 'default'), ...[...this.records.values()].map(record => new Option(record.skin.name + (record.skin.author ? `(${record.skin.author})` : ''), record.skin.id)));
@@ -77,6 +81,9 @@ export class EditorSkins {
   }
   showDetails() {
     const record = this.records.get(this.select.value);
+    if (this.appearanceSkinId !== record?.skin.id) this.appearanceDisclosure.open = false;
+    this.appearanceSkinId = record?.skin.id;
+    this.appearanceDisclosure.hidden = !record || !Object.keys(record.skin.parameters ?? {}).length && !Object.keys(record.skin.variants ?? {}).length;
     this.details.textContent = record ? `${record.skin.description ?? ''}${record.skin.skinVersion ? ' · v' + record.skin.skinVersion : ''}${record.skin.license ? ' · ' + record.skin.license : ''} · ${record.files.size} 个文件 · ${(record.bytes / 1024).toFixed(1)} KiB` : '编辑器原有外观与布局。';
     this.deleteButton.disabled = !record || Boolean(record.builtin); this.exportButton.disabled = !record;
     this.resetParametersButton.disabled = !record || !Object.keys(record.skin.parameters ?? {}).length;
@@ -150,22 +157,31 @@ export class EditorSkins {
     this.cancelPreview(); this.runtime.apply(prepared); this.current = id; this.updateOptions(id);
     this.recovery.style.setProperty('display', preview ? 'block' : 'none', 'important');
     if (preview) {
-      this.previewId = id; this.restoreId = localStorage.getItem(ACTIVE_KEY) ?? 'default'; this.deadline = retainDeadline && wasPreview ? previousDeadline : Date.now() + 15000; this.keep.hidden = false;
+      this.previewId = id; this.restoreId = localPreferences.getItem(ACTIVE_KEY) ?? 'default'; this.deadline = retainDeadline && wasPreview ? previousDeadline : Date.now() + 15000; this.keep.hidden = false;
       const update = () => {
         if (Date.now() >= this.deadline) { const restore = this.restoreId; this.drafts = structuredClone(this.options); this.cancelPreview(); this.use(this.records.has(restore) ? restore : 'default').catch(error => this.error(error)); return; }
         this.rescueText.textContent = `预览中 · ${Math.ceil((this.deadline - Date.now()) / 1000)} 秒后复原`;
       };
       update(); this.previewTimer = setInterval(update, 250);
-    } else { this.options[id] = structuredClone(appearance); this.persistOptions(); localStorage.setItem(ACTIVE_KEY, id); this.rescueText.textContent = record?.skin.name ?? ''; this.message.textContent = id === 'default' ? '已恢复默认皮肤。' : '已应用，重新打开编辑器后会恢复此皮肤。'; }
+    } else {
+      this.options[id] = structuredClone(appearance);
+      const optionsSaved = this.persistOptions(), activeSaved = this.persistValue(ACTIVE_KEY, id);
+      this.rescueText.textContent = record?.skin.name ?? '';
+      if (optionsSaved && activeSaved) this.message.textContent = id === 'default' ? '已恢复默认皮肤。' : '已应用，重新打开编辑器后会恢复此皮肤。';
+    }
   }
   confirmPreview() {
     if (this.previewId === null) return;
-    localStorage.setItem(ACTIVE_KEY, this.current); this.cancelPreview(); this.rescueText.textContent = this.records.get(this.current)?.skin.name ?? '';
-    this.options[this.current] = structuredClone(this.drafts[this.current]); this.persistOptions();
-    this.message.textContent = '已保留当前皮肤。';
+    const activeSaved = this.persistValue(ACTIVE_KEY, this.current); this.cancelPreview(); this.rescueText.textContent = this.records.get(this.current)?.skin.name ?? '';
+    this.options[this.current] = structuredClone(this.drafts[this.current]); const optionsSaved = this.persistOptions();
+    if (activeSaved && optionsSaved) this.message.textContent = '已保留当前皮肤。';
   }
   reset() { this.use('default').catch(error => this.error(error)); }
-  persistOptions() { localStorage.setItem(OPTIONS_KEY, JSON.stringify(this.options)); }
+  persistOptions() { return this.persistValue(OPTIONS_KEY, JSON.stringify(this.options)); }
+  persistValue(key, value) {
+    try { localPreferences.setItem(key, value); return true; }
+    catch (error) { this.message.textContent = `皮肤已在本次会话中应用，但参数未保存：${storageFailure(error)}`; this.notify(this.message.textContent, 'warning', 7000); return false; }
+  }
   clearAppearance(id) { delete this.options[id]; delete this.drafts[id]; this.persistOptions(); }
   async resetParameters(id) {
     const record = this.records.get(id); if (!record) return;
@@ -182,7 +198,7 @@ export class EditorSkins {
       ++this.generation;
       if (this.current === id) await this.use('default');
       await deleteEditorSkin(id); this.records.delete(id); this.clearAppearance(id);
-      if (localStorage.getItem(ACTIVE_KEY) === id) localStorage.setItem(ACTIVE_KEY, 'default');
+      if (localPreferences.getItem(ACTIVE_KEY) === id) localPreferences.setItem(ACTIVE_KEY, 'default');
       if (this.restoreId === id) this.restoreId = 'default';
       if (this.directoryId === id) { this.directoryId = null; this.directoryHandle = null; }
       this.updateOptions(); this.message.textContent = '已删除皮肤及其参数设置。';

@@ -3,6 +3,7 @@ export function createSettingsPanel() {
   const title = document.createElement('h2'); title.textContent = '设置'; dialog.append(title);
   const body = document.createElement('div'); body.className = 'settings-body'; dialog.append(body);
   const skins = document.createElement('section'); skins.id = 'editor-skin-settings'; body.append(skins);
+  const noteSkins = document.createElement('section'); noteSkins.id = 'note-skin-settings'; body.append(noteSkins);
   const group = (heading, fields) => {
     const section = document.createElement('section'); const title = document.createElement('h3'); title.textContent = heading; section.append(title);
     for (const [id, text, type, value, minimum, maximum, step] of fields) {

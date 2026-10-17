@@ -27,6 +27,26 @@ function previewSurface() {
   return { context, canvas: { style: {}, getContext: () => context, getBoundingClientRect: () => ({ width: 600, height: 400 }) } };
 }
 
+test('预览画布临时隐藏时保留尺寸并跳过渲染，恢复后继续绘制', () => {
+  globalThis.devicePixelRatio = 1;
+  const chart = createChart(), tempo = new TempoMap(chart.BPMList), { context, canvas } = previewSurface();
+  const preview = new Preview(canvas); let rectangle = { width: 600, height: 400 };
+  canvas.getBoundingClientRect = () => rectangle;
+  Object.assign(preview, { visible: true, applyShaders: false, showHitEffects: false, images: { background: { naturalWidth: 1350, naturalHeight: 900 } } });
+  preview.draw(chart, tempo, 0, 0);
+  const calls = context.calls.length, size = [canvas.width, canvas.height];
+  preview.shaderCanvas = { style: { visibility: 'visible' } }; preview.overlayCanvas = { style: { visibility: 'visible' } };
+  preview.noteHitAreas = [{ lineIndex: 0 }]; preview.noisePreview.hitEntries = [{}];
+  rectangle = { width: 0, height: 0 };
+  preview.draw(chart, tempo, 1, 0);
+  assert.equal(context.calls.length, calls); assert.deepEqual([canvas.width, canvas.height], size);
+  assert.equal(preview.viewport, null); assert.deepEqual(preview.noteHitAreas, []); assert.deepEqual(preview.noisePreview.hitEntries, []);
+  assert.equal(preview.shaderCanvas.style.visibility, 'hidden'); assert.equal(preview.overlayCanvas.style.visibility, 'hidden');
+  rectangle = { width: 600, height: 400 };
+  preview.draw(chart, tempo, 2, 0);
+  assert.ok(context.calls.length > calls); assert.ok(preview.viewport.width > 0); assert.deepEqual([canvas.width, canvas.height], size);
+});
+
 test('编辑背景的不透明度不会被连续绘制覆盖，模糊修改在下一帧生效', () => {
   globalThis.devicePixelRatio = 1;
   const chart = createChart(); const tempo = new TempoMap(chart.BPMList);

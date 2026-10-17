@@ -1,3 +1,4 @@
+import { localPreferences } from '../platform/local-preferences.mjs';
 const storageKey = 'rpe-next-multi-edit-v1';
 const kinds = ['notes', 'events'];
 
@@ -24,7 +25,7 @@ function parameters(kind, value) {
 }
 
 export class MultiEditParameters {
-  constructor(storage = globalThis.localStorage, onError = () => {}) {
+  constructor(storage = localPreferences, onError = () => {}) {
     this.storage = storage; this.onError = onError; this.drafts = {}; this.history = {}; this.saved = {};
     let stored;
     try { stored = JSON.parse(storage?.getItem(storageKey) ?? '{}'); } catch { stored = {}; }
