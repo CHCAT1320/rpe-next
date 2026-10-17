@@ -8,7 +8,7 @@ import { CollaborationTransport } from '../src/platform/collaboration-transport.
 /**
  * One diagnostic log line as the tests read it back.
  *
- * `MediaDiagnostics` and `CollaborationMedia` are still untyped `.mjs` modules, so the members the
+ * `MediaDiagnostics` and `CollaborationMedia` are TypeScript modules, so the members the
  * assertions touch are declared here rather than imported from a declaration that does not exist
  * yet. Every field is optional because each test only inspects the ones its own stage emits.
  */

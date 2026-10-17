@@ -23,11 +23,11 @@ await cp(runtime, output, { recursive: true, filter: path => !path.endsWith('def
 await rename(join(output, 'electron.exe'), join(output, 'RePhiEdit-Next.exe'));
 const application = join(output, 'resources', 'app');
 await mkdir(application, { recursive: true });
-// desktop/main.cjs serves resources/app itself as the site root, so the Vite output has to land
+// desktop/main.ts serves resources/app itself as the site root, so the Vite output has to land
 // directly there — packaging it under a nested dist/ would 404 every request.
 await cp(join(root, 'dist'), application, { recursive: true });
 await cp(join(root, 'desktop'), join(application, 'desktop'), { recursive: true });
-// `desktop/main.cjs` builds its Content-Security-Policy with `collaborationConnectSources`, which it
+// `desktop/main.ts` builds its Content-Security-Policy with `collaborationConnectSources`, which it
 // imports from the source tree. The Vite output carries no source tree of its own, so that one
 // dependency-free module is copied in at the path the shell resolves it from. Everything else the
 // renderer needs is already bundled into dist/.
@@ -36,7 +36,7 @@ await mkdir(policy, { recursive: true });
 await cp(join(root, 'src', 'core', 'collaboration-policy.ts'), join(policy, 'collaboration-policy.ts'));
 await writeFile(join(application, 'package.json'), JSON.stringify({
   name: metadata.name, version: metadata.version, author: metadata.author, license: metadata.license,
-  description: metadata.description, main: 'desktop/main.cjs'
+  description: metadata.description, main: 'desktop/main.ts'
 }, null, 2) + '\n');
 await writeFile(join(output, '使用说明.txt'), '\uFEFF' + [
   'Re:PhiEdit Next — Windows x64 桌面测试版',

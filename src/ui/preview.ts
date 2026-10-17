@@ -305,7 +305,7 @@ export class Preview {
     const scale = viewport.scale / divisor;
     context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
     // `noiseLayers` lives in un-migrated JavaScript, so its result is `any`; the annotation states
-    // the shape `core/noise-skin.mjs` actually returns (the chart's layers, or one default layer).
+    // the shape `core/noise-skin.ts` actually returns (the chart's layers, or one default layer).
     const skinScene = (noiseLayers(chart) as NoiseLayer[]).some(layer => this.noisePreview.usesSkin(layer));
     // Screen-sampling skins preserve scene alpha, so supply the same opaque base as shaders.
     if (this.applyShaders || skinScene) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }

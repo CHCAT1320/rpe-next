@@ -1,3 +1,6 @@
+// Wrapped in a block so this CommonJS script keeps its own scope; without a module
+// boundary every tool's top-level `app`/`fs` would merge into one global scope.
+{
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -10,12 +13,12 @@ app.whenReady().then(async () => {
   await fs.mkdir(scratch, { recursive: true });
   if (process.argv.includes('--snapshot')) {
     for (const name of ['timeline', 'noise-area', 'event-curve']) {
-      const source = await fs.readFile(path.join(root, 'src/ui', name + '.mjs'), 'utf8');
-      const rewritten = source.replace(/(from\s+['"])(\.\.?\/[^'"]+)(['"])/g, (match, prefix, relative, suffix) => {
-        const target = ['timeline.mjs', 'event-curve.mjs'].includes(relative.slice(2)) ? path.join(scratch, relative.slice(2)) : path.resolve(root, 'src/ui', relative);
+      const source = await fs.readFile(path.join(root, 'src/ui', name + '.ts'), 'utf8');
+      const rewritten = source.replace(/(from\s+['"])(\.\.?\/[^'"]+)(['"])/g, (match: string, prefix: string, relative: string, suffix: string) => {
+        const target = ['timeline.ts', 'event-curve.ts'].includes(relative.slice(2)) ? path.join(scratch, relative.slice(2)) : path.resolve(root, 'src/ui', relative);
         return prefix + pathToFileURL(target).href + suffix;
       });
-      await fs.writeFile(path.join(scratch, name + '.mjs'), rewritten);
+      await fs.writeFile(path.join(scratch, name + '.ts'), rewritten);
     }
     console.log('Saved local event renderer baseline.'); app.quit(); return;
   }
@@ -24,17 +27,17 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(scratch, 'index.html'));
   const result = await win.webContents.executeJavaScript(`(async () => {
     const root = ${JSON.stringify(pathToFileURL(root + path.sep).href)};
-    const { createChart, createLine, createEvent } = await import(root + 'src/core/chart.mjs');
-    const { createNoiseArea, createNoiseEvent } = await import(root + 'src/core/noise-areas.mjs');
-    const { EditorSession } = await import(root + 'src/application/session.mjs');
-    const { TempoMap } = await import(root + 'src/core/tempo.mjs');
+    const { createChart, createLine, createEvent } = await import(root + 'src/core/chart.ts');
+    const { createNoiseArea, createNoiseEvent } = await import(root + 'src/core/noise-areas.ts');
+    const { EditorSession } = await import(root + 'src/application/session.ts');
+    const { TempoMap } = await import(root + 'src/core/tempo.ts');
     const results = [];
     const flush = canvas => canvas.getContext('2d').getImageData(0, 0, 1, 1);
     const makeCanvas = () => { const canvas = document.createElement('canvas'); canvas.width = 1000; canvas.height = 650; document.body.append(canvas); return canvas; };
     for (const label of ['baseline', 'current']) {
       const base = label === 'baseline' ? ${JSON.stringify(pathToFileURL(scratch + path.sep).href)} : root + 'src/ui/';
-      const { Timeline } = await import(base + 'timeline.mjs');
-      const { NoiseAreaEditor } = await import(base + 'noise-area.mjs');
+      const { Timeline } = await import(base + 'timeline.ts');
+      const { NoiseAreaEditor } = await import(base + 'noise-area.ts');
       for (const curve of ['linear', 'bezier']) {
         const types = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'];
         const events = Array.from({ length: 1000 }, (_, i) => ({ ...createEvent(Math.sin(i / 30) * 100, Math.sin((i+1) / 30) * 100, i / 250, (i+1) / 250), ...(curve === 'bezier' ? { bezier: 1, bezierPoints: [0.2, 0.8, 0.6, 0.1] } : {}) }));
@@ -66,4 +69,5 @@ app.whenReady().then(async () => {
   })()`);
   console.log(JSON.stringify(result,null,2)); await fs.writeFile(path.join(scratch,'results.json'),JSON.stringify(result,null,2));
   win.destroy(); app.exit(0);
-}).catch(error => {console.error(error);app.exit(1);});
+}).catch((error: unknown) => {console.error(error);app.exit(1);});
+}

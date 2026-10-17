@@ -597,7 +597,7 @@ export class NoiseAreaEditor {
     const title = document.createElement('h3'); title.textContent = this.event ? NOISE_TRACKS.find(track => track[0] === this.event!.type)![1] + ' · 噪域 ' + this.selected : '噪域 ' + this.selected; host.append(title);
     // `noiseLayerId` supplies the default layer's id when the area predates layers, and the choices
     // are the current chart's layers, so the select always shows a value it can also write back.
-    // `noise-skin.mjs` is still plain JavaScript, so the callback's parameter is annotated here.
+    // `noise-skin.ts` returns a parsed definition, so the callback's parameter is annotated here.
     this.field(host, '所属噪域层', noiseLayerId(area), (item, value) => ({ ...item, layerId: value as unknown as string }), { kind: 'text', choices: noiseLayers(this.chart).map((layer: NoiseLayer) => [layer.id, layer.name] as [string, string]) });
     const target = this.event;
     const modifyEvent = (change: (event: Record<string, unknown>) => void) => (item: NoiseArea): NoiseArea => { const event = (item[target!.type] as unknown as Record<string, unknown>[])[target!.index]; change(event); return item; };

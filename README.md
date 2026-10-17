@@ -106,7 +106,7 @@ npm run build:desktop
 
 `npm test` 不用任何构建步骤：Node 直接以类型擦除方式运行 `test/` 与 `src/` 中的 `.ts` 文件。因此源码不能使用 `enum`、构造函数参数属性（`constructor(private x: T)`）和 `namespace` 这类需要真正生成代码的语法，`tsconfig.json` 里的 `erasableSyntaxOnly` 会让 `npm run typecheck` 一并拒绝它们，保证类型检查通过的写法在测试里也能直接跑。相对导入需要保留 `.ts` / `.vue` 后缀，这与 Node 的解析规则一致。
 
-编辑器支持在“设置 → 编辑器皮肤”中导入、预览和切换独立皮肤包，涵盖界面样式、字体、图片、动画、命令分组和编辑画布色板。当前 API 3 保留响应式变量、容器规则、状态信号、分区画布、可调参数和同包明暗变体，并允许画布色板引用颜色参数，与界面配色一同调整。参见 [编辑器皮肤协议 v1](EDITOR-SKIN-PROTOCOL.zh-CN.md) 和 [机器可读组件目录](schemas/editor-skin-components.v1.json)。自定义皮肤可运行 `node tools/pack-editor-skin.mjs <皮肤目录> [输出文件]` 打包。
+编辑器支持在“设置 → 编辑器皮肤”中导入、预览和切换独立皮肤包，涵盖界面样式、字体、图片、动画、命令分组和编辑画布色板。当前 API 3 保留响应式变量、容器规则、状态信号、分区画布、可调参数和同包明暗变体，并允许画布色板引用颜色参数，与界面配色一同调整。参见 [编辑器皮肤协议 v1](EDITOR-SKIN-PROTOCOL.zh-CN.md) 和 [机器可读组件目录](schemas/editor-skin-components.v1.json)。自定义皮肤可运行 `node tools/pack-editor-skin.ts <皮肤目录> [输出文件]` 打包。
 
 内置“墨线 Inkline(cmdysj)”可在设置中直接选用，支持修改及恢复原始参数。默认皮肤仍保留；Inkline 的名称、作者、字体声明与素材均来自其皮肤包。
 

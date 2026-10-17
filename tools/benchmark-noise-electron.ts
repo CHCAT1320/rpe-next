@@ -1,3 +1,6 @@
+// Wrapped in a block so this CommonJS script keeps its own scope; without a module
+// boundary every tool's top-level `app`/`fs` would merge into one global scope.
+{
 const { app, BrowserWindow } = require('electron');
 const { readFile, writeFile, mkdir } = require('node:fs/promises');
 const { join, resolve } = require('node:path');
@@ -9,24 +12,24 @@ app.setPath('userData', join(scratch, 'profile'));
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 app.whenReady().then(async () => {
   await mkdir(scratch, { recursive: true });
-  const baseline = join(scratch, 'baseline.mjs');
+  const baseline = join(scratch, 'baseline.ts');
   if (process.argv.includes('--snapshot')) {
-    const source = await readFile(join(root, 'src/ui/noise-preview.mjs'), 'utf8');
+    const source = await readFile(join(root, 'src/ui/noise-preview.ts'), 'utf8');
     await writeFile(baseline, source.replaceAll("'../core/", "'" + pathToFileURL(join(root, 'src/core/')).href).replaceAll("'./", "'" + pathToFileURL(join(root, 'src/ui/')).href));
     console.log('Saved local noise renderer baseline.'); app.quit(); return;
   }
   const archive = process.argv[2];
-  if (!archive) throw new Error('Usage: electron tools/benchmark-noise-electron.cjs <archive>');
+  if (!archive) throw new Error('Usage: electron tools/benchmark-noise-electron.ts <archive>');
   const window = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
   await writeFile(join(scratch, 'index.html'), '<!doctype html><title>Noise rendering benchmark</title><body style="background:#222;color:white">Noise rendering benchmark</body>');
   await window.loadFile(join(scratch, 'index.html'));
   const result = await window.webContents.executeJavaScript(`(async () => {
     const { readFile } = require('node:fs/promises');
-    const { readZip } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/platform/archive.mjs')).href)});
-    const { parseOfficialChart } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/core/official-chart.mjs')).href)});
-    const { TempoMap } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/core/tempo.mjs')).href)});
+    const { readZip } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/platform/archive.ts')).href)});
+    const { parseOfficialChart } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/core/official-chart.ts')).href)});
+    const { TempoMap } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/core/tempo.ts')).href)});
     const { NoisePreview: Baseline } = await import(${JSON.stringify(pathToFileURL(baseline).href)});
-    const { NoisePreview: Current } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/ui/noise-preview.mjs')).href)});
+    const { NoisePreview: Current } = await import(${JSON.stringify(pathToFileURL(join(root, 'src/ui/noise-preview.ts')).href)});
     const files = await readZip(await readFile(${JSON.stringify(resolve(archive))}));
     const source = JSON.parse(new TextDecoder().decode([...files].find(([name]) => name.endsWith('.json'))[1]));
     const chart = parseOfficialChart(source); const tempo = new TempoMap(chart.BPMList);
@@ -58,4 +61,5 @@ app.whenReady().then(async () => {
   })()`);
   await writeFile(join(scratch, 'results.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2)); window.destroy(); app.exit(0);
-}).catch(error => { console.error(error); app.exit(1); });
+}).catch((error: unknown) => { console.error(error); app.exit(1); });
+}

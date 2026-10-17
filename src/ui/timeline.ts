@@ -277,7 +277,7 @@ export interface EventRectangle {
 }
 
 /**
- * What `ui/event-display-index.mjs` returns for one event list.
+ * What `ui/event-display-index.ts` returns for one event list.
  *
  * That module is un-migrated JavaScript, so its return type is inferred as `any` and every read
  * through it would be an implicit `any`. Spelling the shape out here is what keeps the chain and
