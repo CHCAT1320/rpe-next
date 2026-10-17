@@ -678,8 +678,18 @@ function failureMessage(failure: unknown): string {
  * temporal dead zone at that point.
  */
 function reportError(failure: unknown) {
-  const message = failureMessage(failure); status(message); notify(message, 'error', 5000); showDialog('操作未完成', message);
+  const error = failure as { name?: string; message?: string; projectId?: string };
+  const message = storageFailure(failure); status(message); notify(message, 'error', 7000);
+  const host = showDialog(error.name === 'ProjectConflictError' ? '保存冲突，已保留当前编辑' : '操作未完成', message);
+  if (error.name === 'ProjectConflictError' && libraryProject?.id === error.projectId && hasDocument) {
+    for (const [label, run] of [['导出当前谱面 PEZ', () => showExportDialog(session.chart, assets, chartName, (_name, format) => { if (format === 'pez') noteExternalBackup(); }, libraryProject?.identifier)],
+      ['另存为新项目', async () => { libraryProject = null; session.history.savedDocument = null as unknown as Chart; await save(); }]] as [string, () => unknown][]) {
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
+      button.onclick = async () => { element<HTMLDialogElement>('#modal').close(); try { await run(); } catch (failure) { reportError(failure); } }; host.append(button);
+    }
+  }
 }
+document.addEventListener('rpen-storage-blocked', () => notify('数据库正在等待其他编辑器窗口释放，请关闭旧窗口后重试。', 'warning', 7000));
 const notificationTimers = new Set<ReturnType<typeof setTimeout>>();
 /**
  * Shows a transient notification.
