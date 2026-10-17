@@ -77,15 +77,15 @@ export function saveDraft(id: string, name: string, chart: Chart): Promise<unkno
  * write, so the retention limit can never be exceeded even if the write is interrupted. `limit - 1`
  * is removed because the snapshot being added counts toward the limit.
  */
-export function saveSnapshot(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
+export function saveSnapshot(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | [string, Uint8Array][] | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
   if (typeof Worker === 'undefined') return saveSnapshotDirect(projectId, name, chart, assets, limit, viewState);
   try {
     const worker = new Worker(new URL('./recovery-worker.ts', import.meta.url), { type: 'module' });
-    return transferSnapshot(worker, [projectId, name, chart, assets, limit, viewState]);
+    return transferSnapshot(worker, [projectId, name, chart, assets ? [...assets] : [], limit, viewState]);
   } catch (error) { return Promise.reject(error); }
 }
 
-export async function saveSnapshotDirect(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
+export async function saveSnapshotDirect(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | [string, Uint8Array][] | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
   const connection = await database();
   return new Promise<void>((resolve, reject) => {
     const operation = connection.transaction(['drafts', 'summaries'], 'readwrite', { durability: 'strict' }); const store = operation.objectStore('drafts');

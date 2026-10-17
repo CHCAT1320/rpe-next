@@ -8,7 +8,7 @@ export const EDITOR_SKIN_DEFAULT_TOKENS = Object.freeze({
   'motion-fast': '120ms', 'motion-normal': '220ms', 'motion-easing': 'ease', 'icon-filter': 'none', 'scrollbar-thumb': '#777777',
 });
 
-export function baseEditorSkinCss(skin) {
+export function baseEditorSkinCss(skin: { id: string }): string {
   const scope = `:root[data-editor-skin="${skin.id}"]`;
   const vars = Object.entries(EDITOR_SKIN_DEFAULT_TOKENS).map(([key, value]) => `--rpen-${key}:${value}`).join(';');
   return `${scope}{${vars};--accent:var(--rpen-accent);--muted:var(--rpen-muted);--line:var(--rpen-border);font-family:var(--rpen-font-family);font-size:var(--rpen-font-size);color:var(--rpen-text);background:var(--rpen-background)}
