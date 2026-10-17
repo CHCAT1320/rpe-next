@@ -1,7 +1,7 @@
 import { lineOverviewWindow, lineOverviewLayout, stepOverviewLine, LineOverviewIndex } from '../core/line-overview.ts';
 import { shaderEvents } from '../core/shader-events.ts';
 import { NOTE_COLORS } from './timeline.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 import { isDefaultLineGroup, isDefaultLineName, lineFeatureLabels, lineGroupName } from '../core/line-groups.ts';
 import type { TempoMap } from '../core/tempo.ts';
 import type { Chart, ChartEvent, Note } from '../core/types.ts';

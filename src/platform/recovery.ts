@@ -1,6 +1,6 @@
 import type { ArchiveEntries } from './archive.ts';
 import type { Chart } from '../core/types.ts';
-import { transferSnapshot } from './recovery-transfer.mjs';
+import { transferSnapshot } from './recovery-transfer.ts';
 
 // Autosave storage. Drafts hold a full snapshot of the document plus its assets so a crashed tab can
 // be restored, while a separate `summaries` store keeps just the fields the recovery list needs.
@@ -80,7 +80,7 @@ export function saveDraft(id: string, name: string, chart: Chart): Promise<unkno
 export function saveSnapshot(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
   if (typeof Worker === 'undefined') return saveSnapshotDirect(projectId, name, chart, assets, limit, viewState);
   try {
-    const worker = new Worker(new URL('./recovery-worker.mjs', import.meta.url), { type: 'module' });
+    const worker = new Worker(new URL('./recovery-worker.ts', import.meta.url), { type: 'module' });
     return transferSnapshot(worker, [projectId, name, chart, assets, limit, viewState]);
   } catch (error) { return Promise.reject(error); }
 }

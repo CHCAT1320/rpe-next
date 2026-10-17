@@ -16,7 +16,7 @@ import { isTextEntry, usesNativeTextShortcut } from './keyboard.ts';
 import type { ShortcutTarget } from './keyboard.ts';
 import { download } from '../platform/files.ts';
 import { collaborationMarkerPosition, collaborationLabelBackground } from './collaboration-display.ts';
-import { editorSkinState, editorSkinSignal } from './editor-skin-state.mjs';
+import { editorSkinState, editorSkinSignal } from './editor-skin-state.ts';
 import type { Timeline, NoteHitEntry } from './timeline.ts';
 import type { EditorSession } from '../application/session.ts';
 

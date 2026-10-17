@@ -3,7 +3,7 @@ import { eventKey, eventList, eventListAt, selectedEvents, selectEvent, transfor
 import { strokeIntersects } from '../core/editor-display.ts';
 import { shaderEventLanes } from '../core/shader-events.ts';
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.ts';
-import { eventDisplayIndex } from './event-display-index.mjs';
+import { eventDisplayIndex } from './event-display-index.ts';
 import type { AnyEventType, Beat, ChartEvent } from '../core/types.ts';
 import type { EventEditSession, EventListSource } from '../application/event-commands.ts';
 import type { BatchEditSession } from '../application/batch-edit.ts';

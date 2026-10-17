@@ -3,7 +3,7 @@ import type { CurveNoteOptions } from '../core/curve-notes.ts';
 import { beatValue, formatBeat, parseBeat } from '../core/beat.ts';
 import { showDialog } from './dialog.ts';
 import { assetUrl } from '../core/asset-url.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 import type { Beat, Note } from '../core/types.ts';
 
 /**

@@ -11,9 +11,9 @@ import { SPECIAL_TRACKS, simultaneousNotes, strokeIntersects } from '../core/edi
 import { captureSelection, editCapturedSelection, commitSelectionEdit } from '../application/batch-edit.ts';
 import { lineDisplayLabel } from '../core/line-groups.ts';
 import { trajectoryEventValue } from '../core/curve-trajectory.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
-import { drawEventCurve, drawEventCurveBatch } from './event-curve.mjs';
-import { eventDisplayIndex, selectedEventGroups } from './event-display-index.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
+import { drawEventCurve, drawEventCurveBatch } from './event-curve.ts';
+import { eventDisplayIndex, selectedEventGroups } from './event-display-index.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, EventLayer, JudgeLine, Note } from '../core/types.ts';
 import type { IndexedInterval } from '../core/interval-index.ts';
 import type { EventChain } from '../core/editor-display.ts';

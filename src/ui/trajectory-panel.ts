@@ -5,7 +5,7 @@ import { SceneRuntime } from '../core/scene.ts';
 import { previewViewport } from '../core/editor-display.ts';
 import { download } from '../platform/files.ts';
 import { prepareCanvas } from './timeline.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 import { trajectorySplitSettings } from '../core/trajectory-simplify.ts';
 import { parseCurvePreset, saveCurvePreset, deleteCurvePreset, copyCurvePreset } from '../core/trajectory-presets.ts';
 import type { Beat, Chart, ChartEvent, CurveTrajectoryOptions, TrajectorySplit } from '../core/types.ts';

@@ -7,10 +7,10 @@ import type { EventChain, Point } from '../core/editor-display.ts';
 import { prepareCanvas } from './timeline.ts';
 import { createEasingPicker, EASING_NAMES } from './easing-picker.ts';
 import { NoiseAreaList } from './noise-list.ts';
-import { NoiseLayerPanel } from './noise-layer-panel.mjs';
-import { noiseLayers, noiseLayerId } from '../core/noise-skin.mjs';
-import { drawEventCurve, drawEventCurveBatch } from './event-curve.mjs';
-import { eventDisplayIndex, selectedEventGroups } from './event-display-index.mjs';
+import { NoiseLayerPanel } from './noise-layer-panel.ts';
+import { noiseLayers, noiseLayerId } from '../core/noise-skin.ts';
+import { drawEventCurve, drawEventCurveBatch } from './event-curve.ts';
+import { eventDisplayIndex, selectedEventGroups } from './event-display-index.ts';
 import type { Chart, Beat, NoiseLayer } from '../core/types.ts';
 import type { IntervalIndex } from '../core/interval-index.ts';
 
@@ -51,7 +51,7 @@ interface CurveSample {
 }
 
 /**
- * What `event-display-index.mjs` returns for one track.
+ * What `event-display-index.ts` returns for one track.
  *
  * The module is still plain JavaScript, so its own return type is inferred as `any`; declaring the
  * shape the editor reads keeps every lookup below checked instead of silently unchecked.

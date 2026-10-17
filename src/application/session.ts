@@ -70,7 +70,7 @@ export class EditorSession extends EventTarget {
   /** Whether a shader event's parameters follow it when its start beat changes; defaults to on. */
   shaderAutoAlign?: boolean;
   /**
-   * The live collaboration client, attached by `collaboration-client.mjs` when a shared session
+   * The live collaboration client, attached by `collaboration-client.ts` when a shared session
    * starts and set back to `null` when it ends; absent entirely in a local session, which is why
    * `commit` and `travel` both test it first.
    *

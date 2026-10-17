@@ -36,7 +36,7 @@
     "migration-audit": "node tools/migration-audit.ts",
     "scene-audit": "node tools/scene-audit.ts",
     "build:desktop": "node tools/build-desktop.ts",
-    "desktop": "vite build && electron desktop/main.cjs --dist"
+    "desktop": "vite build && electron desktop/main.ts --dist"
   },
   "dependencies": {
     "vue": "^3.5.43"

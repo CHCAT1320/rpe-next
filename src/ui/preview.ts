@@ -12,7 +12,7 @@ import { PreviewBackground, textureInViewport } from './preview-background.ts';
 // 0.10.2 draws the chart's noise areas into the preview through this renderer, alongside the
 // background and the guides this file already drew.
 import { NoisePreview } from './noise-preview.ts';
-import { noiseLayers } from '../core/noise-skin.mjs';
+import { noiseLayers } from '../core/noise-skin.ts';
 import type { Chart, Color, Note, NoiseLayer, NoteType } from '../core/types.ts';
 import type { HitEntry } from '../core/hit-effects.ts';
 import type { LineState, SceneSampler } from '../core/scene.ts';

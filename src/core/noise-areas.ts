@@ -1,6 +1,6 @@
 import { beatValue, fromNumber, upperBound } from './beat.ts';
 import { EventTrack } from './events.ts';
-import { NOISE_LAYER_VERSION } from './noise-skin.mjs';
+import { NOISE_LAYER_VERSION } from './noise-skin.ts';
 import type { Beat, Chart, ChartEvent, NoiseArea, NoiseEvent, NoiseInterval, NoisePoint } from './types.ts';
 
 // The four area shapes are declared in `types.ts` because `Chart` carries the list and `types.ts` sits

@@ -4,7 +4,7 @@ import { TempoMap } from './tempo.ts';
 import { sampleCurveTrajectory } from './curve-trajectory.ts';
 import { trajectorySplitSettings } from './trajectory-simplify.ts';
 import { validateNoiseAreas, diagnoseNoiseAreas, normalizeNoiseAreas, NOISE_VERSION } from './noise-areas.ts';
-import { validateNoiseLayers, NOISE_LAYER_VERSION } from './noise-skin.mjs';
+import { validateNoiseLayers, NOISE_LAYER_VERSION } from './noise-skin.ts';
 import type { AnyEventType, Beat, Chart, ChartEvent, ChartMeta, ControlPoint, EventLayer, EventType, EventValue, ExtendedType, JudgeLine, NoiseArea, Note, NoteType } from './types.ts';
 
 export const EVENT_TYPES = ['moveXEvents', 'moveYEvents', 'rotateEvents', 'alphaEvents', 'speedEvents'] as const satisfies readonly EventType[];

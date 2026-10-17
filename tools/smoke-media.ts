@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 // The collaboration server is a standalone package written in plain JavaScript, so it ships no
 // declarations. The one entry point this tool drives is described structurally here rather than
 // typing the whole module; `collaboration-server/server.d.ts` supplies the declaration itself.
-import { startCollaborationServer } from '../collaboration-server/server.mjs';
+import { startCollaborationServer } from '../collaboration-server/server.ts';
 
 /**
  * The one Electron surface this smoke test drives. Declared structurally so the tool does not have

@@ -6,7 +6,7 @@ import { createEasingPicker, EASING_NAMES } from './easing-picker.ts';
 import { NOTE_COLORS } from './timeline.ts';
 import { MultiEditParameters } from '../application/multi-edit-parameters.ts';
 import { runEventTool } from './event-tools.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 import type { EditorSession } from '../application/session.ts';
 import type { SelectionEditResult } from '../application/batch-edit.ts';
 import type { BatchKind, BatchParameters, BatchChannelParameters } from '../application/multi-edit-parameters.ts';

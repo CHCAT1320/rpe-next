@@ -1,7 +1,7 @@
 import { parseBeat, beatValue, formatBeat, fromNumber } from '../core/beat.ts';
 import { parseLineExpression } from '../application/multi-line-edit.ts';
 import { textLinesChart } from '../application/text-lines.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 import type { TextLinesOptions } from '../application/text-lines.ts';
 import type { Beat, Chart, NoteType } from '../core/types.ts';
 import type { EditorSession } from '../application/session.ts';

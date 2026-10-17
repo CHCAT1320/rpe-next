@@ -206,7 +206,7 @@ export function shortcutKey(event: ShortcutEvent): string {
     if (key === 'BRACKETRIGHT') key = 'RIGHTBRACKET';
   }
   if (['CONTROL', 'META', 'ALT', 'SHIFT'].includes(key)) return key;
-  // `shortcut-spec.mjs` is untyped from here (TS7016), so its parameter types are unknown; the
+  // `shortcut-spec.ts` is untyped from here (TS7016), so its parameter types are unknown; the
   // argument is a `string` and the return value is bound to a `string` before being returned.
   const normalized: string = normalizeShortcutKey(keyNames[key] ?? key);
   return normalized;
@@ -215,7 +215,7 @@ export function shortcutKey(event: ShortcutEvent): string {
 /**
  * The record `parseShortcut` returns.
  *
- * `shortcut-spec.mjs` is untyped from this module's point of view, so the contract its callers rely
+ * `shortcut-spec.ts` is untyped from this module's point of view, so the contract its callers rely
  * on is restated here; the parsed value is bound to this type rather than left as `any`.
  */
 interface ParsedShortcut {

@@ -1,4 +1,4 @@
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 
 /**
  * The slice of the timeline the analysis overlay reads.

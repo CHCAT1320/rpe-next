@@ -1,6 +1,6 @@
 import { beatValue } from '../core/beat.ts';
 import type { ClipboardEntry, ClipboardHistory } from '../application/clipboard-history.ts';
-import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { editorSkinContext } from './editor-skin-canvas.ts';
 
 const colors: Record<number, string> = { 1: '#8acbff', 2: '#8acbff', 3: '#f596ac', 4: '#f1ce76' };
 
