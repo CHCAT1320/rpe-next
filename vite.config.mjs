@@ -37,13 +37,16 @@ function distributionExtras(root) {
   };
 }
 
-// The built-in editor and noise skins live in the repository-root `assets/` directory and are
-// resolved at runtime through `assetUrl()` (see src/core/asset-url.mjs), so they cannot be
-// bundled or content-hashed. publicDir only mirrors `public/assets`, which holds the legacy RPE
-// resources, so copy these skin packages into dist/assets/ to keep every built target — local
-// preview, GitHub Pages and the Electron package — able to load them.
-function skinAssets(root) {
-  const directories = ['editor-skins', 'noise-skins'];
+// The built-in editor and noise skins, note skins and mods live in the repository-root `assets/`
+// directory and are resolved at runtime through `assetUrl()` (see src/core/asset-url.mjs), so they
+// cannot be bundled or content-hashed. publicDir only mirrors `public/assets`, which holds the
+// legacy RPE resources, so copy these packages into dist/assets/ to keep every built target —
+// local preview, GitHub Pages and the Electron package — able to load them. The protocol and
+// schema documents are fetched by the mod manager at runtime and are emitted at their repository
+// paths for the same reason.
+function runtimeAssets(root) {
+  const assets = ['editor-skins', 'noise-skins', 'note-skins', 'mods'];
+  const documents = ['protocols', 'schemas'];
   const walk = async directory => {
     const entries = await readdir(directory, { withFileTypes: true });
     const files = await Promise.all(entries.map(entry => {
@@ -53,15 +56,22 @@ function skinAssets(root) {
     return files.flat();
   };
   return {
-    name: 'rpe-skin-assets',
+    name: 'rpe-runtime-assets',
     apply: 'build',
     async buildStart() {
       const assetsRoot = join(root, 'assets');
-      for (const name of directories) {
+      for (const name of assets) {
         if (!existsSync(join(assetsRoot, name))) continue;
         for (const file of await walk(join(assetsRoot, name))) {
           const emitted = relative(assetsRoot, file).split(sep).join('/');
           this.emitFile({ type: 'asset', fileName: `assets/${emitted}`, source: await readFile(file) });
+        }
+      }
+      for (const name of documents) {
+        if (!existsSync(join(root, name))) continue;
+        for (const file of await walk(join(root, name))) {
+          const emitted = relative(root, file).split(sep).join('/');
+          this.emitFile({ type: 'asset', fileName: emitted, source: await readFile(file) });
         }
       }
     },
@@ -77,7 +87,7 @@ export default defineConfig(({ mode }) => ({
   // The editor is a single document with no client-side routing, so unknown paths must 404
   // instead of falling back to index.html — that keeps the smoke test's asset checks meaningful.
   appType: 'mpa',
-  plugins: [distributionExtras(import.meta.dirname), skinAssets(import.meta.dirname), appVersion(import.meta.dirname)],
+  plugins: [distributionExtras(import.meta.dirname), runtimeAssets(import.meta.dirname), appVersion(import.meta.dirname)],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
