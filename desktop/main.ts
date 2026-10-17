@@ -32,7 +32,7 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'rpe', privileges: { standard: t
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  let mainWindow;
+  let mainWindow: BrowserWindow | null = null;
   app.on('second-instance', () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -43,7 +43,7 @@ else {
     const root = await realpath(resolve(here, fromDist ? '../dist' : '..'));
     // The CSP's connect-src list comes from the collaboration policy module rather than being
     // inlined here. It is read from the application root, not from the served site root: the Vite
-    // build output contains no source tree, so `../dist/src/...` would not exist. `build-desktop.mjs`
+    // build output contains no source tree, so `../dist/src/...` would not exist. `build-desktop.ts`
     // copies this one dependency-free module into the package for the same reason.
     const { collaborationConnectSources } = await import(pathToFileURL(resolve(here, '..', 'src/core/collaboration-policy.ts')).href);
     const connectSources = collaborationConnectSources(process.env.RPE_MEDIA_ORIGINS);
@@ -67,12 +67,12 @@ else {
           return new Response(request.method === 'HEAD' ? null : body, { status: 200, headers });
         }
         const response = await net.fetch(pathToFileURL(path).href);
-        const headers = new Headers(response.headers);
-        headers.set('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; font-src 'self' blob:; media-src 'self' blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
-        headers.set('X-Content-Type-Options', 'nosniff');
-        if (/\.m?js$/.test(path)) headers.set('Content-Type', 'text/javascript; charset=utf-8');
-        else if (path.endsWith('.css')) headers.set('Content-Type', 'text/css; charset=utf-8');
-        return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers });
+        const responseHeaders = new Headers(response.headers);
+        responseHeaders.set('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; font-src 'self' blob:; media-src 'self' blob:; connect-src ${connectSources}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`);
+        responseHeaders.set('X-Content-Type-Options', 'nosniff');
+        if (/\.(?:m?js|ts)$/.test(path)) responseHeaders.set('Content-Type', 'text/javascript; charset=utf-8');
+        else if (path.endsWith('.css')) responseHeaders.set('Content-Type', 'text/css; charset=utf-8');
+        return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers: responseHeaders });
       } catch { return new Response('Not found', { status: 404 }); }
     });
     mainWindow = new BrowserWindow({
@@ -89,13 +89,13 @@ else {
     });
     mainWindow.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(`${origin}/`)) event.preventDefault(); });
     mainWindow.webContents.on('will-prevent-unload', event => {
-      const choice = dialog.showMessageBoxSync(mainWindow, {
+      const choice = dialog.showMessageBoxSync(mainWindow!, {
         type: 'question', buttons: ['继续编辑', '放弃未保存修改并退出'], defaultId: 0, cancelId: 0,
         title: '尚未保存', message: '当前谱面有未保存的修改，是否退出？'
       });
       if (choice === 1) event.preventDefault();
     });
-    const errors = [];
+    const errors: string[] = [];
     mainWindow.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message); });
     await mainWindow.loadURL(`${origin}/`);
     if (smoke) {
@@ -127,12 +127,15 @@ else {
         const database = await new Promise((resolve, reject) => { const request = indexedDB.open('desktop-smoke'); request.onsuccess = () => { request.result.close(); resolve(true); }; request.onerror = () => reject(request.error); });
         return { title: document.title, secure: isSecureContext, libraryVisible: Boolean(document.querySelector('#home') && !document.querySelector('#home').hidden), directoryPicker: typeof showDirectoryPicker === 'function', webgl: Boolean(canvas.getContext('webgl2')), database, resources, entry, forbidden: forbidden.status, hashPhases };
       })()`);
-      if (smokeSettings) result.settings = await mainWindow.webContents.executeJavaScript(await readFile(resolve(here, '..', 'tools/smoke-settings-renderer.ts'), 'utf8'));
+      if (smokeSettings) {
+        const { smokeSettingsRenderer } = await import(pathToFileURL(resolve(here, '..', 'tools', 'smoke-settings-renderer.ts')).href) as typeof import('../tools/smoke-settings-renderer.ts');
+        result.settings = await mainWindow.webContents.executeJavaScript(`(${smokeSettingsRenderer.toString()})()`);
+      }
       // The smoke helpers live in the checkout's `tools/`, which a `--dist` run does not serve, so
       // they are resolved from the application root rather than from the served site root.
       if (smokeMedia) result.media = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-media.ts')).href)).smokeMediaTransfer(mainWindow.webContents);
       console.log(JSON.stringify({ ...result, errors }));
-      const passed = result.secure && result.libraryVisible && result.webgl && result.database && result.entry.endsWith('.js') && result.resources.every(resource => resource.status === 200 && resource.bytes > 0) && result.forbidden === 404 && !errors.length;
+      const passed = result.secure && result.libraryVisible && result.webgl && result.database && result.entry.endsWith('.js') && result.resources.every((resource: { status: number; bytes: number }) => resource.status === 200 && resource.bytes > 0) && result.forbidden === 404 && !errors.length;
       app.exit(passed ? 0 : 1);
     } else { mainWindow.maximize(); mainWindow.show(); }
   }).catch(error => { console.error(error); if (!smoke) dialog.showErrorBox('启动失败', error.message); app.exit(1); });

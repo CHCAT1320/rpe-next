@@ -1,10 +1,10 @@
-// A sandboxed preload is loaded as CommonJS and gets NO type stripping, unlike every other TypeScript
-// entry point in this repository: Electron hands the file straight to the sandboxed loader, so a type
-// annotation here fails at runtime with "SyntaxError: Missing initializer in const declaration".
-// The extension is `.ts` for consistency with the rest of the package, but this file must stay free
-// of type syntax, and `require` must stay `require` because the sandbox provides no ES module loader.
-const { contextBridge, ipcRenderer } = require('electron');
+// A sandboxed preload is loaded as CommonJS without type stripping, unlike every other TypeScript
+// entry point in this repository: Electron hands the file straight to the sandboxed loader. The
+// manager therefore strips this file once at startup and points `webPreferences.preload` at the
+// stripped copy, which lets the source itself stay fully typed.
+const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
+
 contextBridge.exposeInMainWorld('serverManager', {
-  action: (action, values) => ipcRenderer.invoke('server-action', action, values),
-  subscribe: callback => ipcRenderer.on('server-state', (event, state) => callback(state))
+  action: (action: string, values: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('server-action', action, values),
+  subscribe: (callback: (state: unknown) => void): void => { ipcRenderer.on('server-state', (_event, state: unknown) => callback(state)); },
 });

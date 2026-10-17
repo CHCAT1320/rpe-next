@@ -20,13 +20,9 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
 
-    // The migration is incremental: modules that arrived from upstream after it began are still
-    // plain JavaScript, so `.ts` files import them by their real `.mjs` path. `allowJs` lets those
-    // imports resolve (without it every one is a TS7016 "no declaration file" error), while
-    // `checkJs` stays off so the un-migrated modules are inferred rather than error-checked. Every
-    // `.ts` file is still fully checked, and each module can be migrated on its own later.
-    "allowJs": true,
-    "checkJs": false,
+    // Every module in the repository is TypeScript now, so JavaScript is neither included nor
+    // resolved: a stray `.js`/`.mjs`/`.cjs` file is a build error rather than a silent fallback.
+    "allowJs": false,
 
     "strict": true,
     "noImplicitOverride": true,
@@ -36,5 +32,5 @@
     "resolveJsonModule": true,
     "jsx": "preserve"
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "test/**/*.ts", "tools/**/*.ts", "*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "test/**/*.ts", "tools/**/*.ts", "collaboration-server/**/*.ts", "desktop/**/*.ts", "*.ts"]
 }
