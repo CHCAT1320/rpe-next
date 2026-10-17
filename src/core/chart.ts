@@ -187,6 +187,8 @@ export function assertChart(chart: unknown): asserts chart is Chart {
     const record = line as Record<string, unknown>;
     const bpmfactor = record.bpmfactor;
     if (bpmfactor !== undefined && (typeof bpmfactor !== 'number' || !Number.isFinite(bpmfactor) || bpmfactor <= 0)) throw new Error(`${path}.bpmfactor 必须大于零`);
+    const anchor = record.anchor;
+    if (anchor !== undefined && (!Array.isArray(anchor) || anchor.length !== 2 || !anchor.every(value => typeof value === 'number' && Number.isFinite(value)))) throw new Error(`${path}.anchor 必须为两个有限数字`);
     const notes: unknown = record.notes;
     if (notes != null && !Array.isArray(notes)) throw new Error(`${path}.notes 必须为数组`);
     for (const [index, note] of (notes ?? []).entries()) {

@@ -124,6 +124,7 @@ button[data-icon]::before { content: ''; display: inline-block; width: 18px; hei
 .asset-folder .asset-folder > summary { padding-left: 16px; }
 .asset-folder:first-child { border-top: 0; }
 .asset-folder > summary { padding: 8px 10px; background: #292929; color: #8dd6ee; font-weight: 600; }
+.asset-folder.selected > summary { box-shadow: inset 3px 0 var(--accent); }
 .asset-folder-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; padding: 7px; }
 .asset-row { display: grid; grid-template-columns: 42px minmax(0, 1fr); grid-template-rows: auto auto; gap: 2px 6px; min-width: 0; padding: 5px; text-align: left; background: #303030; }
 .asset-row.selected { border-color: var(--accent); background: #4d4632; }
@@ -136,6 +137,8 @@ button[data-icon]::before { content: ''; display: inline-block; width: 18px; hei
 .asset-details p { margin: 6px 0; color: #bbb; font-size: 11px; }
 .asset-detail-actions, .asset-editor-controls { display: flex; gap: 6px; align-items: center; }
 .asset-detail-actions button { flex: 1; }
+.asset-detail-actions { flex-wrap: wrap; }
+.asset-detail-actions button { flex-basis: 90px; min-width: 0; }
 .asset-editor-canvas { display: block; width: 100%; max-height: 58vh; object-fit: contain; background: #202020; margin: 6px 0 10px; }
 .asset-editor-controls select { flex: 1; min-width: 0; }
 .asset-editor-controls input[type=range] { flex: 1; }
@@ -422,6 +425,10 @@ h2 { margin: 0; font-size: 21px; font-weight: 400; }
 .project-card h2 { margin: 8px 0; font-size: 18px; overflow-wrap: anywhere; }
 .project-card p { color: #aaa; font-size: 12px; }
 .project-card .project-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.storage-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.storage-draft-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block: 8px; }
+.storage-draft-row > span { min-width: 0; overflow-wrap: anywhere; }
+.storage-draft-row > button { flex: none; }
 .project-card .project-open { width: 100%; padding: 10px; }
 .project-card .project-edit { background: none; border: 0; padding: 0; white-space: normal; text-align: left; }
 @media (max-width: 1250px) {
@@ -737,3 +744,6 @@ details.skin-control-group { display: block; }
 .skin-group-label { font-size: 11px; color: var(--muted); }
 .skin-decoration { display: block; object-fit: contain; max-width: 100%; }
 .editor-skin-preview { display: block; width: calc(100% - 40px); max-height: 180px; object-fit: contain; margin: 12px 20px; }
+.native-storage-migration { position: fixed; inset: 0; z-index: 100000; display: flex; align-items: center; justify-content: center; flex-direction: column; padding: 32px; background: #171c25; color: #eef3fa; text-align: center; gap: 12px; }
+.native-storage-migration p { max-width: 680px; overflow-wrap: anywhere; }
+#storage-status { white-space: pre-wrap; overflow-wrap: anywhere; }

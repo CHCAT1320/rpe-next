@@ -1,6 +1,7 @@
 import { showDialog } from './dialog.ts';
 import { materializeProject, migrationConflicts } from '../platform/migration.ts';
-import { listProjects, storeProject, storePreferences } from '../platform/library.ts';
+import { listProjects, storeProject, storePreferences, readProjectRevision } from '../platform/library.ts';
+import { storageFailure } from '../platform/storage.ts';
 import { download } from '../platform/files.ts';
 import type { MigrationPlan, MigrationProject } from '../platform/migration.ts';
 import type { ProjectSummary } from '../platform/library.ts';
@@ -118,13 +119,10 @@ export function migrationDialog(plan: MigrationPlan, applyPreferences: (preferen
         progress.textContent = `正在迁移 ${index + 1}/${prepared.length}：${entry.project.name}`;
         try {
           const project = await materializeProject(plan, entry.project);
-          // `migrationConflicts` matches by identifier, so a conflict record may be a summary that
-          // carries no `id`. The original copies it regardless (writing `undefined` over the fresh
-          // id); `MaterializedProject.id` is typed `string`, so the overwrite is funnelled through a
-          // widened view rather than guarded, which would have changed the outcome.
-          if (existingProject) (project as { id: string | undefined }).id = existingProject.id;
+          if (existingProject) { const existing = existingProject as { id?: string; storageRevision?: string }; project.id = existing.id ?? project.id; (project as { storageRevision?: string }).storageRevision = existing.storageRevision; }
+          else { const previous = await readProjectRevision(project.id); if (previous?.deleted) (project as { storageRevision?: string }).storageRevision = previous.revision ?? undefined; }
           await storeProject(project); result.imported.push({ source: project.source, bytes: project.bytes, overwritten: Boolean(existingProject), extra: entry.project.extra });
-        } catch (error) { result.failed.push({ path: entry.project.path, message: error instanceof Error ? error.message : String(error) }); }
+        } catch (error) { result.failed.push({ path: entry.project.path, message: storageFailure(error) }); }
       }
       progress.textContent = `已迁移 ${result.imported.length} 个项目，${result.failed.length} 项未迁移${result.skipped?.length ? `，跳过 ${result.skipped.length} 项` : ''}。关闭后点击“谱面库”打开；数据保存在当前浏览器，建议另导出 PEZ。`;
       migrate.textContent = '下载迁移报告'; migrate.disabled = false;
@@ -132,3 +130,4 @@ export function migrationDialog(plan: MigrationPlan, applyPreferences: (preferen
     } catch (error) { progress.textContent = `迁移未完成：${error instanceof Error ? error.message : String(error)}`; }
   };
 }
+

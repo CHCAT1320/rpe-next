@@ -1,6 +1,6 @@
 import { serializeChart, stringifyPreservingNumbers, EVENT_TYPES, EXTENDED_TYPES } from '../core/chart.ts';
 import { parseDocument } from '../core/formats.ts';
-import { readZip, writeZip, crc32 } from './archive.ts';
+import { readZip, writeZip, crc32, inspectZip } from './archive.ts';
 import { decodeLegacy, parseInfo } from './legacy-text.ts';
 import { serializeShaderEvent } from '../core/shader-events.ts';
 import { expandTrajectory } from '../application/trajectory-commands.ts';
@@ -8,7 +8,8 @@ import { TempoMap } from '../core/tempo.ts';
 import { beatValue } from '../core/beat.ts';
 import { NOISE_TRACKS } from '../core/noise-areas.ts';
 import { integerChartAlpha } from '../core/alpha-values.ts';
-import type { ArchiveEntries } from './archive.ts';
+import { chartExportStem, safeExportStem, DownloadNames } from '../core/export-filename.ts';
+import type { ArchiveEntries, ZipDirectory } from './archive.ts';
 import type { Chart, ChartEvent, EventLayer, NoiseArea, TrajectorySplit } from '../core/types.ts';
 
 /** A parsed chart together with the archive path it was found at. */
@@ -23,6 +24,16 @@ export interface OpenedFiles {
   assets: ArchiveEntries;
 }
 
+/**
+ * Import options for {@link openFiles}.
+ *
+ * `confirmLargeArchive` is asked before an archive that exceeds the normal limits is unpacked; a
+ * falsy answer refuses the import rather than silently accepting a decompression bomb.
+ */
+export interface OpenFilesOptions {
+  confirmLargeArchive?: (info: ZipDirectory) => boolean | Promise<boolean>;
+}
+
 /** A chart's resolved song and background, as they should be looked up in the asset map. */
 export interface ResourceReferences {
   song: string;
@@ -35,11 +46,16 @@ export interface ResourceReferences {
  * A single `.pez`/`.zip` is unpacked; otherwise each selected file becomes one entry keyed by its
  * own name, which is how a chart JSON plus its music and illustration are opened together.
  */
-export async function openFiles(fileList: ArrayLike<File> & Iterable<File>): Promise<OpenedFiles | null> {
+export async function openFiles(fileList: ArrayLike<File> & Iterable<File>, { confirmLargeArchive }: OpenFilesOptions = {}): Promise<OpenedFiles | null> {
   const files = [...fileList];
   if (!files.length) return null;
   let assets: ArchiveEntries = new Map();
-  if (files.length === 1 && /\.(pez|zip)$/i.test(files[0].name)) assets = await readZip(await files[0].arrayBuffer());
+  if (files.length === 1 && /\.(pez|zip)$/i.test(files[0].name)) {
+    const buffer = await files[0].arrayBuffer(), info = inspectZip(buffer);
+    const large = info.declaredBytes > 1024 ** 3 || info.largestFile > 512 * 1024 ** 2 || info.count > 20000 || info.largestRatio > 500;
+    if (large && !await confirmLargeArchive?.(info)) throw Object.assign(new Error('谱面包解压后的体积、文件数或压缩倍率过大，已停止导入；确认来源可信后可再次打开并确认。'), { name: 'ArchiveLimitError' });
+    assets = await readZip(buffer, { maxFiles: large ? info.count : 20000, maxBytes: large ? info.declaredBytes : 1024 ** 3, maxFileBytes: large ? info.largestFile : 512 * 1024 ** 2 });
+  }
   else for (const file of files) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));
   const candidates: ChartCandidate[] = [];
   const errors: string[] = [];
@@ -103,7 +119,7 @@ export function assetBytes(assets: ArchiveEntries, name: string, chartName = '')
  * Split out from {@link assetBytes} because export has to write the *name* it resolved rather than
  * the bytes, so both the read and the write paths go through the same lookup.
  */
-function assetPath(assets: ArchiveEntries, name: string, chartName = ''): string | null {
+export function assetPath(assets: ArchiveEntries, name: string, chartName = ''): string | null {
   if (!name) return null;
   const chartPath = chartName.replaceAll('\\', '/');
   const directory = chartPath.includes('/') ? chartPath.slice(0, chartPath.lastIndexOf('/') + 1) : '';
@@ -118,21 +134,27 @@ function assetPath(assets: ArchiveEntries, name: string, chartName = ''): string
   return matches.length === 1 ? matches[0][0] : null;
 }
 
+const downloadNames = new DownloadNames();
+
+/** Suggests a download name without reserving it, so the user can see the final name in a dialog. */
+export const suggestDownloadName = (name: unknown): string => downloadNames.suggest(name);
+
 /** Saves a blob to disk through a temporary anchor, revoking the object URL once it is claimed. */
-export function download(blob: Blob, name: string): void {
+export function download(blob: Blob, name: string): string {
   const link = document.createElement('a');
   const url = URL.createObjectURL(blob);
   link.href = url;
-  link.download = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  link.download = downloadNames.reserve(name);
   document.body.append(link);
   link.click();
   link.remove();
   // Revoking immediately can cancel the download in some browsers, so the URL is held briefly.
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return link.download;
 }
 
 export function exportChart(chart: Chart, name: string): void {
-  download(new Blob([serializeChart(orderedExportChart(chart))], { type: 'application/json' }), name.replace(/\.(pec|pez|zip)$/i, '.json'));
+  download(new Blob([serializeChart(orderedExportChart(chart))], { type: 'application/json' }), chartExportStem(chart, name) + '.json');
 }
 
 /**
@@ -214,7 +236,7 @@ export function legacyChart(chart: Chart, splitSettings: Partial<TrajectorySplit
 }
 
 export function exportLegacyChart(chart: Chart, name: string): void {
-  download(new Blob([serializeChart(legacyChart(chart))], { type: 'application/json' }), name.replace(/\.(json|pec|pez|zip)$/i, '') + '.rpe.json');
+  download(new Blob([serializeChart(legacyChart(chart))], { type: 'application/json' }), chartExportStem(chart, name) + '.rpe.json');
 }
 
 /** Resolves `.`/`..` segments and case, so paths from different archives compare equal. */
@@ -370,7 +392,7 @@ export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: 
 }
 
 export function exportPackage(chart: Chart, assets: ArchiveEntries, chartName: string): void {
-  download(writeZip(packageEntries(chart, assets, chartName)), 'RPE-export.pez');
+  download(writeZip(packageEntries(chart, assets, chartName)), chartExportStem(chart, chartName) + '.pez');
 }
 
 /** A finished export, ready to be handed to `download`. */
@@ -408,7 +430,7 @@ export interface ChartExportOptions {
 }
 
 export function createChartExport(chart: Chart, assets: ArchiveEntries, chartName: string, options: Partial<ChartExportOptions> = {}): ChartExportResult {
-  const { format = 'pez', compatibility = 'next', name = chartName, split = {} } = options;
+  const { format = 'pez', compatibility = 'next', name, split = {} } = options;
   if (!['json', 'pez'].includes(format) || !['next', 'rpe'].includes(compatibility)) throw new Error('导出格式无效');
   // `chartTime` is a scratch field some callers hang off the document; it is optional here so it can
   // be deleted, which is what the original did before serializing.
@@ -416,8 +438,8 @@ export function createChartExport(chart: Chart, assets: ArchiveEntries, chartNam
   if (compatibility === 'rpe' && options.removeGlobalEvents) { source = { ...source }; delete source.globalEvents; }
   const snapshot: Chart & { chartTime?: unknown } = compatibility === 'rpe' ? legacyChart(source, split) : orderedExportChart(chart);
   delete snapshot.chartTime;
-  const stem = String(name).trim().replace(/\.(json|pez|pec|zip)$/i, '');
-  if (!stem) throw new Error('请输入导出文件名');
+  if (name !== undefined && !String(name).trim()) throw new Error('请输入导出文件名');
+  const stem = name === undefined ? chartExportStem(chart, chartName) : safeExportStem(name);
   const blob = format === 'pez' ? writeZip(packageEntries(snapshot, assets, chartName, options)) : new Blob([serializeChart(snapshot, { compact: options.compact !== false })], { type: 'application/json' });
   return { blob, name: stem + '.' + format };
 }

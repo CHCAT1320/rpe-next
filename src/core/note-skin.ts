@@ -176,9 +176,9 @@ export function noteSkinFrame(info: NoteSkinInfo, age: number): NoteSkinFrame | 
   return { index, column: index % info.hitFx[0], row: Math.floor(index / info.hitFx[0]) };
 }
 
-export function holdSkinLayout(info: NoteSkinInfo, image: { width: number; height: number }, highlighted: boolean, head: number, tail: number, width: number): HoldSkinLayout {
+export function holdSkinLayout(info: NoteSkinInfo, image: { width: number; height: number }, highlighted: boolean, head: number, tail: number, width: number, heightWidth = width): HoldSkinLayout {
   const [tailPixels, headPixels] = info[highlighted ? 'holdAtlasMH' : 'holdAtlas'];
-  const scale = width / image.width; const headHeight = headPixels * scale; const tailHeight = tailPixels * scale;
+  const scale = heightWidth / image.width; const headHeight = headPixels * scale; const tailHeight = tailPixels * scale;
   const length = Math.abs(tail - head); const direction = tail <= head ? 1 : -1;
   return { direction, length, scale, headHeight, tailHeight, bodyPixels: image.height - tailPixels - headPixels,
     headY: info.holdCompact ? -headHeight / 2 : 0,

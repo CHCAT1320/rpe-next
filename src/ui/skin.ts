@@ -42,8 +42,9 @@ export interface ResourceNoteSkin {
   dispose(): void;
   drawHit(context: CanvasRenderingContext2D, options: { age: number; x: number; y: number; size: number; rotation: number; color?: Color; seed: number }): boolean;
   noteImage(type: number, highlight?: boolean): SkinImage | undefined;
-  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight?: boolean, color?: Color): boolean;
-  hold(context: CanvasRenderingContext2D, horizontal: number, head: number, tail: number, width: number, highlight?: boolean, showHead?: boolean, color?: Color): boolean;
+  noteScale?(highlight?: boolean): number;
+  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight?: boolean, color?: Color, heightWidth?: number): boolean;
+  hold(context: CanvasRenderingContext2D, horizontal: number, head: number, tail: number, width: number, highlight?: boolean, showHead?: boolean, color?: Color, heightWidth?: number): boolean;
 }
 
 export interface DrawableImage extends SkinImage {
@@ -82,6 +83,7 @@ export class RpeSkin {
   get hitLifetime(): number | undefined { return this.resourcePack?.hitLifetime; }
   drawHit(context: CanvasRenderingContext2D, options: { age: number; x: number; y: number; size: number; rotation: number; color?: Color; seed: number }): boolean { return this.resourcePack?.drawHit(context, options) ?? false; }
   noteImage(type: number, highlight = false): SkinImage | undefined { return this.resourcePack?.noteImage(type, highlight) ?? this.images.get((highlight ? highlights : names)[type as NoteType]); }
+  noteScale(highlight = false): number { return this.resourcePack?.noteScale?.(highlight) ?? 1; }
 
   async load(): Promise<void> {
     // The built-in RPE textures: the two note-head tables above, a handful of named extras, and the
@@ -142,19 +144,19 @@ export class RpeSkin {
     return this.tints.get(key) ?? null;
   }
 
-  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight = false, color?: Color, minimumHeight = 5): boolean {
-    if (this.resourcePack) return this.resourcePack.head(context, type, horizontal, vertical, width, highlight, color);
+  head(context: CanvasRenderingContext2D, type: NoteType, horizontal: number, vertical: number, width: number, highlight = false, color?: Color, minimumHeight = 5, heightWidth = width): boolean {
+    if (this.resourcePack) return this.resourcePack.head(context, type, horizontal, vertical, width, highlight, color, heightWidth);
     const name = (highlight ? highlights : names)[type];
     const picture = this.images.get(name);
     if (!picture) return false;
-    const height = Math.max(minimumHeight, width * (picture.naturalHeight ?? 0) / (picture.naturalWidth ?? 1));
+    const height = Math.max(minimumHeight, heightWidth * (picture.naturalHeight ?? 0) / (picture.naturalWidth ?? 1));
     const customTint = Array.isArray(color) && color.length === 3 && color.every(Number.isFinite) && color.some((value: number): boolean => value !== 255);
     context.drawImage((customTint ? this.tinted(name, color) : picture) as CanvasImageSource, horizontal - width / 2, vertical - height / 2, width, height);
     return true;
   }
 
-  hold(context: CanvasRenderingContext2D, horizontal: number, head: number, tail: number, width: number, highlight = false, showHead = true, color?: Color): boolean {
-    if (this.resourcePack) return this.resourcePack.hold(context, horizontal, head, tail, width, highlight, showHead, color);
+  hold(context: CanvasRenderingContext2D, horizontal: number, head: number, tail: number, width: number, highlight = false, showHead = true, color?: Color, heightWidth = width): boolean {
+    if (this.resourcePack) return this.resourcePack.hold(context, horizontal, head, tail, width, highlight, showHead, color, heightWidth);
     const bodyName = highlight ? 'HoldHL' : this.images.has('Hold3') ? 'Hold3' : 'Hold';
     const body = this.images.get(bodyName);
     const end = this.images.get('HoldEnd');
@@ -163,11 +165,11 @@ export class RpeSkin {
     const headPicture = this.images.get(highlight ? 'HoldHeadHL' : 'HoldHead');
     const customTint = Array.isArray(color) && color.length === 3 && color.every(Number.isFinite) && color.some((value: number): boolean => value !== 255);
     const texture = (name: string): DrawableImage | null | undefined => customTint ? this.tinted(name, color) : this.images.get(name);
-    const unit = width / (body.naturalWidth ?? 1);
+    const unit = width / (body.naturalWidth ?? 1), unitY = heightWidth / (body.naturalWidth ?? 1);
     context.save(); context.translate(horizontal, head); context.scale(1, direction);
     context.drawImage(texture(bodyName) as CanvasImageSource, -width / 2, -Math.abs(tail - head), width, Math.max(1, Math.abs(tail - head)));
-    if (end) context.drawImage(texture('HoldEnd') as CanvasImageSource, -(end.naturalWidth ?? 0) * unit / 2, -Math.abs(tail - head) - (end.naturalHeight ?? 0) * unit, (end.naturalWidth ?? 0) * unit, (end.naturalHeight ?? 0) * unit);
-    if (showHead && headPicture) context.drawImage(texture(highlight ? 'HoldHeadHL' : 'HoldHead') as CanvasImageSource, -(headPicture.naturalWidth ?? 0) * unit / 2, 0, (headPicture.naturalWidth ?? 0) * unit, (headPicture.naturalHeight ?? 0) * unit);
+    if (end) context.drawImage(texture('HoldEnd') as CanvasImageSource, -(end.naturalWidth ?? 0) * unit / 2, -Math.abs(tail - head) - (end.naturalHeight ?? 0) * unitY, (end.naturalWidth ?? 0) * unit, (end.naturalHeight ?? 0) * unitY);
+    if (showHead && headPicture) context.drawImage(texture(highlight ? 'HoldHeadHL' : 'HoldHead') as CanvasImageSource, -(headPicture.naturalWidth ?? 0) * unit / 2, 0, (headPicture.naturalWidth ?? 0) * unit, (headPicture.naturalHeight ?? 0) * unitY);
     context.restore();
     return true;
   }

@@ -106,6 +106,7 @@ export interface Editor {
   readonly preferences: any; readonly editorPreferences: any;
   readonly chartName: string; readonly hasDocument: boolean;
   readonly home: boolean; readonly activePane: string; readonly dirty: boolean;
+  /** Backend-neutral record. id and storageRevision are opaque identifiers, not paths. */
   readonly libraryProject: any;
   loop: {start: number; end: number} | null;
   audio: any; playback: any; preview: any; realtimePreview: any; timeline: any;
@@ -116,6 +117,7 @@ export interface Editor {
   chartSeconds(): number; offsetSeconds(): number; currentBeat(): number;
   invalidate(): void; render(): void;
   notify(message: string, level?: string): void;
+  /** Await the active save queue; rejects on write/conflict errors. New edits can remain dirty. */
   save(): Promise<unknown>;
   activatePane(name: string): void;
   commit(label: string, chart: any): unknown;
@@ -161,11 +163,14 @@ export interface ModApi {
   style(css: string): HTMLStyleElement;
   settings: {
     get(key: string): boolean | number | string;
+    /** Validates and updates; desktop file persistence is queued separately. */
     set(key: string, value: boolean | number | string): Promise<void>;
     onChange(callback: (change: {key: string; value: boolean | number | string}) => unknown): Dispose;
   };
   storage: {
+    /** Personal mod data in the current browser origin or desktop library, outside the chart. */
     read<T = Record<string, unknown>>(fallback?: T): T;
+    /** Synchronous API; desktop persistence runs in the background. Awaiting void does not flush it. */
     write(value: unknown): void; clear(): void;
   };
   package: {

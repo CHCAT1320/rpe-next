@@ -2,6 +2,8 @@
 // the named favourites. Everything here is persisted to `localStorage` and read back from it, so
 // the shapes stay loose and `parameters` below re-validates every field before it is copied.
 
+import { localPreferences } from '../platform/local-preferences.ts';
+
 const storageKey = 'rpe-next-multi-edit-v1';
 const kinds = ['notes', 'events'] as const;
 
@@ -104,7 +106,7 @@ export class MultiEditParameters {
   history: Record<BatchKind, BatchParameters[]>;
   saved: Record<BatchKind, SavedBatchParameters[]>;
 
-  constructor(storage: BatchParameterStorage = globalThis.localStorage, onError: (message: string) => void = () => {}) {
+  constructor(storage: BatchParameterStorage = localPreferences, onError: (message: string) => void = () => {}) {
     // The loop below writes both kinds into every record, so the empty literals only stand in for
     // the entries that are filled immediately afterwards.
     this.storage = storage; this.onError = onError; this.drafts = {} as Record<BatchKind, BatchParameters>; this.history = {} as Record<BatchKind, BatchParameters[]>; this.saved = {} as Record<BatchKind, SavedBatchParameters[]>;

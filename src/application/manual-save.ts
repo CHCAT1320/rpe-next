@@ -22,7 +22,7 @@ export function scheduleSave(callback: () => void): void {
 export class ManualSaveQueue<Project> {
   write: (project: Project) => Promise<unknown> | unknown;
   schedule: (callback: () => void) => void;
-  pending: Map<unknown, Promise<Project>>;
+  pending: Map<unknown, { latest: any; next: any; promise: Promise<Project> }>;
 
   constructor(write: (project: Project) => Promise<unknown> | unknown, schedule: (callback: () => void) => void = scheduleSave) {
     this.write = write;
@@ -31,16 +31,37 @@ export class ManualSaveQueue<Project> {
   }
 
   save<Snapshot extends { project: Project }>(owner: unknown, capture: () => Snapshot, complete: (snapshot: Snapshot) => void): Promise<Project> {
-    const existing = this.pending.get(owner);
-    if (existing) return existing;
-    const snapshot = capture();
+    const pending = this.pending.get(owner);
+    if (pending) {
+      const next = capture() as any, previous = pending.latest;
+      const assets = next.project.assets ?? [], oldAssets = previous.project.assets ?? [];
+      const folders = next.project.assetFolders ?? [], oldFolders = previous.project.assetFolders ?? [];
+      if (next.document !== previous.document || assets.length !== oldAssets.length || assets.some(([name, bytes]: [string, unknown], index: number) => oldAssets[index]?.[0] !== name || oldAssets[index]?.[1] !== bytes)
+        || folders.length !== oldFolders.length || folders.some((name: string, index: number) => oldFolders[index] !== name)) pending.next = pending.latest = next;
+      return pending.promise;
+    }
+    const snapshot = capture() as any;
+    const entry: { latest: any; next: any; promise: Promise<Project> } = { latest: snapshot, next: null, promise: Promise.resolve(undefined as unknown as Project) };
     const operation = new Promise<Project>((resolve, reject) => {
       this.schedule(async () => {
-        try { await this.write(snapshot.project); complete(snapshot); resolve(snapshot.project); }
+        try {
+          let current = snapshot;
+          while (current) {
+            await this.write(current.project);
+            complete(current);
+            const next = entry.next; entry.next = null;
+            if (next) {
+              next.project.id = current.project.id;
+              next.project.storageRevision = current.project.storageRevision;
+            }
+            if (!next) resolve(current.project);
+            current = next;
+          }
+        }
         catch (error) { reject(error); }
       });
     }).finally(() => this.pending.delete(owner));
-    this.pending.set(owner, operation);
+    entry.promise = operation; this.pending.set(owner, entry);
     return operation;
   }
 }

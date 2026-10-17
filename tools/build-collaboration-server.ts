@@ -14,7 +14,7 @@ const application = join(output, 'resources', 'app');
 // `src/core` is copied wholesale rather than listed file by file: the server's imports there form a
 // self-contained closure (no relative import in `src/core` points outside it), and those modules are
 // TypeScript, which Electron's main process type-strips on load just as Node does.
-const serverFiles = ['server.ts', 'asset-store.ts', 'manager.ts', 'preload.ts', 'manager.html', 'manager.css', 'manager-renderer.ts', 'package.json', 'README.md', 'node_modules/ws'];
+const serverFiles = ['server.ts', 'asset-store.ts', 'manager.ts', 'diagnostics.ts', 'preload.ts', 'manager.html', 'manager.css', 'manager-renderer.ts', 'package.json', 'README.md', 'node_modules/ws'];
 for (const name of [...serverFiles.map(name => `collaboration-server/${name}`), 'src/core', 'LICENSE', 'NOTICE']) { await mkdir(dirname(join(application, name)), { recursive: true }); await cp(join(root, name), join(application, name), { recursive: true }); }
 await cp(join(root, 'collaboration-server/README.md'), join(output, 'README.md'));
 await writeFile(join(application, 'package.json'), JSON.stringify({ name: 'rpe-next-collaboration-server', version: '0.1.0', main: 'collaboration-server/manager.ts', author: 'cmdysj', license: 'PolyForm-Noncommercial-1.0.0' }));

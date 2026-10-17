@@ -1,6 +1,8 @@
 import { readZip, writeZip } from './archive.ts';
 import { parseNoteSkin, serializeNoteSkinInfo, NOTE_SKIN_LIMITS } from '../core/note-skin.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import { openDatabase, ensureStore } from './storage.ts';
+import { nativeStorage, nativePackages } from './native.ts';
 import type { NoteSkinInfo, NoteSkinRecord } from '../core/note-skin.ts';
 
 export interface StoredNoteSkin {
@@ -20,11 +22,7 @@ export interface ImportFile {
 export type ImportFiles = FileList | readonly ImportFile[];
 
 async function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('rpe-next-note-skins', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('packages', { keyPath: 'id' });
-    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-  });
+  const database = await openDatabase('rpe-next-note-skins', 1, (connection, transaction) => ensureStore(connection, transaction!, 'packages', { keyPath: 'id' }));
   return new Promise<T>((resolve, reject) => {
     const transaction = database.transaction('packages', mode); let request: IDBRequest<T>;
     try { request = action(transaction.objectStore('packages')); } catch (error) { database.close(); reject(error); return; }
@@ -32,9 +30,9 @@ async function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStor
     transaction.onabort = transaction.onerror = () => { database.close(); reject(transaction.error ?? new Error('皮肤存储失败')); };
   });
 }
-export const readNoteSkins = (): Promise<StoredNoteSkin[]> => access('readonly', store => store.getAll());
-export const storeNoteSkin = (record: NoteSkinRecord): Promise<IDBValidKey> => access('readwrite', store => store.put({ id: record.id, files: [...record.files], originalFiles: [...(record.originalFiles ?? record.files)], imported: Date.now() }));
-export const deleteNoteSkin = (id: string): Promise<undefined> => access('readwrite', store => store.delete(id));
+export const readNoteSkins = (): Promise<StoredNoteSkin[]> => nativeStorage ? nativePackages('note-skins', 'read') as Promise<StoredNoteSkin[]> : access('readonly', store => store.getAll());
+export const storeNoteSkin = (record: NoteSkinRecord): Promise<unknown> => { const stored: StoredNoteSkin = { id: String(record.id ?? ''), files: [...record.files], originalFiles: [...(record.originalFiles ?? record.files)], imported: Date.now() }; return nativeStorage ? nativePackages('note-skins', 'write', stored.id, stored) : access('readwrite', store => store.put(stored)); };
+export const deleteNoteSkin = (id: string): Promise<unknown> => nativeStorage ? nativePackages('note-skins', 'delete', id) : access('readwrite', store => store.delete(id));
 export const exportNoteSkin = (record: NoteSkinRecord): Blob => writeZip(record.files);
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);

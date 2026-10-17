@@ -147,6 +147,15 @@ interface LineTextEventSource {
  */
 type ShaderPass = Omit<ShaderEffectRecord, 'shader'> & { shader: string; sourceName: string };
 
+/** One text-track layout: its wrapped lines and the metrics used to place them. */
+interface LineTextLayout {
+  lines: string[];
+  width: number;
+  height: number;
+  lineHeight: number;
+  ascent: number;
+}
+
 /**
  * One note's clickable capsule in canvas pixels.
  *
@@ -213,6 +222,10 @@ export class Preview {
    * head's screen point and its tail's, plus the radius the hit test allows.
    */
   noteHitAreas: NoteHitArea[];
+  /** Text-track layouts cached by their text, cleared when a font finishes loading. */
+  lineTextLayouts: Map<string, LineTextLayout>;
+  /** The scratch context used to measure text, created lazily from the fallback context. */
+  lineTextMeasure?: CanvasRenderingContext2D | null;
   /** The scale the last frame was drawn with; read by projection mods. */
   viewScale?: number;
   /** Enables the extra collision geometry mods read from `noteHitAreas`. */
@@ -275,7 +288,7 @@ export class Preview {
   /** The chart, the compiled scene and everything the last frame computed, for `pick` and `drawGuides`. */
   chart?: Chart;
   guides?: LineGuide[];
-  viewport?: PreviewViewport;
+  viewport?: PreviewViewport | null;
   selectedLine?: number;
   /**
    * The noise area `noise-area.ts` has focused, or `-1` for none.
@@ -294,6 +307,8 @@ export class Preview {
     this.noisePreview = new NoisePreview();
     this.allLines = true; this.visible = false; this.noteSize = 175; this.lineScale = 1.5; this.backgroundAlpha = 0.35; this.backgroundBlur = 10.5; this.effectsSince = Infinity; this.applyShaders = true; this.opacity = 1; this.showHitEffects = true;
     this.noteHitAreas = [];
+    this.lineTextLayouts = new Map();
+    if (typeof document !== 'undefined') document.fonts?.addEventListener('loadingdone', () => { this.lineTextLayouts.clear(); this.invalidate?.(); });
     if (typeof document === 'undefined') { this.overlayCanvas = null; this.shaderCanvas = null; return; }
     this.overlayCanvas = document.createElement('canvas'); this.shaderCanvas = document.createElement('canvas');
     for (const [layer, canvasLayer] of [['shader', this.shaderCanvas], ['overlay', this.overlayCanvas]] as const) {
@@ -304,6 +319,17 @@ export class Preview {
 
   draw(chart: Chart, tempo: TempoMap, seconds: number, selectedLine: number): void {
     if (!this.visible) return;
+    const rectangle = this.canvas.getBoundingClientRect();
+    if (!(rectangle.width > 0 && rectangle.height > 0)) {
+      // A live preview may be temporarily stashed or hidden by a mod. Keep its backing
+      // store intact and avoid feeding zero-size surfaces into background/shader passes.
+      this.noteHitAreas = []; this.guides = []; this.viewport = null;
+      this.noisePreview.guides = []; this.noisePreview.hitEntries = [];
+      for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer) layer.style.visibility = 'hidden';
+      return;
+    }
+    // Auxiliary surfaces belong to the preview even when its live canvas is relocated.
+    for (const layer of [this.shaderCanvas, this.overlayCanvas]) if (layer && layer.parentElement !== this.canvas.parentElement) this.canvas.after(layer);
     this.chart = chart;
     if (this.scene.chart !== chart || this.scene.tempo !== tempo) {
       this.scene.compile(chart, tempo); this.simultaneous = simultaneousNotes(chart, tempo);
@@ -311,7 +337,7 @@ export class Preview {
       this.passes = renderPasses(chart.judgeLineList, this.scene.order);
       this.shaderRuntime.compile(chart, tempo);
     }
-    const { context, width, height } = prepareCanvas(this.canvas);
+    const { context, width, height } = prepareCanvas(this.canvas, rectangle);
     const viewport = previewViewport(width, height, this.aspectRatio ?? 1.5);
     const divisor = this.viewDivisor ?? 1;
     const scale = viewport.scale / divisor;
@@ -401,7 +427,10 @@ export class Preview {
         if ((note.type === 2) !== (pass.kind === 'hold')) continue;
         const position = runtime.noteState(entry, state, seconds);
         if (position.alpha <= 0 || position.size === 0) continue;
-        const noteWidth = this.noteSize * scale * position.size;
+        const highlight = this.highlight !== false && this.simultaneous?.has(note) === true;
+        const textureScale = this.skin?.noteScale?.(highlight) ?? 1;
+        const baseNoteWidth = this.noteSize * scale * position.size, baseHeightWidth = this.noteSize * scale * ((position as typeof position & { sizeY?: number }).sizeY ?? 1);
+        const noteWidth = baseNoteWidth * textureScale, heightWidth = baseHeightWidth * textureScale;
         const horizontal = position.x * scale;
         const rotation = state.rotation * Math.PI / 180;
         const worldX = state.x + position.x * Math.cos(rotation) + position.y * Math.sin(rotation);
@@ -413,18 +442,18 @@ export class Preview {
         const tailWorldY = -state.y + position.x * Math.sin(rotation) - tail * Math.cos(rotation);
         const tailX = originX + tailWorldX * scale, tailY = originY + tailWorldY * scale;
         if (cullNotes) {
-          const aspectKey = note.type * 2 + Number(this.highlight !== false && this.simultaneous?.has(note) === true);
+          const aspectKey = note.type * 2 + Number(highlight);
           let aspect = noteAspects.get(aspectKey);
           if (aspect === undefined) { const image = this.skin?.noteImage?.(note.type, Boolean(aspectKey % 2)); aspect = image ? ((image.naturalHeight ?? image.height ?? 0) / (image.naturalWidth ?? image.width ?? 1)) : note.type === 2 ? 1 : 0.12; noteAspects.set(aspectKey, aspect); }
-          const padding = Math.max(12, Math.abs(noteWidth) * (1 + aspect * (1 + Math.abs(Math.tan(position.skew * Math.PI / 180)))));
+          const padding = Math.max(12, Math.abs(noteWidth) + Math.abs(heightWidth) * aspect * (1 + Math.abs(Math.tan(position.skew * Math.PI / 180))));
           if (Math.max(screenX, tailX) + padding < viewport.left || Math.min(screenX, tailX) - padding > viewport.left + viewport.width ||
               Math.max(screenY, tailY) + padding < viewport.top || Math.min(screenY, tailY) - padding > viewport.top + viewport.height) continue;
         }
         const hitArea: NoteHitArea = { lineIndex: index, noteIndex: entry.index, type: note.type, x1: screenX, y1: screenY, x2: tailX, y2: tailY, radius: Math.max(12, noteWidth * 0.65) };
         if (this.collisionGeometry) {
-          const outline = this.skin?.noteImage?.(note.type, this.highlight !== false && this.simultaneous?.has(note) === true);
+          const outline = this.skin?.noteImage?.(note.type, highlight);
           const aspect = outline ? (outline.naturalHeight ?? outline.height ?? 0) / (outline.naturalWidth ?? outline.width ?? 1) : 0.12;
-          const halfHeight = Math.max(this.skin?.resourcePack ? 0 : 2.5, Math.abs(noteWidth) * aspect / 2);
+          const halfHeight = Math.max(this.skin?.resourcePack ? 0 : 2.5, Math.abs(heightWidth) * aspect / 2);
           const cosine = Math.cos(rotation), sine = Math.sin(rotation), skew = Math.tan(position.skew * Math.PI / 180);
           hitArea.collisionWidth = Math.abs(noteWidth); hitArea.collisionHeight = halfHeight * 2; hitArea.rotation = rotation;
           hitArea.polygon = note.type === 2 ? null : [[-noteWidth / 2, -halfHeight], [noteWidth / 2, -halfHeight], [noteWidth / 2, halfHeight], [-noteWidth / 2, halfHeight]].map(([dx, dy]) => ({ x: screenX + ((dx ?? 0) + (dy ?? 0) * skew) * cosine - (dy ?? 0) * sine, y: screenY + ((dx ?? 0) + (dy ?? 0) * skew) * sine + (dy ?? 0) * cosine }));
@@ -435,8 +464,7 @@ export class Preview {
         const tint = (note.tint ?? note.color) as RgbColor | undefined;
         context.fillStyle = Array.isArray(tint) ? `rgb(${tint.join(',')})` : NOTE_COLORS[note.type];
         let drawnHold = false;
-        const highlight = this.highlight !== false && this.simultaneous?.has(note) === true;
-        if (note.type === 2) drawnHold = this.skin?.hold(context, horizontal, -position.y * scale, -position.tail * scale, noteWidth, highlight, position.showHead, tint) ?? false;
+        if (note.type === 2) drawnHold = this.skin?.hold(context, horizontal, -position.y * scale, -position.tail * scale, baseNoteWidth, highlight, position.showHead, tint, baseHeightWidth) ?? false;
         if (note.type === 2 && !drawnHold) {
           context.globalAlpha *= 0.55;
           context.fillRect(horizontal - noteWidth / 2, -position.tail * scale, noteWidth, (position.tail - position.y) * scale);
@@ -445,7 +473,7 @@ export class Preview {
         if (position.showHead && !drawnHold) {
           context.translate(horizontal, -position.y * scale);
           context.transform(1, 0, Math.tan(position.skew * Math.PI / 180), 1, 0, 0);
-          if (!this.skin?.head(context, note.type as NoteType, 0, 0, noteWidth, highlight, tint)) context.fillRect(-noteWidth / 2, -2, noteWidth, 4);
+          if (!this.skin?.head(context, note.type as NoteType, 0, 0, baseNoteWidth, highlight, tint, 5, baseHeightWidth)) context.fillRect(-noteWidth / 2, -2, noteWidth, 4);
         }
         context.restore();
       }
@@ -569,14 +597,18 @@ export class Preview {
   }
 
   drawLine(context: CanvasRenderingContext2D, line: JudgeLineSource, state: TintedLineState, scale: number): void {
+    const anchor = line.anchor ?? [0.5, 0.5];
     context.save();
     context.scale(state.scaleX, state.scaleY);
     context.globalAlpha = clamp(state.alpha / 255);
     context.fillStyle = `rgb(${state.color.map(value => Math.round(Math.max(0, Math.min(255, value)))).join(',')})`;
     if ((line.extended?.textEvents as LineTextEventSource[] | undefined)?.length) {
       context.font = `${52 * scale}px RPE, sans-serif`;
-      context.textAlign = 'center'; context.textBaseline = 'middle';
-      context.fillText(state.text, 0, 0);
+      context.textAlign = 'left'; context.textBaseline = 'alphabetic';
+      const layout = this.lineTextLayout(state.text, context);
+      context.font = `${52 * scale}px RPE, sans-serif`;
+      const left = -layout.width * (anchor[0] ?? 0) * scale, top = -layout.height * (1 - (anchor[1] ?? 0)) * scale;
+      layout.lines.forEach((text, index) => context.fillText(text, left, top + (layout.ascent + index * layout.lineHeight) * scale));
     } else {
       const defaultLine = !line.Texture || line.Texture === 'line.png';
       const descriptor = !defaultLine ? this.images?.describe?.(line.Texture) : null;
@@ -595,19 +627,36 @@ export class Preview {
       const texture = (defaultLine ? this.skin?.tinted('line', state.color) : this.skin?.tintedSource(`line:${line.Texture}`, source, state.color)) as TintDrawable | null | undefined;
       if (defaultLine) {
         const height = DEFAULT_LINE_HEIGHT * this.lineScale * scale;
-        if (texture) context.drawImage(texture as CanvasImageSource, -DEFAULT_LINE_WIDTH * scale / 2, -height / 2, DEFAULT_LINE_WIDTH * scale, height);
-        else context.fillRect(-DEFAULT_LINE_WIDTH * scale / 2, -height / 2, DEFAULT_LINE_WIDTH * scale, height);
+        const left = -DEFAULT_LINE_WIDTH * scale * (anchor[0] ?? 0), top = -height * (1 - (anchor[1] ?? 0));
+        if (texture) context.drawImage(texture as CanvasImageSource, left, top, DEFAULT_LINE_WIDTH * scale, height);
+        else context.fillRect(left, top, DEFAULT_LINE_WIDTH * scale, height);
       } else if (texture && rawTexture) {
-        const anchor = line.anchor ?? [0.5, 0.5];
         // `naturalWidth`/`naturalHeight` are optional on a texture record and `width`/`height` are
         // read off the same picture, so the union of the two has no guaranteed member; the binding
         // is typed as the number the original passed to `drawImage` in every case. A record missing
         // both keeps producing `undefined` here, which `drawImage` treats as it always did.
         const width = (rawTexture.naturalWidth ?? rawTexture.width) as number;
         const height = (rawTexture.naturalHeight ?? rawTexture.height) as number;
-        context.drawImage(texture as CanvasImageSource, -width * anchor[0] * scale, -height * (1 - anchor[1]) * scale, width * scale, height * scale);
+        context.drawImage(texture as CanvasImageSource, -width * (anchor[0] ?? 0) * scale, -height * (1 - (anchor[1] ?? 0)) * scale, width * scale, height * scale);
       }
     }
     context.restore();
+  }
+
+  lineTextLayout(value: unknown, fallbackContext: CanvasRenderingContext2D): LineTextLayout {
+    const text = String(value ?? '');
+    const cached = this.lineTextLayouts.get(text);
+    if (cached) return cached;
+    this.lineTextMeasure ??= typeof document === 'undefined' ? fallbackContext : document.createElement('canvas').getContext('2d');
+    const context = this.lineTextMeasure!;
+    context.font = '52px RPE, sans-serif'; context.textAlign = 'left'; context.textBaseline = 'alphabetic';
+    const lines = text.split(/\r?\n/), metrics = lines.map(line => context.measureText(line));
+    const ascent = metrics.reduce((maximum, metric) => Math.max(maximum, metric.fontBoundingBoxAscent ?? metric.actualBoundingBoxAscent ?? 41.6), 0);
+    const descent = metrics.reduce((maximum, metric) => Math.max(maximum, metric.fontBoundingBoxDescent ?? metric.actualBoundingBoxDescent ?? 10.4), 0);
+    const lineHeight = Math.max(1, ascent + descent);
+    if (this.lineTextLayouts.size >= 128) this.lineTextLayouts.delete(this.lineTextLayouts.keys().next().value!);
+    const layout: LineTextLayout = { lines, width: metrics.reduce((maximum, metric) => Math.max(maximum, metric.width), 0), height: lineHeight * lines.length, lineHeight, ascent };
+    this.lineTextLayouts.set(text, layout);
+    return layout;
   }
 }

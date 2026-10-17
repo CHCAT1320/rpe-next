@@ -34,6 +34,26 @@ function checkPath(name: string): void {
   }
 }
 
+/** One central-directory entry, with the byte range that holds its contents. */
+export interface ZipEntry {
+  name: string;
+  method: number;
+  checksum: number;
+  size: number;
+  compressedSize: number;
+  dataOffset: number;
+}
+
+/** The parsed central directory, before any entry is inflated. */
+export interface ZipDirectory {
+  entries: ZipEntry[];
+  count: number;
+  declaredBytes: number;
+  largestFile: number;
+  largestRatio: number;
+  compressedBytes: number;
+}
+
 /** Optional limits applied while reading, used to reject oversized skin packages. */
 export interface ReadZipLimits {
   maxFiles?: number;
@@ -41,8 +61,8 @@ export interface ReadZipLimits {
   maxFileBytes?: number;
 }
 
-/** Reads a ZIP archive into a map of entry name to uncompressed bytes. */
-export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity }: ReadZipLimits = {}): Promise<ArchiveEntries> {
+/** Reads the central directory without inflating any entry. */
+export function inspectZip(buffer: ArrayBuffer | Uint8Array): ZipDirectory {
   const bytes = new Uint8Array(buffer as ArrayBuffer);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let trailer = -1;
@@ -53,10 +73,9 @@ export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Inf
   }
   if (trailer < 0) throw new Error('无效 ZIP/PEZ 目录');
   const count = view.getUint16(trailer + 10, true);
-  if (count > maxFiles) throw new Error('ZIP 文件数量超限');
   if (view.getUint16(trailer + 4, true) || view.getUint16(trailer + 6, true) || count === 0xffff || view.getUint32(trailer + 12, true) === ZIP64_MARKER || view.getUint32(trailer + 16, true) === ZIP64_MARKER) throw new Error('不支持分卷或 ZIP64');
-  const files: ArchiveEntries = new Map();
-  let offset = view.getUint32(trailer + 16, true); let declaredBytes = 0;
+  const entries: ZipEntry[] = [], names = new Set<string>();
+  let offset = view.getUint32(trailer + 16, true), declaredBytes = 0, largestFile = 0, largestRatio = 0;
   for (let index = 0; index < count; index++) {
     if (offset + 46 > trailer || view.getUint32(offset, true) !== 0x02014b50) throw new Error('ZIP 目录损坏');
     const flags = view.getUint16(offset + 8, true);
@@ -65,7 +84,8 @@ export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Inf
     const compressedSize = view.getUint32(offset + 20, true);
     const size = view.getUint32(offset + 24, true);
     declaredBytes += size;
-    if (size > maxFileBytes || declaredBytes > maxBytes) throw new Error('ZIP 解压后大小超限');
+    largestFile = Math.max(largestFile, size);
+    if (size > 32 * 1024 * 1024) largestRatio = Math.max(largestRatio, size / Math.max(1, compressedSize));
     const nameSize = view.getUint16(offset + 28, true);
     const extraSize = view.getUint16(offset + 30, true);
     const commentSize = view.getUint16(offset + 32, true);
@@ -77,11 +97,25 @@ export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Inf
     // signal that only by leaving the language-encoding flag clear.
     const name = (flags & 0x800 ? decoder : new TextDecoder('gb18030')).decode(nameBytes);
     checkPath(name);
-    if (files.has(name)) throw new Error(`ZIP 重复文件名：${name}`);
+    if (names.has(name)) throw new Error(`ZIP 重复文件名：${name}`);
+    names.add(name);
     if (localOffset + 30 > bytes.length || view.getUint32(localOffset, true) !== 0x04034b50) throw new Error('ZIP 文件头损坏');
     const dataOffset = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
     if (dataOffset + compressedSize > offset) throw new Error('ZIP 文件内容越界');
-    let contents = bytes.slice(dataOffset, dataOffset + compressedSize);
+    if (method === 0 && size !== compressedSize) throw new Error('ZIP 解压大小与目录不一致');
+    entries.push({ name, method, checksum, size, compressedSize, dataOffset });
+    offset += 46 + nameSize + extraSize + commentSize;
+  }
+  return { entries, count, declaredBytes, largestFile, largestRatio, compressedBytes: bytes.length };
+}
+
+/** Reads a ZIP archive into a map of entry name to uncompressed bytes. */
+export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity }: ReadZipLimits = {}): Promise<ArchiveEntries> {
+  const bytes = new Uint8Array(buffer as ArrayBuffer), directory = inspectZip(buffer), files: ArchiveEntries = new Map();
+  if (directory.count > maxFiles) throw new Error('ZIP 文件数量超限');
+  if (directory.declaredBytes > maxBytes || directory.largestFile > maxFileBytes) throw new Error('ZIP 解压后大小超限');
+  for (const { name, method, checksum, size, compressedSize, dataOffset } of directory.entries) {
+    let contents = method === 0 ? bytes.slice(dataOffset, dataOffset + compressedSize) : bytes.subarray(dataOffset, dataOffset + compressedSize);
     if (method === 8) {
       const reader = new Blob([contents as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
       const chunks: Uint8Array[] = [];
@@ -101,9 +135,38 @@ export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Inf
     } else if (method !== 0) throw new Error(`不支持 ZIP 压缩方式 ${method}`);
     if (contents.length !== size || crc32(contents) !== checksum) throw new Error(`ZIP 校验失败：${name}`);
     files.set(name, contents);
-    offset += 46 + nameSize + extraSize + commentSize;
   }
   return files;
+}
+
+/** Writes entries as a stored (uncompressed) ZIP archive, streaming any `Blob` contents. */
+export async function writeBlobZip(files: Map<string, Uint8Array | Blob>): Promise<Blob> {
+  if (files.size >= 0xffff) throw new Error('此文件数量需要 ZIP64，暂不支持');
+  const records: BlobPart[] = [], directories: Uint8Array[] = []; let offset = 0;
+  for (const [name, source] of files) {
+    checkPath(name); const blob = source instanceof Blob ? source : new Blob([source as BlobPart]);
+    const nameBytes = encoder.encode(name);
+    if (nameBytes.length > 65535 || blob.size >= ZIP64_MARKER || offset + 30 + nameBytes.length + blob.size >= ZIP64_MARKER) throw new Error('此备份包需要 ZIP64，请分批导出项目');
+    let crc = 0xffffffff, processed = 0; const reader = blob.stream().getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        for (const byte of value as Uint8Array) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8);
+        processed += (value as Uint8Array).length;
+        if (processed >= 4 * 1024 ** 2) { processed = 0; await new Promise(resolve => setTimeout(resolve, 0)); }
+      }
+    } finally { reader.releaseLock(); }
+    const record = new Uint8Array(30 + nameBytes.length), view = new DataView(record.buffer);
+    view.setUint32(0, 0x04034b50, true); view.setUint16(4, 20, true); view.setUint16(6, 0x800, true);
+    view.setUint32(14, (crc ^ 0xffffffff) >>> 0, true); view.setUint32(18, blob.size, true); view.setUint32(22, blob.size, true); view.setUint16(26, nameBytes.length, true); record.set(nameBytes, 30);
+    const directory = new Uint8Array(46 + nameBytes.length), central = new DataView(directory.buffer);
+    central.setUint32(0, 0x02014b50, true); central.setUint16(4, 20, true); directory.set(record.subarray(4, 30), 6); central.setUint32(42, offset, true); directory.set(nameBytes, 46);
+    records.push(record, blob); directories.push(directory); offset += record.length + blob.size;
+  }
+  const trailer = new Uint8Array(22), view = new DataView(trailer.buffer), size = directories.reduce((sum, entry) => sum + entry.length, 0);
+  if (offset + size >= ZIP64_MARKER) throw new Error('此备份包需要 ZIP64，请分批导出项目');
+  view.setUint32(0, 0x06054b50, true); view.setUint16(8, files.size, true); view.setUint16(10, files.size, true); view.setUint32(12, size, true); view.setUint32(16, offset, true);
+  return new Blob([...records, ...directories.map(entry => entry as BlobPart), trailer as BlobPart], { type: 'application/zip' });
 }
 
 /** Writes entries as a stored (uncompressed) ZIP archive. */

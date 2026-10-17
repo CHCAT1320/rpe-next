@@ -34,6 +34,12 @@ await cp(join(root, 'desktop'), join(application, 'desktop'), { recursive: true 
 const policy = join(application, 'src', 'core');
 await mkdir(policy, { recursive: true });
 await cp(join(root, 'src', 'core', 'collaboration-policy.ts'), join(policy, 'collaboration-policy.ts'));
+// The packaged shell resolves its smoke probes from the application root, not from the served
+// build, so those TypeScript helpers travel with the package.
+for (const name of ['tools/smoke-mods.ts', 'tools/smoke-native.ts', 'tools/smoke-asset-library.ts', 'tools/smoke-settings-renderer.ts', 'tools/smoke-saving.ts']) {
+  await mkdir(dirname(join(application, name)), { recursive: true });
+  await cp(join(root, name), join(application, name), { recursive: true });
+}
 await writeFile(join(application, 'package.json'), JSON.stringify({
   name: metadata.name, version: metadata.version, author: metadata.author, license: metadata.license,
   description: metadata.description, main: 'desktop/main.ts'
@@ -44,7 +50,12 @@ await writeFile(join(output, '使用说明.txt'), '\uFEFF' + [
   '',
   '解压整个文件夹，双击 RePhiEdit-Next.exe；无需另装 Node.js 或浏览器。',
   '请保留同目录下全部文件，不能单独移动 exe。',
-  '谱面、配置和自动备份保存在 %APPDATA%\\rpe-next-desktop。',
+  '谱面库默认保存在系统“文档”目录的 RePhiEdit Next/Library；可在设置 → 本地存储中查看和迁移位置。',
+  '音乐、曲绘等素材独立去重保存，设置、皮肤、模组及恢复记录随库保存。%APPDATA%\\rpe-next-desktop 保留运行配置、缓存和库位置。',
+  '同一 Windows 用户更新或移动程序后自动继承设置和谱面库；不需要把设置复制进新版程序目录。',
+  '谱面信息中的“打开谱面所在文件夹”可打开已保存项目的本地存档目录。',
+  '旧桌面数据首次启动时自动复制并校验，旧数据库保留；中断后下次继续。',
+  '删除项目进入回收站；设置中可恢复、永久删除、清理恢复记录及备份整个库到独立文件夹。',
   '桌面版与网页版谱面库独立；可导入 PEZ 或在谱面库迁移原 RPE 文件夹。',
   '退出前请保存，建议定期导出 PEZ 备份。',
   '测试包未进行代码签名。仅限非商业用途，详见 resources/app/LICENSE 和 NOTICE。',

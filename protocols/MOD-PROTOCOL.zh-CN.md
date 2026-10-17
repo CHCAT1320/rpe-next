@@ -10,7 +10,7 @@
 
 外部包在解析和语法检查后、保存和执行前必须经过风险说明与主动勾选确认。确认导入后仍处于禁用状态。替换已有包再次显示风险提示，并停用原版本。风险提示说明完整编辑器权限、未知影响、作者免责，以及可信来源、源码或 AI 检查和备份建议；检查并非安全保证。
 
-**模组与编辑器在同一个 JavaScript 页面运行，没有模组权限沙箱。** 它可以访问页面 DOM、当前及其他本机网站存储中的谱面与设置，执行网络请求，调用宿主公开对象、导入内部模块和改写原型。启用意味着信任其全部代码。管理器的包大小、路径和语法检查用于诊断和防止意外资源耗尽，不是恶意代码隔离。
+**模组与编辑器在同一个 JavaScript 页面运行，没有模组权限沙箱。** 它可以访问页面 DOM、当前编辑器存储中的谱面与设置，执行网络请求，调用宿主公开对象、导入内部模块和改写原型。网页端访问限于同源存储；桌面端也可通过编辑器的存储接口读取、修改或删除所选原生谱面库中的数据。启用意味着信任其全部代码。管理器的包大小、路径和语法检查用于诊断和防止意外资源耗尽，不是恶意代码隔离。
 
 网页仍受浏览器权限、同源策略、CORS、CSP 和文件选择授权约束。桌面版渲染进程没有 Node.js、任意磁盘读写或终端接口；模组不能借本协议突破这些边界。远程脚本可能被 CSP 拦截，依赖应打包进模组。网络请求也不因本协议获得额外跨域权限。模组不可假定 `eval`、`new Function`、Node.js `require` 或 npm 裸模块名能运行。
 
@@ -204,12 +204,22 @@ export function activate(api) {
 | `beginPreviewSession()` | 暂停并结束正在进行的放置/取样，暂存视图参数，进入全线预览并开启详细碰撞几何；返回幂等恢复函数，恢复时暂停，不回退时间、不改谱面 |
 | `activatePane(name)` | 进入右侧页面，例如 `chart/notes/events/lines/noise`，具体名字见 index.html |
 | `invalidate()/render()` | 请求重新绘制 / 同步刷新编辑控件 |
-| `save()` | 调用现有主动保存流程，返回 Promise |
+| `save()` | 调用现有主动保存流程，返回 Promise；必须 await 并处理写入或版本冲突错误，详见下文 |
 | `addAsset(path,bytes)/removeAsset(path)` | 改素材、标未保存、刷新贴图缓存 |
 
 可直接访问实际对象：`audio/playback/preview/realtimePreview/timeline/skin/images/hitSounds/editorSkins/noteSkins/noiseEditor/eventSampler/trajectoryPanel/textLinesPanel/noiseFitPanel/noiseTrackingPanel/multiEdit/batchControls/collaboration`。它们不是只读快照或受限代理，可以包装方法、调整字段或替换底层行为；具体接口看同名源码。持久设置修改需调用相应的保存流程。
 
 `editor.raw` 提供更底层入口：实时 `session/chart/assets/tempo`、`renderSession/replaceChart/activatePane/togglePlayback/togglePreview/save/applyDisplaySettings/persistEditor/setHome`。`raw.chart=` 直接替换历史当前文档并通知，**不增加撤销记录**；`raw.tempo=` 更新时间轴 TempoMap。其他内部一致性由作者负责，优先使用普通 commit。可以通过任意 DOM/Web API、内部 ES 模块、类原型与这些入口继续扩展，宿主不限制为本节列出的功能。
+
+### 6.1. 保存、个人设置与平台存储
+
+模组应通过 `api.editor.commit` 修改当前谱面，通过 `addAsset/removeAsset` 更换素材，再用 `await api.editor.save()` 保存。保存不冻结编辑；调用后发生的新修改仍可能处于未保存状态。重复调用会在需要时排队写入更新的快照。`ProjectConflictError` 表示库内项目已被修改或删除，不能通过清空 `storageRevision` 等方式强制覆盖；应保留当前编辑，让用户导出 PEZ 或另存项目。自动保存生成独立恢复副本，不覆盖谱面库项目，没有新修改时不会重复备份。
+
+`api.storage` 用于本模组的个人 JSON 数据，不属于谱面，也不随谱面 JSON/PEZ 或模组包导出。`write/clear` 保持同步调用形式；网页端写入同源本地存储，桌面端先更新内存再排队安全写入原生文件，返回不表示磁盘已写完，`await api.storage.write(...)` 也不产生额外落盘保证。`settings.set` 的 Promise 表示校验与参数更新完成；桌面持久化同样由后台队列处理。后台失败会报告并保留可重试值，正常关闭桌面窗口前会等待设置写入。模组激活、停用及页面重载时，应遵守异步任务清理约定。
+
+桌面端的导入包位于所选谱面库的 `mods`，启用列表、参数和个人数据位于 `preferences`；固定的桌面配置记录库位置，因此同一用户更新或移动程序后自动沿用。切换到另一个库时使用那个库的包与设置，不能假定任意库共享个人数据。网页端、不同同源地址和桌面库相互独立。需要随作品分享的内容应放入有模组命名空间的谱面字段或全局事件，并说明停用及兼容导出策略。
+
+进阶模组可导入 `@rpen/platform/library.mjs`、`recovery.mjs`、`mods.mjs` 等业务接口。这些接口会按运行环境选择后端；不要直接操作固定名称的 IndexedDB、localStorage 键、SQLite 或原生版本文件，否则桌面数据可能不生效，也可能绕过冲突检测、素材引用和恢复逻辑。`libraryProject.id`、`storageRevision` 和素材哈希都是存储标识，不是目录名或可访问的文件路径。桌面“打开谱面所在文件夹”通过主进程解析已保存项目，未提供通用文件系统权限。
 
 ## 7. 事件与预览
 
@@ -221,7 +231,7 @@ export function activate(api) {
 | `editor:chart` | `{session,chart}`；谱面引用或会话变化，包括撤销/重做 |
 | `editor:time` | 与 onFrame 同形，音乐位置变化时发出 |
 | `editor:save-started` | `{}`；主动保存开始 |
-| `editor:save-succeeded` | `{message}` |
+| `editor:save-succeeded` | `{message}`；完成一个主动保存快照，不保证此刻没有更新的未保存修改 |
 | `editor:save-failed` | `{error}` |
 | `mod:loaded` | `{id}` |
 | `mod:unloaded` | `{id,reason,error?}`，reason 为 `disabled/error` |
@@ -232,6 +242,10 @@ export function activate(api) {
 `onPreview` 回调 `{renderer,target,chart,tempo,seconds,timestamp}`，发生在判定线、音符、UI、噪域及 shader 画完后。可以操作 renderer.canvas，或挂一个独立 canvas/DOM 覆盖层；自己 save/restore 画布状态，并考虑设备像素比。`renderer.viewport` 是 CSS 像素的可视画面矩形；`viewScale` 将谱面坐标换为 CSS 像素。视口中心与整个居中画布中心一致，但鼠标要减去 canvas 的 getBoundingClientRect 原点。
 
 详细碰撞几何是可选的，`renderer.collisionGeometry=true` 才生成额外数据；普通编辑保持关闭。`noteHitAreas` 含线号/音符索引、头尾屏幕坐标，开启后普通音符带 polygon、collisionWidth/collisionHeight/rotation，Hold 用头尾线段和宽度形成身体。几何在绘制坐标系内、单位 CSS 像素，不含 shader 扭曲后的像素变形。`renderer.noisePreview.hitEntries` 提供当前可见层的噪域世界四边形、area、state；state 为 `active/ready/disabled`，world 点仍需中心平移、Y 翻转及 viewScale。不同噪域层独立合成，反转规则要与核心一致；直接把四边形当独立实心块会误判洞。
+
+`editor.skin.noteScale(highlight)` 返回当前资源包普通 / 高亮音符的贴图尺寸倍率；默认皮肤为 1。自定义点击范围或剔除边界时应计入此倍率；`skin.head` / `skin.hold` 绘制时会内部应用倍率，传入绘制宽度时不应再次相乘。
+
+进阶绘制接口中，`LineRuntime.noteState` 的 `size` 为宽度倍率，`sizeY` 为不含音符自身 `size` 的高度倍率；尺寸控制曲线仍作用于两轴。`RpeSkin.head` 在既有 `minimumHeight` 后可接 `heightWidth`，`hold` 在 `color` 后可接 `heightWidth`，表示计算贴图高度的基准宽度，省略时沿用传入宽度以保持旧调用兼容。模组自绘或生成碰撞框时应使用两轴各自的倍率。判定线 `anchor` 是左下原点的归一化纹理锚点，图片和文本共用；线坐标及音符判定位置不因它移动。`bpmfactor` 文件语义仍为拍时倍率，面板的“BPM 倍率”显示其倒数，读取谱面时不可再把字段倒置一次。
 
 ## 8. 示例、恢复与兼容
 
@@ -262,8 +276,8 @@ API 1 的托管方法、清单和钩子是稳定契约；新增可选字段与�
 
 内置“三维摄像机”用七列数值事件驱动透视相机，包含专属属性控件、拖拽取样、实时过渡助手和七列原子事务；[完整说明](../assets/mods/spatial-camera/README.zh-CN.md)记录坐标、求值及序列化约定。它通过 `api.patch` 扩展两个 `Preview` 实例的 `drawScene(context, chart, tempo, seconds, selectedLine, frame)`：该独立世界绘制阶段位于背景之后、第一层 shader 之前，frame 含 width/height/viewport/scale/divisor/states。可选 center 为捕获窗口世界中心，默认 (0,0)。噪域的 `transformGeometry(entry, frame)` 在状态求值后、各层合成前变换点集，frame 含 width/height/scale/viewport/seconds，返回 null 可裁掉几何。两者均属进阶实现接口，模组应托管恢复补丁，保持“谱面物件 → 第一层 shader → 游戏 UI → 噪域 → 第二层 shader”的原有顺序；不要在几何变换中改写激活或反转语义。
 
-在项目目录执行 `node tools/pack-mod.mjs <模组目录> [输出.rpenmod]`，会校验清单和 JS 语法并打包。也可将文件直接 ZIP 打包；不要含用户谱面、密钥、开发日志或 node_modules。测试时使用备份谱面和独立浏览器数据目录。
+在项目目录执行 `node tools/pack-mod.mjs <模组目录> [输出.rpenmod]`，会校验清单和 JS 语法并打包。也可将文件直接 ZIP 打包；不要含用户谱面、密钥、开发日志或 node_modules。测试时使用备份谱面和独立浏览器或桌面数据目录；桌面测试还应使用独立的谱面库，不能只更换程序文件夹就假定数据隔离。
 
 `Preview.drawBackground`、`Preview.drawUi` 使用同样的绘制阶段签名，分别位于背景阶段及第一层 shader 后的游戏 UI 阶段。前者支持 center 捕获窗口偏移；后者使用 frame.viewport 定义 UI 的逻辑布局范围，并依赖 frame.states。三维摄像机的“跟随谱面”选项组合这两个可恢复补丁，让背景图片和游戏 UI 参与投影，同时保留它们在 shader 与噪域前后的顺序。
 
-发布前至少验证：导入后不执行、启用及再次启用、修改快捷键、文本输入不穿透、切换谱面、撤销/重做、禁用时清理、依赖/冲突和异常恢复；自定义数据还须验证保存、重开、Next 导出及兼容导出的行为。高自由度来自同页执行能力，可靠性来自模组作者对状态与恢复的完整管理。
+发布前至少验证：导入后不执行、启用及再次启用、修改快捷键、文本输入不穿透、切换谱面、撤销/重做、禁用时清理、依赖/冲突和异常恢复；自定义数据还须验证保存、重开、Next 导出及兼容导出的行为。支持桌面端的模组还应验证更新后设置继承、切换谱面库、大素材保存、冲突或写入失败时保留编辑。替换素材优先提交新的字节数组；保存仍会重新校验可变数组内容，不以对象引用相同作为素材未变化的保证。高自由度来自同页执行能力，可靠性来自模组作者对状态与恢复的完整管理。

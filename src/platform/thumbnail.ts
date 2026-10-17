@@ -23,6 +23,8 @@ interface BlobCapableCanvas {
   toBlob?: (callback: (blob: Blob | null) => void, type?: string, quality?: number) => void;
 }
 
+const thumbnails = new Map<string, Promise<Blob | null>>();
+
 /**
  * Renders a project's illustration into a small JPEG for the chart library.
  *
@@ -35,9 +37,25 @@ interface BlobCapableCanvas {
  */
 export async function projectThumbnail(project: StoredProject): Promise<Blob | null> {
   if (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined') return null;
-  const assets: ArchiveEntries = new Map(project.assets);
-  const reference = resourceReferences(project.chart, assets, project.chartName, project.info).background;
-  const bytes = assetBytes(assets, reference, project.chartName); if (!bytes) return null;
+  const assets = new Map(project.assets) as Map<string, Uint8Array | Blob>;
+  for (const [name, value] of assets) if (value instanceof Blob && /(?:^|\/)info\.txt$/i.test(name)) assets.set(name, new Uint8Array(await value.arrayBuffer()));
+  const reference = resourceReferences(project.chart, assets as ArchiveEntries, project.chartName, project.info).background;
+  const bytes = assetBytes(assets as ArchiveEntries, reference, project.chartName); if (!bytes) return null;
+  let key: string | undefined;
+  if (globalThis.crypto?.subtle) {
+    const digest = await crypto.subtle.digest('SHA-256', (bytes instanceof Blob ? await bytes.arrayBuffer() : bytes) as BufferSource);
+    key = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+    if (thumbnails.has(key)) { const saved = thumbnails.get(key)!; thumbnails.delete(key); thumbnails.set(key, saved); return saved; }
+  }
+  const result = renderThumbnail(bytes, reference);
+  if (key) {
+    thumbnails.set(key, result);
+    while (thumbnails.size > 12) thumbnails.delete(thumbnails.keys().next().value!);
+    result.then(value => { if (!value && thumbnails.get(key!) === result) thumbnails.delete(key!); }, () => { if (thumbnails.get(key!) === result) thumbnails.delete(key!); });
+  }
+  return result;
+}
+async function renderThumbnail(bytes: Uint8Array | Blob, reference: string): Promise<Blob | null> {
   const blob = new Blob([bytes as BlobPart], { type: mediaType(reference) });
   let url: string | undefined;
   let image: ImageBitmap | HTMLImageElement | undefined;

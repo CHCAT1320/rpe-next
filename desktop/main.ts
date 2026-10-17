@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, net, protocol, shell } from 'electron';
+import { app, BrowserWindow, dialog, net, protocol, shell, ipcMain } from 'electron';
 import { realpath, readFile } from 'node:fs/promises';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripTypeScriptTypes } from 'node:module';
+import { NativeService } from './native-service.ts';
 
 // Electron loads this as an ES module, which has no `here`; derive it from the module URL.
 const here = dirname(fileURLToPath(import.meta.url));
@@ -12,7 +13,9 @@ const origin = 'rpe://app';
 const smokeSettings = process.argv.includes('--smoke-settings');
 const smokeMedia = process.argv.includes('--smoke-media');
 const smokeMods = process.argv.includes('--smoke-mods');
-const smoke = process.argv.includes('--smoke-test') || smokeSettings || smokeMedia || smokeMods;
+const smokeNative = process.argv.includes('--smoke-native');
+const smokeSaving = process.argv.includes('--smoke-saving');
+const smoke = process.argv.includes('--smoke-test') || smokeSettings || smokeMedia || smokeMods || smokeNative || smokeSaving;
 // A packaged build places the Vite output directly in resources/app. `npm run desktop` passes
 // --dist so the same shell can be run against a checkout's own build.
 const fromDist = process.argv.includes('--dist');
@@ -27,13 +30,20 @@ const bundled = /^(?:index\.html|LICENSE|NOTICE|assets\/.+|protocols\/.+|schemas
 // read from disk by the main process rather than fetched.
 const sourced = /^src\/.+\.ts$/;
 app.setName('RePhiEdit Next');
-app.setPath('userData', smokeMods ? resolve(app.getPath('temp'), 'rpe-next-mod-smoke-' + Date.now()) : resolve(app.getPath('appData'), smoke ? 'rpe-next-desktop-smoke' : 'rpe-next-desktop'));
+app.setPath('userData', (smokeNative || smokeSaving) && process.env.RPE_NATIVE_TEST_HOME ? resolve(process.env.RPE_NATIVE_TEST_HOME) : smoke ? resolve(app.getPath('temp'), 'rpe-next-smoke-' + Date.now()) : resolve(app.getPath('appData'), 'rpe-next-desktop'));
 mkdirSync(app.getPath('userData'), { recursive: true });
 protocol.registerSchemesAsPrivileged([{ scheme: 'rpe', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   let mainWindow: BrowserWindow | null = null;
+  let native: NativeService | null = null, closing = false, relocating = false;
+  app.on('before-quit', event => {
+    if (!native || closing) return;
+    event.preventDefault();
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.close(); return; }
+    closing = true; native.close().catch(console.error).finally(() => app.quit());
+  });
   app.on('second-instance', () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -47,11 +57,82 @@ else {
     // build output contains no source tree, so `../dist/src/...` would not exist. `build-desktop.ts`
     // copies this one dependency-free module into the package for the same reason.
     const { collaborationConnectSources } = await import(pathToFileURL(resolve(here, '..', 'src/core/collaboration-policy.ts')).href);
+    const { atomicJson } = await import(pathToFileURL(resolve(here, 'native-store.ts')).href) as typeof import('./native-store.ts');
+    const configPath = resolve(app.getPath('userData'), 'native-storage.json');
+    let config: { root?: string; version?: number; legacyMigrated?: boolean } | undefined;
+    try { config = JSON.parse(await readFile(configPath, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    let nativeRoot = config?.root ?? (smoke ? resolve(app.getPath('userData'), 'Library') : resolve(app.getPath('documents'), 'RePhiEdit Next', 'Library'));
+    for (;;) {
+      native = new NativeService(nativeRoot);
+      try { await native.ready; break; }
+      catch (error) {
+        await native.close().catch(() => {}); native = null;
+        if (smoke) throw error;
+        const choice = await dialog.showMessageBox({ type: 'error', title: '无法打开桌面谱面库', message: (error as Error).message, detail: `原路径：${nativeRoot}\n原有数据保留。可选择已有的完整库，或选择另一个文件夹建立新库。`, buttons: ['选择文件夹', '退出'], defaultId: 0, cancelId: 1 });
+        if (choice.response !== 0) { app.quit(); return; }
+        const selected = await dialog.showOpenDialog({ title: '选择已有谱面库，或新库的上级文件夹', properties: ['openDirectory', 'createDirectory'] });
+        if (selected.canceled) { app.quit(); return; }
+        const candidate = resolve(selected.filePaths[0]);
+        let marker: { format?: string; version?: number } | undefined;
+        try { marker = JSON.parse(await readFile(resolve(candidate, 'library.json'), 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        nativeRoot = marker ? candidate : resolve(candidate, 'RPENLibrary');
+      }
+    }
+    if (!config || config.root !== nativeRoot) { config = { ...config, version: 1, root: nativeRoot }; await atomicJson(configPath, config); }
+    const tokens = new Set<string>(); let rendererGeneration = 0;
+    const allowed = new Set(['begin', 'part', 'parts', 'binaryBegin', 'binaryChunk', 'commit', 'abort', 'blob', 'read', 'list', 'remove', 'restore', 'purge', 'collect', 'status', 'rebuild', 'listDrafts', 'readRevision', 'migrationDone', 'markMigration', 'setLocalPreference']);
+    ipcMain.handle('rpen-native-storage', async (event, request: { method: string; args?: unknown[] }) => {
+      try {
+        if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame || !event.senderFrame?.url.startsWith(origin + '/')) throw Error('无权限');
+        const { method, args = [] } = request ?? {};
+        const generation = rendererGeneration;
+        if (relocating || closing) throw Object.assign(Error('谱面库正在迁移或关闭，请稍后重试'), { name: 'StorageBusyError' });
+        if (!Array.isArray(args)) throw Error('存储参数无效');
+        let result: any;
+        if (method === 'legacyMigrationPending') result = !config!.legacyMigrated;
+        else if (method === 'migrationComplete') { const next = { ...config, legacyMigrated: true }; await atomicJson(configPath, next); config = next; result = true; }
+        else if (method === 'openRoot') { const status = await native!.call('status'); const error = await shell.openPath(status.root); if (error) throw Error(error); result = true; }
+        else if (method === 'openProjectFolder') { const path = await native!.call('projectFolder', args[0]); const error = await shell.openPath(path); if (error) throw Error(error); result = true; }
+        else if (method === 'openAssetFolder') { const path = await native!.call('assetFolder', ...args); const error = await shell.openPath(path); if (error) throw Error(error); result = true; }
+        else if (['chooseRoot', 'backupFolder', 'useRoot'].includes(method)) {
+          const selected = await dialog.showOpenDialog(mainWindow!, { title: method === 'useRoot' ? '选择包含 library.json 的已有谱面库或完整备份' : method === 'chooseRoot' ? '选择新谱面库的上级文件夹' : '选择独立备份文件夹', properties: ['openDirectory', 'createDirectory'] });
+          if (selected.canceled) return { ok: true, result: null };
+          const destination = method === 'useRoot' ? resolve(selected.filePaths[0]) : resolve(selected.filePaths[0], method === 'chooseRoot' ? 'RPENLibrary' : 'RPENBackup-' + new Date().toISOString().replace(/[:.]/g, '-'));
+          if (relocating) throw Error('已有谱面库操作正在进行');
+          if (tokens.size) throw Error('正在保存，请保存结束后再迁移或备份');
+          relocating = true;
+          let next: NativeService | null = null;
+          try {
+            if (method === 'useRoot') {
+              const marker = JSON.parse(await readFile(resolve(destination, 'library.json'), 'utf8'));
+              if (marker.format !== 'rpen-native-library' || marker.version !== 1) throw Error('请选择有效的谱面库文件夹');
+            } else result = await native!.call('copyTo', destination);
+            if (method !== 'backupFolder') {
+              next = new NativeService(destination); await next.ready;
+              const nextConfig = { ...config, version: 1, root: destination }; await atomicJson(configPath, nextConfig); config = nextConfig;
+              const previous = native!; native = next; next = null;
+              await previous.close(); result = await native.call('status');
+            }
+          } finally { await next?.close().catch(() => {}); relocating = false; }
+        } else {
+          if (!allowed.has(method)) throw Error('不支持的存储操作');
+          if (['part', 'parts', 'binaryBegin', 'binaryChunk', 'commit', 'abort'].includes(method) && !tokens.has(args[0] as string)) throw Error('无效的存储操作凭据');
+          result = await native!.call(method, ...args);
+          if (method === 'begin') {
+            if (generation !== rendererGeneration) { await native!.call('abort', result); throw Error('窗口已重新载入，保存操作已取消'); }
+            tokens.add(result);
+          }
+          if (method === 'commit' || method === 'abort') tokens.delete(args[0] as string);
+        }
+        return { ok: true, result };
+      } catch (error: any) { return { ok: false, error: { name: error.name, message: error.message, code: error.code, projectId: error.projectId, expectedRevision: error.expectedRevision, actualRevision: error.actualRevision } }; }
+    });
     const connectSources = collaborationConnectSources(process.env.RPE_MEDIA_ORIGINS);
     protocol.handle('rpe', async request => {
       try {
         const url = new URL(request.url);
         if (url.host !== 'app' || !['GET', 'HEAD'].includes(request.method)) return new Response('Forbidden', { status: 403 });
+        if (smokeNative && url.pathname === '/__native-test-seed') return new Response('<!doctype html><html><body>Native migration fixture</body></html>', { headers: { 'Content-Type': 'text/html' } });
         const relative = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1));
         // A smoke run may pull in the checkout's own sources; every other request is limited to the
         // served build, which is what keeps a packaged app from exposing anything but its output.
@@ -80,9 +161,24 @@ else {
       width: 1440, height: 960, minWidth: 1000, minHeight: 680,
       title: 'Re:PhiEdit Next', backgroundColor: '#171c25', show: false,
       autoHideMenuBar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false, backgroundThrottling: !smoke }
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, preload: resolve(here, 'preload.ts'), spellcheck: false, backgroundThrottling: !smoke }
     });
     mainWindow.removeMenu();
+    let preferenceFlush = false;
+    mainWindow.on('close', event => {
+      if (preferenceFlush || mainWindow!.isDestroyed()) return;
+      event.preventDefault();
+      mainWindow!.webContents.executeJavaScript('globalThis.rpenFlushPreferences?.()').then(() => {
+        preferenceFlush = true; mainWindow!.close();
+      }).catch(error => {
+        const choice = dialog.showMessageBoxSync(mainWindow!, { type: 'warning', title: '设置尚未保存', message: error.message, buttons: ['继续编辑', '仍然退出'], defaultId: 0, cancelId: 0 });
+        if (choice === 1) { preferenceFlush = true; mainWindow!.close(); }
+      });
+    });
+    const abortTokens = () => { rendererGeneration++; for (const token of tokens) native!.call('abort', token).catch(() => {}); tokens.clear(); };
+    mainWindow.webContents.on('render-process-gone', abortTokens);
+    mainWindow.webContents.on('destroyed', abortTokens);
+    mainWindow.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) abortTokens(); });
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
       const address = new URL(url);
       if (address.protocol === 'https:' && ['github.com', 'kclg-ysj.github.io'].includes(address.hostname)) shell.openExternal(url);
@@ -94,10 +190,14 @@ else {
         type: 'question', buttons: ['继续编辑', '放弃未保存修改并退出'], defaultId: 0, cancelId: 0,
         title: '尚未保存', message: '当前谱面有未保存的修改，是否退出？'
       });
-      if (choice === 1) event.preventDefault();
+      if (choice === 1) event.preventDefault(); else preferenceFlush = false;
     });
     const errors: string[] = [];
     mainWindow.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message); });
+    if (smokeNative && process.env.RPE_NATIVE_TEST_PHASE !== 'restart') {
+      await mainWindow.loadURL(`${origin}/__native-test-seed`);
+      await (await import(pathToFileURL(resolve(here, '..', 'tools', 'smoke-native.ts')).href)).prepareNative(mainWindow.webContents);
+    }
     await mainWindow.loadURL(`${origin}/${process.argv.includes('--mods-off') ? '?mods=off' : ''}`);
     if (smoke) {
       // Whether the checkout's sources are reachable decides if the media-hash probe can run at all:
@@ -136,9 +236,22 @@ else {
       // they are resolved from the application root rather than from the served site root.
       if (smokeMedia) result.media = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-media.ts')).href)).smokeMediaTransfer(mainWindow.webContents);
       if (smokeMods) result.mods = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-mods.ts')).href)).smokeMods(mainWindow.webContents);
+      if (smokeSaving) result.saving = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-saving.ts')).href)).smokeSaving(mainWindow.webContents);
+      if (smokeNative) result.native = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-native.ts')).href)).smokeNative(mainWindow.webContents, native, {
+        service: () => native,
+        selectFolder: async (path: string, action: () => Promise<any>) => {
+          const previous = dialog.showOpenDialog; (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
+          try { return await action(); } finally { (dialog as any).showOpenDialog = previous; }
+        },
+        openedFolders: async (action: () => Promise<any>) => {
+          const previous = shell.openPath, paths: string[] = [];
+          shell.openPath = async (path: string) => { paths.push(path); return ''; };
+          try { await action(); return paths; } finally { shell.openPath = previous; }
+        },
+      });
       console.log(JSON.stringify({ ...result, errors }));
       const passed = result.secure && result.libraryVisible && result.webgl && result.database && result.entry.endsWith('.js') && result.resources.every((resource: { status: number; bytes: number }) => resource.status === 200 && resource.bytes > 0) && result.forbidden === 404 && !errors.length;
-      app.exit(passed ? 0 : 1);
+      await native!.close(); closing = true; app.exit(passed ? 0 : 1);
     } else { mainWindow.maximize(); mainWindow.show(); }
   }).catch(error => { console.error(error); if (!smoke) dialog.showErrorBox('启动失败', error.message); app.exit(1); });
 }

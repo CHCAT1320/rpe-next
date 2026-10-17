@@ -18,7 +18,8 @@ export async function smokeSettingsRenderer(): Promise<Record<string, unknown>> 
   const { createChart } = await import('/src/core/chart.ts' as string) as typeof import('../src/core/chart.ts');
   const { readEditorPreferences } = await import('/src/platform/editor-preferences.ts' as string) as typeof import('../src/platform/editor-preferences.ts');
   const previousPreferences = await library.readPreferences();
-  const previousEditor = localStorage.getItem('rpe-next-editor-v1');
+  const { localPreferences } = await import('/src/platform/local-preferences.ts' as string) as typeof import('../src/platform/local-preferences.ts');
+  const previousEditor = localPreferences.getItem('rpe-next-editor-v1');
   const modal = $<HTMLDialogElement>('#modal');
   let saved: unknown;
   const projectId = `settings-smoke-${crypto.randomUUID()}`;
@@ -67,17 +68,24 @@ export async function smokeSettingsRenderer(): Promise<Record<string, unknown>> 
     try { await library.storeProject({ ...project, chart: { ...chart, judgeLineList: 'invalid' as unknown as typeof chart.judgeLineList } }); } catch { failed = true; }
     check(failed, '无效存档应失败');
     check((await library.readProject(projectId))!.chart.META.background === 'cover.png', '失败写入破坏了旧存档');
-    await Promise.all([
+    const competing = await Promise.allSettled([
       library.storeProject({ ...project, chart: { ...chart, META: { ...chart.META, name: 'older' } } }),
       library.storeProject({ ...project, assets: [], chart: { ...chart, META: { ...chart.META, name: 'newer' } } }),
     ]);
-    check((await library.readProject(projectId))!.chart.META.name === 'newer', '同一谱面的后续保存被旧请求覆盖');
+    check(competing[0]!.status === 'fulfilled' && competing[1]!.status === 'rejected' && (competing[1] as PromiseRejectedResult).reason.name === 'ProjectConflictError', '旧快照未被版本检测阻止');
+    const latest = await library.readProject(projectId);
+    await library.storeProject({ ...latest!, assets: [], chart: { ...chart, META: { ...chart.META, name: 'newer' } } });
+    check((await library.readProject(projectId))!.chart.META.name === 'newer', '基于最新版本的后续保存失败');
     return { hotkeys: true, thickness: true, backgroundSave: true, atomicRollback: true, savedMediaBytes: restored.assets[1]![1].byteLength, responsiveTicks };
   } finally {
     if (modal.open) modal.close();
     await library.storePreferences(previousPreferences ?? migratePreferences());
-    if (previousEditor === null) localStorage.removeItem('rpe-next-editor-v1'); else localStorage.setItem('rpe-next-editor-v1', previousEditor);
-    await new Promise<void>((resolve, reject) => {
+    if (previousEditor === null) localPreferences.removeItem('rpe-next-editor-v1'); else localPreferences.setItem('rpe-next-editor-v1', previousEditor);
+    const { nativeStorage } = await import('/src/platform/native.ts' as string) as typeof import('../src/platform/native.ts');
+    if (nativeStorage) {
+      const savedProject = await library.readProject(projectId);
+      if (savedProject) { await library.deleteProject(projectId, savedProject.storageRevision); const head = await library.readProjectRevision(projectId); await nativeStorage.call('purge', projectId, head!.revision); }
+    } else await new Promise<void>((resolve, reject) => {
       const request = indexedDB.open('rpe-next-library'); request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const connection = request.result; const transaction = connection.transaction(['projects', 'summaries'], 'readwrite');

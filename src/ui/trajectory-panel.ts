@@ -1,4 +1,5 @@
 import { CURVE_PRESETS, TRAJECTORY_DEFAULTS, sampleCurveTrajectory, presetOptions, validateCurvePreset, editableTrajectoryOptions } from '../core/curve-trajectory.ts';
+import { localPreferences } from '../platform/local-preferences.ts';
 import { createTrajectoryEvent, trajectoryChart, splitTrajectoryChart } from '../application/trajectory-commands.ts';
 import { parseBeat, formatBeat } from '../core/beat.ts';
 import { SceneRuntime } from '../core/scene.ts';
@@ -241,7 +242,7 @@ export class TrajectoryPanel {
     // throw on `.map` and land in the same `catch` this ternary answers with, so the two agree for
     // every input.
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]');
+      const stored: unknown = JSON.parse(localPreferences.getItem(STORAGE_KEY) ?? '[]');
       this.custom = Array.isArray(stored) ? stored.map(validateCurvePreset) : [];
     } catch { this.custom = []; }
   }
@@ -349,7 +350,7 @@ export class TrajectoryPanel {
       panel.append(action('编辑预设定义', () => this.loadCustom(preset, preset.name)), action('删除此预设', () => {
         try {
           const custom = deleteCurvePreset(this.custom, preset.name);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
+          localPreferences.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
           if (this.customEditingName === preset.name) { this.customEditingName = null; this.validateCustom(); }
           this.presetDraft = null; this.renderPresets(); this.refresh(); this.notify('自定义预设已删除', 'success');
         } catch (error) { this.customError(error); }
@@ -398,7 +399,7 @@ export class TrajectoryPanel {
     const guarded = (callback: () => void): (() => void) => () => { try { callback(); } catch (error) { this.customError(error); } };
     const save = (preset: CurvePreset, originalName: string | null): void => {
       const custom = saveCurvePreset(this.custom, preset, originalName);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
+      localPreferences.setItem(STORAGE_KEY, JSON.stringify(custom)); this.custom = custom;
       this.customEditingName = preset.name; source.value = JSON.stringify(preset, null, 2);
       this.presetDraft = null; this.renderPresets(); this.refresh(); this.validateCustom();
       this.gallery.querySelector<HTMLDetailsElement>('[data-category="自定义"]')!.open = true;
@@ -535,3 +536,4 @@ export class TrajectoryPanel {
     return this.enabled && this.previewChart ? { chart: this.previewChart, seconds: playing || !this.animate ? seconds : this.beginSeconds + (this.endSeconds - this.beginSeconds) * progress } : null;
   }
 }
+

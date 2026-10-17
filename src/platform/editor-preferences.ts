@@ -3,6 +3,7 @@
 // preference means adding a row here, and unknown keys in stored data are dropped rather than
 // copied through, which keeps a preference file written by an older or newer build harmless.
 import { validFpsLimit } from '../core/frame-timing.ts';
+import { localPreferences } from './local-preferences.ts';
 
 const ranges: Record<string, [minimum: number, maximum: number]> = { scale: [20, 2000], division: [1, 100], gridCount: [2, 100], volume: [0, 1], hitVolume: [0, 1], realtimeAlpha: [0, 1], ratioWidth: [1, 100], ratioHeight: [1, 100], barWidth: [0.5, 10], barAlpha: [0.1, 2], judgementOffset: [42, 240], eventValueSize: [8, 28], eventValueThreshold: [10, 180], eventCurveThreshold: [8, 180], eventOpacity: [0.05, 1], eventBarWidth: [0.35, 1], multiLineWidth: [30, 2400], multiLineEventWidth: [30, 2400], scrollSpeed: [0.1, 100], autoSaveSeconds: [1, 3600], autoSaveLimit: [1, 100] };
 Object.assign(ranges, { cameraX: [-1000000, 1000000], viewDivisor: [0.1, 100], backgroundBlur: [0, 30], cutDensity: [0.1, 128] });
@@ -74,10 +75,10 @@ export function normalizeEditorPreferences(value: unknown): EditorPreferences {
 }
 
 /** Reads preferences from storage, falling back to an empty set if the stored JSON is unusable. */
-export function readEditorPreferences(storage: PreferenceStorage = localStorage): EditorPreferences {
+export function readEditorPreferences(storage: PreferenceStorage = localPreferences): EditorPreferences {
   try { return normalizeEditorPreferences(JSON.parse(storage.getItem('rpe-next-editor-v1') ?? '{}')); } catch { return {}; }
 }
 
-export function writeEditorPreferences(value: unknown, storage: PreferenceStorage = localStorage): void {
+export function writeEditorPreferences(value: unknown, storage: PreferenceStorage = localPreferences): void {
   storage.setItem('rpe-next-editor-v1', JSON.stringify(normalizeEditorPreferences(value)));
 }

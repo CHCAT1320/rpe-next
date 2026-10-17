@@ -1,4 +1,6 @@
 import { readZip, writeZip } from './archive.ts';
+import { openDatabase, ensureStore } from './storage.ts';
+import { nativeStorage, nativePackages } from './native.ts';
 import { MOD_LIMITS, parseModPackage } from '../core/mod-package.ts';
 import { assetUrl } from '../core/asset-url.ts';
 import type { ModPackage } from '../core/mod-package.ts';
@@ -19,11 +21,7 @@ export interface ImportFile {
 export type ImportFiles = FileList | readonly ImportFile[];
 
 async function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('rpe-next-mods', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('packages', { keyPath: 'id' });
-    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-  });
+  const database = await openDatabase('rpe-next-mods', 1, (connection, transaction) => ensureStore(connection, transaction!, 'packages', { keyPath: 'id' }));
   return new Promise<T>((resolve, reject) => {
     const transaction = database.transaction('packages', mode); let request: IDBRequest<T>;
     try { request = action(transaction.objectStore('packages')); } catch (error) { database.close(); reject(error); return; }
@@ -31,9 +29,12 @@ async function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStor
     transaction.onabort = transaction.onerror = () => { database.close(); reject(transaction.error ?? new Error('模组存储失败')); };
   });
 }
-export const readMods = (): Promise<StoredMod[]> => access('readonly', store => store.getAll());
-export const storeMod = (record: ModPackage): Promise<IDBValidKey> => access('readwrite', store => store.put({ id: record.manifest.id, files: [...record.files], imported: Date.now() }));
-export const deleteMod = (id: string): Promise<undefined> => access('readwrite', store => store.delete(id));
+export const readMods = (): Promise<StoredMod[]> => nativeStorage ? nativePackages('mods', 'read') as Promise<StoredMod[]> : access('readonly', store => store.getAll());
+export const storeMod = (record: ModPackage): Promise<unknown> => {
+  const stored: StoredMod = { id: record.manifest.id, files: [...record.files], imported: Date.now() };
+  return nativeStorage ? nativePackages('mods', 'write', stored.id, stored) : access('readwrite', store => store.put(stored));
+};
+export const deleteMod = (id: string): Promise<unknown> => nativeStorage ? nativePackages('mods', 'delete', id) : access('readwrite', store => store.delete(id));
 export const exportMod = (record: ModPackage): Blob => writeZip(record.files);
 export async function importMod(files: ImportFiles, directory = false): Promise<ModPackage> {
   let entries: Map<string, Uint8Array>;

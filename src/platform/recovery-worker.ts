@@ -36,6 +36,6 @@ scope.onmessage = async ({ data }) => {
     else if (data.kind === 'commit') await saveSnapshotDirect(snapshot!.projectId, snapshot!.name, chart as never, snapshot!.assets, snapshot!.limit, snapshot!.viewState);
     scope.postMessage({ ok: true });
   }
-  catch (error) { scope.postMessage({ ok: false, message: error instanceof Error ? error.message : String(error) }); }
+  catch (error) { scope.postMessage({ ok: false, name: error instanceof Error ? error.name : undefined, message: error instanceof Error ? error.message : String(error) }); }
 };
 scope.postMessage({ ready: true });

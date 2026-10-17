@@ -215,7 +215,7 @@ export class TextLinesPanel {
     const ascent = Math.max(80, ...metrics.map(entry => entry.actualBoundingBoxAscent)); const descent = Math.max(20, ...metrics.map(entry => entry.actualBoundingBoxDescent));
     const lineHeight = (ascent + descent) * options.spacing; const naturalHeight = ascent + descent + lineHeight * (lines.length - 1);
     const worldHeight = options.width * naturalHeight / naturalWidth; const scale = Math.min(384 / options.width, 384 / worldHeight);
-    const texture = skin.noteImage?.(options.noteType) ?? skin.images.get(({ 4: 'Drag2', 1: 'Tap2', 3: 'Flick2' } as Record<number, string>)[options.noteType]); const length = noteSize * options.size * scale; const thickness = Math.max(5, noteSize * options.size * (texture ? (texture.naturalHeight ?? 0) / (texture.naturalWidth ?? 1) : 0.2)) * scale;
+    const texture = skin.noteImage?.(options.noteType) ?? skin.images.get(({ 4: 'Drag2', 1: 'Tap2', 3: 'Flick2' } as Record<number, string>)[options.noteType]); const length = noteSize * options.size * scale; const thickness = Math.max(5, noteSize * (texture ? (texture.naturalHeight ?? 0) / (texture.naturalWidth ?? 1) : 0.2)) * scale;
     if (thickness < 1 || length < 1) throw new Error('笔画相对文字太细，请增大音符大小、减少文字或减小总宽度');
     if (length * thickness > 2048) throw new Error('笔画相对文字太大，请减小音符大小或增大文字总宽度');
     const padding = Math.ceil(Math.hypot(length, thickness) / 2) + 2;

@@ -3,7 +3,7 @@ import { resolve,join,basename } from 'node:path';
 import { parseModPackage } from '../src/core/mod-package.ts';
 import { exportMod } from '../src/platform/mods.ts';
 
-if(!process.argv[2])throw Error('用法：node tools/pack-mod.mjs <目录> [输出.rpenmod]');
+if(!process.argv[2])throw Error('用法：node tools/pack-mod.ts <目录> [输出.rpenmod]');
 const root=resolve(process.argv[2]);const files=new Map();
 async function visit(relative=''){
   for(const entry of await readdir(join(root,relative),{withFileTypes:true})){

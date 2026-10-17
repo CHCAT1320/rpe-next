@@ -1,3 +1,5 @@
+import { storageError } from './storage.ts';
+
 const ITEMS_PER_CHUNK = 128;
 const BYTES_PER_CHUNK = 1024 * 1024;
 
@@ -10,20 +12,47 @@ export interface SnapshotArrayHeader { path: (string | number)[]; length: number
 export interface SnapshotArraySlice { path: (string | number)[]; offset: number; values: Node[] }
 export type SnapshotPart = SnapshotLeaf | SnapshotArrayHeader | SnapshotArraySlice;
 
+/** A binary value pulled out of the snapshot and sent separately. */
+export interface SnapshotBinary {
+  path: (string | number)[];
+  value: Blob | ArrayBuffer | ArrayBufferView;
+}
+
+/** The metadata carried by the first message. */
+interface SnapshotMetadata {
+  projectId: string | undefined;
+  name: string;
+  limit: number;
+  viewState: Record<string, unknown>;
+}
+interface ProjectMetadata { project: Record<string, unknown> }
+type BeginMetadata = SnapshotMetadata | ProjectMetadata;
+
 /** The messages the worker receives. */
 type WorkerMessage =
-  | { kind: 'begin'; projectId: string | undefined; name: string; limit: number; viewState: Record<string, unknown>; assets: [string, number][] }
+  | ({ kind: 'begin'; assets: [string, number][] } & Partial<SnapshotMetadata & ProjectMetadata>)
   | { kind: 'chart'; part: SnapshotPart }
   | { kind: 'asset'; index: number; offset: number; bytes: Uint8Array }
   | { kind: 'commit' };
 
 /** The worker's replies. */
-interface WorkerReply { ok?: boolean; message?: string; ready?: boolean }
+interface WorkerReply {
+  ok?: boolean;
+  message?: string;
+  ready?: boolean;
+  result?: unknown;
+  name?: string;
+  projectId?: string;
+  expectedRevision?: number;
+  actualRevision?: number;
+}
 
 const scalar = (value: Node): boolean => value === null || typeof value !== 'object';
 const smallArray = (value: Node): boolean => Array.isArray(value) && value.length <= 16 && value.every(scalar);
+const binary = (value: Node): boolean => value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value);
 
-function compact(value: Node): boolean {
+function compact(value: Node, binaries?: SnapshotBinary[]): boolean {
+  if (binaries && binary(value)) return false;
   if (scalar(value) || smallArray(value)) return true;
   if (Array.isArray(value)) return false;
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return true;
@@ -32,26 +61,27 @@ function compact(value: Node): boolean {
 
 // Keep each structured-clone operation small, including on charts with one very
 // large note/event list. Beat arrays and ordinary note/event records stay whole.
-export function* snapshotParts(value: Node, path: (string | number)[] = []): Generator<SnapshotPart> {
-  if (compact(value)) { yield { path, value }; return; }
+export function* snapshotParts(value: Node, path: (string | number)[] = [], binaries?: SnapshotBinary[]): Generator<SnapshotPart> {
+  if (binaries && binary(value)) { binaries.push({ path, value: value as Blob | ArrayBuffer | ArrayBufferView }); yield { path, value: null }; return; }
+  if (compact(value, binaries)) { yield { path, value }; return; }
   if (Array.isArray(value)) {
     yield { path, length: value.length };
     let offset = 0;
     while (offset < value.length) {
-      if (!compact(value[offset])) { yield* snapshotParts(value[offset], [...path, offset]); offset++; continue; }
+      if (!compact(value[offset], binaries)) { yield* snapshotParts(value[offset], [...path, offset], binaries); offset++; continue; }
       const start = offset; const values: Node[] = [];
-      while (offset < value.length && values.length < ITEMS_PER_CHUNK && compact(value[offset])) values.push(value[offset++]);
+      while (offset < value.length && values.length < ITEMS_PER_CHUNK && compact(value[offset], binaries)) values.push(value[offset++]);
       yield { path, offset: start, values };
     }
   } else {
     const header: Record<string, Node> = {}; const children: string[] = [];
     for (const key of Object.keys(value as Record<string, Node>)) {
       const item = (value as Record<string, Node>)[key];
-      if (compact(item)) Object.defineProperty(header, key, { value: item, enumerable: true, configurable: true, writable: true });
+      if (compact(item, binaries)) Object.defineProperty(header, key, { value: item, enumerable: true, configurable: true, writable: true });
       else children.push(key);
     }
     yield { path, value: header };
-    for (const key of children) yield* snapshotParts((value as Record<string, Node>)[key], [...path, key]);
+    for (const key of children) yield* snapshotParts((value as Record<string, Node>)[key], [...path, key], binaries);
   }
 }
 
@@ -82,19 +112,24 @@ export interface TransferWorker {
   terminate(): void;
 }
 
-export async function transferSnapshot(worker: TransferWorker, [projectId, name, chart, assets, limit, viewState]: [string | undefined, string, unknown, [string, Uint8Array][], number, Record<string, unknown>]): Promise<void> {
-  let reply: { resolve: () => void; reject: (error: Error) => void } | null = null;
-  const receive = (): Promise<void> => new Promise<void>((resolve, reject) => { reply = { resolve, reject }; });
+async function transferPayload(worker: TransferWorker, metadata: BeginMetadata, chart: unknown, assets: [string, Uint8Array][]): Promise<unknown> {
+  let reply: { resolve: (value: unknown) => void; reject: (error: Error) => void } | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const receive = (): Promise<unknown> => new Promise<unknown>((resolve, reject) => {
+    reply = { resolve, reject };
+    timer = setTimeout(() => reject(new Error('后台存储长时间没有响应，请重试；当前编辑仍保留。')), 60000);
+  });
   worker.onmessage = ({ data }) => {
-    if (data.ok === false) reply?.reject(new Error(data.message || '后台备份失败，请重试'));
-    else reply?.resolve();
+    clearTimeout(timer);
+    if (data.ok === false) reply?.reject(storageError(data, '后台存储失败，请重试'));
+    else reply?.resolve(data.result);
   };
   worker.onerror = event => reply?.reject(new Error(event.message || '后台备份失败，请重试'));
   worker.onmessageerror = () => reply?.reject(new Error('后台备份数据无法读取'));
-  const send = (data: WorkerMessage, transfer: Transferable[] = []): Promise<void> => { const response = receive(); worker.postMessage(data, transfer); return response; };
+  const send = (data: WorkerMessage, transfer: Transferable[] = []): Promise<unknown> => { const response = receive(); worker.postMessage(data, transfer); return response; };
   try {
     await receive();
-    await send({ kind: 'begin', projectId, name, limit, viewState, assets: assets.map(([path, bytes]) => [path, bytes.byteLength]) });
+    await send({ kind: 'begin', ...metadata, assets: assets.map(([name, bytes]) => [name, bytes.byteLength]) });
     for (const part of snapshotParts(chart)) await send({ kind: 'chart', part });
     for (let index = 0; index < assets.length; index++) {
       const bytes = assets[index]![1];
@@ -103,8 +138,16 @@ export async function transferSnapshot(worker: TransferWorker, [projectId, name,
         await send({ kind: 'asset', index, offset, bytes: chunk }, [chunk.buffer as ArrayBuffer]);
       }
     }
-    await send({ kind: 'commit' });
-  } finally { reply = null; worker.terminate(); }
+    return await send({ kind: 'commit' });
+  } finally { clearTimeout(timer); reply = null; worker.terminate(); }
+}
+
+export const transferSnapshot = (worker: TransferWorker, [projectId, name, chart, assets, limit, viewState]: [string | undefined, string, unknown, [string, Uint8Array][], number, Record<string, unknown>]): Promise<unknown> =>
+  transferPayload(worker, { projectId, name, limit, viewState }, chart, assets);
+
+export function transferProject(worker: TransferWorker, project: { chart: unknown; assets?: [string, Uint8Array][] }): Promise<unknown> {
+  const { chart, assets, ...metadata } = project;
+  return transferPayload(worker, { project: metadata }, chart, assets ?? []);
 }
 
 export type { MutableNode };

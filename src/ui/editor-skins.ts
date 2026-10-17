@@ -1,4 +1,6 @@
 import { parseEditorSkin, resolveEditorSkin, EDITOR_SKIN_BUILTINS } from '../core/editor-skin.ts';
+import { localPreferences } from '../platform/local-preferences.ts';
+import { storageFailure } from '../platform/storage.ts';
 import type { EditorSkinAsset, EditorSkinPackage, EditorSkinParameter, SkinDocument } from '../core/editor-skin.ts';
 import { importEditorSkin, readEditorSkins, storeEditorSkin, deleteEditorSkin, builtinEditorSkins, exportEditorSkin } from '../platform/editor-skins.ts';
 import { EditorSkinRuntime } from './editor-skin-runtime.ts';
@@ -23,7 +25,7 @@ interface SkinPackage extends EditorSkinPackage, SkinRecord {
 /** The collaborators the panel is wired to. */
 export interface EditorSkinsOptions {
   invalidate: () => void;
-  notify: (message: string, level?: 'success' | 'warning' | 'error') => void;
+  notify: (message: string, level?: 'success' | 'warning' | 'error', duration?: number) => void;
 }
 
 /** The directory picker is not in the DOM lib yet. */
@@ -39,7 +41,7 @@ const action = (text: string, handler: () => void): HTMLButtonElement => { const
 export class EditorSkins {
   host: HTMLElement;
   invalidate: () => void;
-  notify: (message: string, level?: 'success' | 'warning' | 'error') => void;
+  notify: (message: string, level?: 'success' | 'warning' | 'error', duration?: number) => void;
   records: Map<string, SkinPackage>;
   current: string;
   generation: number;
@@ -77,7 +79,7 @@ export class EditorSkins {
   constructor(host: HTMLElement, { invalidate, notify }: EditorSkinsOptions) {
     this.host = host; this.invalidate = invalidate; this.notify = notify; this.records = new Map(); this.current = 'default'; this.generation = 0;
     this.directoryHandle = null; this.directoryId = null; this.previewTimer = null; this.previewId = null; this.restoreId = null; this.deadline = 0; this.previewUrl = null;
-    try { const stored: unknown = JSON.parse(localStorage.getItem(OPTIONS_KEY) ?? 'null'); this.options = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored as Record<string, Appearance> : {}; } catch { this.options = {}; }
+    try { const stored: unknown = JSON.parse(localPreferences.getItem(OPTIONS_KEY) ?? 'null'); this.options = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored as Record<string, Appearance> : {}; } catch { this.options = {}; }
     this.drafts = structuredClone(this.options); this.systemScheme = matchMedia('(prefers-color-scheme: dark)');
     this.systemScheme.addEventListener('change', () => { if (this.drafts[this.current]?.variant === 'auto') this.use(this.current, Boolean(this.previewTimer), true).catch(error => this.error(error)); });
     this.runtime = new EditorSkinRuntime(() => { document.dispatchEvent(new Event('rpen-editor-skin-changed')); invalidate(); });
@@ -112,9 +114,9 @@ export class EditorSkins {
       this.persistOptions();
       this.updateOptions();
       const requestedDefault = new URL(location.href).searchParams.get('skin') === 'default';
-      const id = requestedDefault ? 'default' : localStorage.getItem(ACTIVE_KEY) ?? 'default';
+      const id = requestedDefault ? 'default' : localPreferences.getItem(ACTIVE_KEY) ?? 'default';
       if (id !== 'default' && this.records.has(id)) await this.use(id);
-      else if (id !== 'default') { const message = `找不到已保存的皮肤“${id}”，已恢复默认皮肤。`; this.message.textContent = message; this.notify(message, 'warning'); localStorage.setItem(ACTIVE_KEY, 'default'); }
+      else if (id !== 'default') { const message = `找不到已保存的皮肤“${id}”，已恢复默认皮肤。`; this.message.textContent = message; this.notify(message, 'warning'); localPreferences.setItem(ACTIVE_KEY, 'default'); }
     } catch (error) { this.message.textContent = '皮肤载入失败，使用默认：' + (error instanceof Error ? error.message : String(error)); this.notify(this.message.textContent, 'warning'); }
   }
   render(): void {
@@ -228,22 +230,31 @@ export class EditorSkins {
     this.cancelPreview(); this.runtime.apply(prepared); this.current = id; this.updateOptions(id);
     this.recovery.style.setProperty('display', preview ? 'block' : 'none', 'important');
     if (preview) {
-      this.previewId = id; this.restoreId = localStorage.getItem(ACTIVE_KEY) ?? 'default'; this.deadline = retainDeadline && wasPreview ? previousDeadline : Date.now() + 15000; this.keep.hidden = false;
+      this.previewId = id; this.restoreId = localPreferences.getItem(ACTIVE_KEY) ?? 'default'; this.deadline = retainDeadline && wasPreview ? previousDeadline : Date.now() + 15000; this.keep.hidden = false;
       const update = (): void => {
         if (Date.now() >= this.deadline) { const restore = this.restoreId ?? 'default'; this.drafts = structuredClone(this.options); this.cancelPreview(); this.use(this.records.has(restore) ? restore : 'default').catch(error => this.error(error)); return; }
         this.rescueText.textContent = `预览中 · ${Math.ceil((this.deadline - Date.now()) / 1000)} 秒后复原`;
       };
       update(); this.previewTimer = setInterval(update, 250);
-    } else { this.options[id] = structuredClone(appearance); this.persistOptions(); localStorage.setItem(ACTIVE_KEY, id); this.rescueText.textContent = record?.skin.name ?? ''; this.message.textContent = id === 'default' ? '已恢复默认皮肤。' : '已应用，重新打开编辑器后会恢复此皮肤。'; }
+    } else {
+      this.options[id] = structuredClone(appearance);
+      const optionsSaved = this.persistOptions(), activeSaved = this.persistValue(ACTIVE_KEY, id);
+      this.rescueText.textContent = record?.skin.name ?? '';
+      if (optionsSaved && activeSaved) this.message.textContent = id === 'default' ? '已恢复默认皮肤。' : '已应用，重新打开编辑器后会恢复此皮肤。';
+    }
   }
   confirmPreview(): void {
     if (this.previewId === null) return;
-    localStorage.setItem(ACTIVE_KEY, this.current); this.cancelPreview(); this.rescueText.textContent = this.records.get(this.current)?.skin.name ?? '';
-    this.options[this.current] = structuredClone(this.drafts[this.current]); this.persistOptions();
-    this.message.textContent = '已保留当前皮肤。';
+    const activeSaved = this.persistValue(ACTIVE_KEY, this.current); this.cancelPreview(); this.rescueText.textContent = this.records.get(this.current)?.skin.name ?? '';
+    this.options[this.current] = structuredClone(this.drafts[this.current]); const optionsSaved = this.persistOptions();
+    if (activeSaved && optionsSaved) this.message.textContent = '已保留当前皮肤。';
   }
   reset(): void { this.use('default').catch(error => this.error(error)); }
-  persistOptions(): void { localStorage.setItem(OPTIONS_KEY, JSON.stringify(this.options)); }
+  persistOptions(): boolean { return this.persistValue(OPTIONS_KEY, JSON.stringify(this.options)); }
+  persistValue(key: string, value: string): boolean {
+    try { localPreferences.setItem(key, value); return true; }
+    catch (error) { this.message.textContent = `皮肤已在本次会话中应用，但参数未保存：${storageFailure(error)}`; this.notify(this.message.textContent, 'warning', 7000); return false; }
+  }
   clearAppearance(id: string): void { delete this.options[id]; delete this.drafts[id]; this.persistOptions(); }
   async resetParameters(id: string): Promise<void> {
     const record = this.records.get(id); if (!record) return;
@@ -260,7 +271,7 @@ export class EditorSkins {
       ++this.generation;
       if (this.current === id) await this.use('default');
       await deleteEditorSkin(id); this.records.delete(id); this.clearAppearance(id);
-      if (localStorage.getItem(ACTIVE_KEY) === id) localStorage.setItem(ACTIVE_KEY, 'default');
+      if (localPreferences.getItem(ACTIVE_KEY) === id) localPreferences.setItem(ACTIVE_KEY, 'default');
       if (this.restoreId === id) this.restoreId = 'default';
       if (this.directoryId === id) { this.directoryId = null; this.directoryHandle = null; }
       this.updateOptions(); this.message.textContent = '已删除皮肤及其参数设置。';
@@ -270,3 +281,4 @@ export class EditorSkins {
 }
 
 export type { EditorSkinAsset, SkinDocument };
+

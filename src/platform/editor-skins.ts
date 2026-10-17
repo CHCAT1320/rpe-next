@@ -1,4 +1,6 @@
 import { readZip, writeZip } from './archive.ts';
+import { openDatabase, ensureStore } from './storage.ts';
+import { nativeStorage, nativePackages } from './native.ts';
 import { parseEditorSkin, EDITOR_SKIN_LIMITS } from '../core/editor-skin.ts';
 import type { EditorSkinPackage } from '../core/editor-skin.ts';
 import { assetUrl } from '../core/asset-url.ts';
@@ -24,20 +26,16 @@ interface SkinFile {
 }
 
 function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('rpe-next-editor-skins', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('packages', { keyPath: 'id' });
-    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-  }).then(connection => new Promise<T>((resolve, reject) => {
+  return openDatabase('rpe-next-editor-skins', 1, (connection, transaction) => ensureStore(connection, transaction!, 'packages', { keyPath: 'id' })).then(connection => new Promise<T>((resolve, reject) => {
     const transaction = connection.transaction('packages', mode); let request: IDBRequest<T>;
     try { request = action(transaction.objectStore('packages')); } catch (error) { connection.close(); reject(error); return; }
     transaction.oncomplete = () => { connection.close(); resolve(request.result); };
     transaction.onabort = transaction.onerror = () => { connection.close(); reject(transaction.error ?? new Error('皮肤存储已中止')); };
   }));
 }
-export const readEditorSkins = (): Promise<StoredSkin[]> => access('readonly', store => store.getAll());
-export const storeEditorSkin = (record: ParsedSkin): Promise<IDBValidKey> => access('readwrite', store => store.put({ id: record.skin.id, files: [...record.files], imported: Date.now() }));
-export const deleteEditorSkin = (id: string): Promise<undefined> => access('readwrite', store => store.delete(id));
+export const readEditorSkins = (): Promise<StoredSkin[]> => nativeStorage ? nativePackages('editor-skins', 'read') as Promise<StoredSkin[]> : access('readonly', store => store.getAll());
+export const storeEditorSkin = (record: ParsedSkin): Promise<unknown> => { const stored: StoredSkin = { id: record.skin.id ?? '', files: [...record.files], imported: Date.now() }; return nativeStorage ? nativePackages('editor-skins', 'write', stored.id, stored) : access('readwrite', store => store.put(stored)); };
+export const deleteEditorSkin = (id: string): Promise<unknown> => nativeStorage ? nativePackages('editor-skins', 'delete', id) : access('readwrite', store => store.delete(id));
 export const exportEditorSkin = (record: ParsedSkin): Blob => writeZip(record.files);
 
 export async function importEditorSkin(files: SkinFile[], directory = false): Promise<ParsedSkin> {
@@ -81,3 +79,4 @@ export async function builtinEditorSkins(): Promise<ParsedSkin[]> {
     return { ...parseEditorSkin(files) as ParsedSkin, builtin: true };
   }));
 }
+

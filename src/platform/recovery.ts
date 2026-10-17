@@ -1,6 +1,8 @@
 import type { ArchiveEntries } from './archive.ts';
 import type { Chart } from '../core/types.ts';
 import { transferSnapshot } from './recovery-transfer.ts';
+import { openDatabase, ensureStore } from './storage.ts';
+import { nativeStorage, nativeReady, nativeWrite, nativeRead, nativeAssetBytes } from './native.ts';
 
 // Autosave storage. Drafts hold a full snapshot of the document plus its assets so a crashed tab can
 // be restored, while a separate `summaries` store keeps just the fields the recovery list needs.
@@ -28,20 +30,15 @@ export interface DraftSummary {
 }
 
 function database(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('rpe-next-recovery', 2);
-    request.onupgradeneeded = () => {
-      const connection = request.result;
-      // Upgrading from v1 keeps existing drafts; the summaries index is rebuilt from them because
-      // v1 had no summaries store, so the cursor backfills every draft already on disk.
-      const drafts = connection.objectStoreNames.contains('drafts') ? request.transaction!.objectStore('drafts') : connection.createObjectStore('drafts', { keyPath: 'id' });
-      const summaries = connection.createObjectStore('summaries', { keyPath: 'id' });
-      summaries.createIndex('projectId', 'projectId');
-      const cursor = drafts.openCursor();
-      cursor.onsuccess = () => { if (cursor.result) { summaries.put(summary(cursor.result.value as Draft)); cursor.result.continue(); } };
-    };
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+  return openDatabase('rpe-next-recovery', 2, (connection, transaction, oldVersion) => {
+    const drafts = ensureStore(connection, transaction!, 'drafts', { keyPath: 'id' });
+    const summaries = ensureStore(connection, transaction!, 'summaries', { keyPath: 'id' });
+    if (!summaries.indexNames.contains('projectId')) summaries.createIndex('projectId', 'projectId');
+    // Upgrading from v1 keeps existing drafts; the summaries index is rebuilt from them because
+    // v1 had no summaries store, so the cursor backfills every draft already on disk.
+    if (oldVersion >= 2) return;
+    const cursor = drafts.openCursor();
+    cursor.onsuccess = () => { if (cursor.result) { summaries.put(summary(cursor.result.value as Draft)); cursor.result.continue(); } };
   });
 }
 
@@ -49,11 +46,15 @@ function summary(draft: Draft): DraftSummary {
   return { id: draft.id, projectId: draft.projectId, name: draft.name, title: draft.chart.META.name ?? draft.name, updated: draft.updated };
 }
 
-async function transaction<T>(stores: string[], mode: IDBTransactionMode, action: (operation: IDBTransaction) => IDBRequest<T>): Promise<T> {
+/** A request-like value whose `result` is settled when the transaction completes. */
+interface RequestResult<T> { result: T }
+
+async function transaction<T>(stores: string[], mode: IDBTransactionMode, action: (operation: IDBTransaction) => RequestResult<T>): Promise<T> {
   const connection = await database();
   return new Promise<T>((resolve, reject) => {
-    const operation = connection.transaction(stores, mode);
-    const request = action(operation);
+    const operation = connection.transaction(stores, mode, mode === 'readwrite' ? { durability: 'strict' } : undefined);
+    let request: RequestResult<T>;
+    try { request = action(operation); } catch (error) { operation.abort(); connection.close(); reject(error); return; }
     operation.oncomplete = () => { connection.close(); resolve(request.result); };
     operation.onerror = () => { connection.close(); reject(operation.error); };
     operation.onabort = () => { connection.close(); reject(operation.error ?? new Error('恢复存储已中止')); };
@@ -62,9 +63,10 @@ async function transaction<T>(stores: string[], mode: IDBTransactionMode, action
 
 export function saveDraft(id: string, name: string, chart: Chart): Promise<unknown> {
   const draft: Draft = { id, name, chart, updated: Date.now() };
+  if (nativeStorage) return nativeReady().then(() => nativeWrite('drafts', id, draft));
   return transaction(['drafts', 'summaries'], 'readwrite', operation => {
     operation.objectStore('summaries').put(summary(draft));
-    return operation.objectStore('drafts').put(draft) as IDBRequest<unknown>;
+    return operation.objectStore('drafts').put(draft);
   });
 }
 
@@ -78,14 +80,16 @@ export function saveDraft(id: string, name: string, chart: Chart): Promise<unkno
  * is removed because the snapshot being added counts toward the limit.
  */
 export function saveSnapshot(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | [string, Uint8Array][] | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
+  if (nativeStorage) { const id = crypto.randomUUID(); return nativeReady().then(() => nativeWrite('drafts', id, { id, projectId, name, chart, assets, viewState, updated: Date.now() }, { limit })); }
   if (typeof Worker === 'undefined') return saveSnapshotDirect(projectId, name, chart, assets, limit, viewState);
   try {
     const worker = new Worker(new URL('./recovery-worker.ts', import.meta.url), { type: 'module' });
-    return transferSnapshot(worker, [projectId, name, chart, assets ? [...assets] : [], limit, viewState]);
+    return transferSnapshot(worker, [projectId, name, chart, assets ? [...assets] : [], limit, viewState]).then(() => undefined);
   } catch (error) { return Promise.reject(error); }
 }
 
 export async function saveSnapshotDirect(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | [string, Uint8Array][] | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
+  if (nativeStorage) return saveSnapshot(projectId, name, chart, assets, limit, viewState);
   const connection = await database();
   return new Promise<void>((resolve, reject) => {
     const operation = connection.transaction(['drafts', 'summaries'], 'readwrite', { durability: 'strict' }); const store = operation.objectStore('drafts');
@@ -104,10 +108,33 @@ export async function saveSnapshotDirect(projectId: string | undefined, name: st
 
 /** Lists draft summaries, newest first, optionally limited to one project. */
 export async function listDrafts(projectId: string | null = null): Promise<DraftSummary[]> {
+  if (nativeStorage) { await nativeReady(); return nativeStorage.call('listDrafts', projectId); }
   const drafts = await transaction<DraftSummary[]>(['summaries'], 'readonly', operation => (projectId == null
     ? operation.objectStore('summaries').getAll()
     : operation.objectStore('summaries').index('projectId').getAll(projectId)) as IDBRequest<DraftSummary[]>);
   return drafts.sort((left, right) => right.updated - left.updated);
 }
 
-export const readDraft = (id: string): Promise<Draft | undefined> => transaction<Draft>(['drafts'], 'readonly', operation => operation.objectStore('drafts').get(id) as IDBRequest<Draft>);
+export const readDraft = async (id: string): Promise<Draft | undefined> => {
+  if (!nativeStorage) return transaction<Draft>(['drafts'], 'readonly', operation => operation.objectStore('drafts').get(id) as IDBRequest<Draft>);
+  const draft = await nativeRead('drafts', id);
+  if (draft?.assets) draft.assets = await Promise.all((draft.assets as [string, unknown][]).map(async ([name, value]): Promise<[string, unknown]> => [name, await nativeAssetBytes(value)]));
+  return draft;
+};
+
+export const deleteDraft = async (id: string): Promise<unknown> => {
+  if (nativeStorage) { await nativeReady(); return nativeStorage.call('remove', 'drafts', id); }
+  return transaction<undefined>(['drafts', 'summaries'], 'readwrite', operation => {
+    operation.objectStore('summaries').delete(id); return operation.objectStore('drafts').delete(id);
+  });
+};
+
+export async function deleteProjectDrafts(projectId: string): Promise<number | void> {
+  const drafts = await listDrafts(projectId);
+  if (!drafts.length) return;
+  if (nativeStorage) { for (const draft of drafts) await deleteDraft(draft.id); return; }
+  return transaction<number>(['drafts', 'summaries'], 'readwrite', operation => {
+    for (const draft of drafts) { operation.objectStore('summaries').delete(draft.id); operation.objectStore('drafts').delete(draft.id); }
+    return { result: drafts.length };
+  });
+}

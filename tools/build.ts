@@ -9,7 +9,10 @@ await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 for (const name of ['src/core', 'src/application', 'src/platform', 'src/ui', 'assets', 'index.html', 'styles.css', 'LICENSE', 'NOTICE', 'protocols', 'schemas']) {
   await mkdir(join(output, name, '..'), { recursive: true });
-  await cp(join(root, name), join(output, name), { recursive: true });
+  if (pages && name === 'protocols') {
+    await mkdir(join(output, name), { recursive: true });
+    for (const protocol of ['EDITOR-SKIN', 'MOD', 'GLOBAL-EVENTS']) await cp(join(root, name, protocol + '-PROTOCOL.zh-CN.md'), join(output, name, protocol + '-PROTOCOL.zh-CN.md'));
+  } else await cp(join(root, name), join(output, name), { recursive: true });
 }
 await writeFile(join(output, '.nojekyll'), '');
 if (!pages) {
