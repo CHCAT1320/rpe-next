@@ -1,48 +1,96 @@
 import { EDITOR_SKIN_CANVASES } from '../core/editor-skin.ts';
+import type { EditorSkinCanvasConfig, EditorSkinRecord, ResolvedEditorSkin } from '../core/editor-skin.ts';
 
-let settings = null; let revision = 0;
-const contexts = new WeakMap();
-const palette = value => Object.fromEntries(Object.entries(value ?? {}).map(([key, color]) => [key.toLowerCase(), color]));
-export function setEditorCanvasSkin(value, font = '', fonts = new Map()) {
-  settings = value ? { ...value, palette: palette(value.palette), targets: Object.fromEntries(Object.entries(value.targets ?? {}).map(([role, config]) => [role, { ...config, palette: palette(config.palette), resolvedFont: fonts.get(config.font) || font }])), resolvedFont: font } : null;
+/** The canvas configuration a resolved skin carries for one target. */
+type CanvasConfig = EditorSkinCanvasConfig & { resolvedFont?: string };
+
+/** The palette a canvas maps source colours through, keyed by lower-case `#rrggbb`. */
+type CanvasPalette = Record<string, string>;
+
+/** The resolved canvas settings installed for the active skin. */
+interface CanvasSettings {
+  palette: CanvasPalette;
+  targets: Record<string, CanvasConfig>;
+  resolvedFont?: string;
+}
+
+/** The per-context proxy cache, keyed by the role it was built for. */
+const contexts = new WeakMap<CanvasRenderingContext2D, Map<string, CanvasRenderingContext2D>>();
+
+let settings: CanvasSettings | null = null;
+let revision = 0;
+
+const palette = (value: Record<string, string> | undefined): CanvasPalette => Object.fromEntries(Object.entries(value ?? {}).map(([key, color]) => [key.toLowerCase(), color]));
+
+/**
+ * Installs the active skin's canvas configuration, or clears it for the default editor.
+ *
+ * `fonts` maps an asset id to the family name the runtime registered, so a target that references
+ * a skin font resolves to the family that is actually available on the page.
+ */
+export function setEditorCanvasSkin(value: ResolvedEditorSkin | null, font = '', fonts: Map<string, string> = new Map()): void {
+  settings = value ? {
+    ...value,
+    palette: palette(value.palette),
+    targets: Object.fromEntries(Object.entries(value.targets ?? {}).map(([role, config]) => [role, { ...config, palette: palette(config.palette), resolvedFont: fonts.get(config.font ?? '') ?? font }])),
+    resolvedFont: font,
+  } as CanvasSettings : null;
   revision++;
 }
-export function editorCanvasRevision() { return revision; }
-function canvasRole(canvas) {
-  if (['preview', 'realtime-preview'].includes(canvas?.id)) return null;
-  return canvas?.dataset?.skinCanvas ?? Object.entries(EDITOR_SKIN_CANVASES).find(([, selector]) => selector && (selector === '#' + canvas?.id || canvas?.matches?.(selector)))?.[0];
+
+export function editorCanvasRevision(): number { return revision; }
+
+function canvasRole(canvas: HTMLCanvasElement | undefined): string | null {
+  if (!canvas || ['preview', 'realtime-preview'].includes(canvas.id)) return null;
+  return canvas.dataset.skinCanvas ?? Object.entries(EDITOR_SKIN_CANVASES).find(([, selector]) => selector && (selector === '#' + canvas.id || canvas.matches?.(selector)))?.[0] ?? null;
 }
-export function editorSkinContext(context, requestedRole) {
-  const role = requestedRole ?? canvasRole(context?.canvas);
-  if (!context || !settings || !Object.hasOwn(EDITOR_SKIN_CANVASES, role) || ['preview', 'realtime-preview'].includes(context.canvas?.id)) return context;
+
+/**
+ * Wraps a 2D context so the active skin's palette, font and line settings apply.
+ *
+ * The wrapper is cached per context and role, so draw code can call it inside a frame loop without
+ * allocating a new proxy. An unstyled context, or one the skin does not target, is returned as is.
+ */
+export function editorSkinContext(context: CanvasRenderingContext2D, requestedRole?: string): CanvasRenderingContext2D {
+  const role = requestedRole ?? canvasRole(context?.canvas as HTMLCanvasElement | undefined);
+  if (!context || !settings || !role || !Object.hasOwn(EDITOR_SKIN_CANVASES, role) || ['preview', 'realtime-preview'].includes(context.canvas?.id)) return context;
   let roles = contexts.get(context); if (!roles) { roles = new Map(); contexts.set(context, roles); }
-  if (roles.has(role)) return roles.get(role);
-  const bound = new Map(); const colors = new Map(); let generation = -1; let config;
-  const update = () => {
-    if (generation !== revision) { colors.clear(); generation = revision; const local = settings?.targets?.[role]; config = settings ? { ...settings, ...local, palette: { ...settings.palette, ...local?.palette } } : null; }
+  const cached = roles.get(role); if (cached) return cached;
+  const bound = new Map<string, (...args: never[]) => unknown>(); const colors = new Map<string, string>();
+  let generation = -1; let config: CanvasConfig | undefined;
+  const update = (): void => {
+    if (generation !== revision) {
+      colors.clear(); generation = revision;
+      const local = settings?.targets?.[role];
+      config = settings ? { ...settings, ...local, palette: { ...settings.palette, ...local?.palette } as CanvasPalette } as CanvasConfig : undefined;
+    }
   };
-  const color = value => { update(); if (!config || typeof value !== 'string') return value; if (!colors.has(value)) colors.set(value, recolor(value, config.palette)); return colors.get(value); };
+  const color = (value: unknown): unknown => { update(); if (!config || typeof value !== 'string') return value; if (!colors.has(value)) colors.set(value, recolor(value, config.palette)); return colors.get(value); };
   const proxy = new Proxy(context, {
     get(target, key) {
       update();
-      if (['createLinearGradient', 'createRadialGradient', 'createConicGradient'].includes(key)) return (...args) => {
-        const gradient = target[key](...args); const add = gradient.addColorStop.bind(gradient); gradient.addColorStop = (offset, value) => add(offset, color(value)); return gradient;
+      if (typeof key === 'string' && ['createLinearGradient', 'createRadialGradient', 'createConicGradient'].includes(key)) return (...args: never[]) => {
+        const gradient = (target[key as 'createLinearGradient'] as (...values: never[]) => CanvasGradient)(...args);
+        const add = gradient.addColorStop.bind(gradient);
+        gradient.addColorStop = (offset: number, value: string) => add(offset, color(value) as string);
+        return gradient;
       };
-      if (key === 'setLineDash') return values => target.setLineDash(values.length && config?.lineDash ? config.lineDash : values);
+      if (key === 'setLineDash') return (values: number[]) => target.setLineDash(values.length && config?.lineDash ? config.lineDash : values);
       const value = Reflect.get(target, key, target);
       if (typeof value !== 'function') return value;
-      if (!bound.has(key)) bound.set(key, ['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage'].includes(key) ? (...args) => {
+      if (!bound.has(key as string)) bound.set(key as string, ['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage'].includes(key as string) ? (...args: never[]) => {
         update(); const alpha = target.globalAlpha; const width = target.lineWidth;
         if (config?.opacity !== undefined) target.globalAlpha = alpha * config.opacity;
         if (config?.lineWidthScale !== undefined) target.lineWidth = width * config.lineWidthScale;
-        try { return value.apply(target, args); } finally { target.globalAlpha = alpha; target.lineWidth = width; }
-      } : value.bind(target)); return bound.get(key);
+        try { return (value as (...values: never[]) => unknown).apply(target, args); } finally { target.globalAlpha = alpha; target.lineWidth = width; }
+      } : (value as (...values: never[]) => unknown).bind(target));
+      return bound.get(key as string);
     },
     set(target, key, value) {
       update();
-      if (typeof value === 'string' && ['fillStyle', 'strokeStyle', 'shadowColor'].includes(key)) value = color(value);
+      if (typeof value === 'string' && ['fillStyle', 'strokeStyle', 'shadowColor'].includes(key as string)) value = color(value);
       else if (config && key === 'font' && typeof value === 'string') {
-        if (config.fontScale) value = value.replace(/([\d.]+)px/, (match, size) => `${Number(size) * config.fontScale}px`);
+        if (config.fontScale) value = value.replace(/([\d.]+)px/, (match, size: string) => `${Number(size) * (config?.fontScale ?? 1)}px`);
         if (config.resolvedFont) value = value.replace(/RPE(?:Game)?(?=[, ]|$)/g, `"${config.resolvedFont}"`);
       }
       return Reflect.set(target, key, value, target);
@@ -51,8 +99,8 @@ export function editorSkinContext(context, requestedRole) {
   roles.set(role, proxy); return proxy;
 }
 
-function recolor(value, palette) {
-  let rgb; let alpha = 1;
+function recolor(value: string, paletteMap: CanvasPalette): string {
+  let rgb: string; let alpha = 1;
   if (/^#[\da-f]{3,8}$/i.test(value)) {
     let hex = value.slice(1); if ([3, 4].includes(hex.length)) hex = [...hex].map(char => char + char).join('');
     if (![6, 8].includes(hex.length)) return value;
@@ -62,8 +110,10 @@ function recolor(value, palette) {
     if (!match) return value;
     rgb = match.slice(1, 4).map(number => Math.round(Number(number)).toString(16).padStart(2, '0')).join(''); if (match[4] !== undefined) alpha = Number(match[4]);
   }
-  const next = palette['#' + rgb]; if (!next) return value;
+  const next = paletteMap['#' + rgb]; if (!next) return value;
   if (alpha === 1) return next;
   const [red, green, blue] = [1, 3, 5].map(offset => parseInt(next.slice(offset, offset + 2), 16));
   return `rgba(${red},${green},${blue},${alpha})`;
 }
+
+export type { EditorSkinRecord };
