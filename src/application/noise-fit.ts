@@ -3,8 +3,32 @@ import { fromNumber } from '../core/beat.ts';
 import { createNoiseArea, createNoiseEvent, withNoiseAreas } from '../core/noise-areas.ts';
 import { noiseLayers } from '../core/noise-skin.ts';
 import { orderedNoiseRectangles, noiseAppearanceOffsets } from '../core/noise-fit.ts';
+import type { NoiseFit } from '../core/noise-fit.ts';
+import type { Chart, NoiseArea } from '../core/types.ts';
 
-export function fittedNoiseAreas(fit, options) {
+/** The layout and timing the fit panel hands to {@link fittedNoiseAreas}. */
+export interface NoiseFitOptions {
+  first: number;
+  last: number;
+  duration: number;
+  width: number;
+  x: number;
+  y: number;
+  rotation?: number;
+  easingType?: number;
+  active?: boolean;
+  activeStart?: number;
+  activeEnd?: number;
+  readyFlash?: number;
+  layerId: string;
+  invert?: boolean;
+  name?: string;
+  reveal: string;
+  seed: number;
+}
+
+/** Turns one fitted bitmap plus the panel's layout into the 噪域 areas it generates. */
+export function fittedNoiseAreas(fit: NoiseFit, options: NoiseFitOptions): NoiseArea[] {
   const { first, last, duration, width, x, y, rotation = 0, easingType = 1, active = true, activeStart = 0, activeEnd = duration, readyFlash = 0.5, layerId, invert = false, name = '' } = options;
   if (![first, last, duration, width, x, y, rotation, readyFlash].every(Number.isFinite) || last < first || duration <= 0 || width <= 0 || width > 20000 || readyFlash < 0 || readyFlash > 600) throw new Error('首尾出现拍、存在时间、大小、坐标或预备闪烁时长无效');
   if (!Number.isInteger(easingType) || easingType < 1 || easingType > 29) throw new Error('缓动编号须在 1–29 内');
@@ -15,7 +39,7 @@ export function fittedNoiseAreas(fit, options) {
   const offsets = noiseAppearanceOffsets(rectangles.length, easingType);
   const scale = width / fit.width; const angle = rotation * Math.PI / 180; const cosine = Math.cos(angle); const sine = Math.sin(angle);
   return rectangles.map((rectangle, index) => {
-    const at = first + (last - first) * offsets[index];
+    const at = first + (last - first) * offsets[index]!;
     const localX = (rectangle.x + rectangle.width / 2 - fit.width / 2) * scale;
     const localY = (fit.height / 2 - rectangle.y - rectangle.height / 2) * scale;
     const center = { x: x + localX * cosine + localY * sine, y: y - localX * sine + localY * cosine };
@@ -28,9 +52,10 @@ export function fittedNoiseAreas(fit, options) {
   });
 }
 
-export function noiseFitChart(chart, areas) {
+/** Appends the generated areas, validating that their layer still exists. */
+export function noiseFitChart(chart: Chart, areas: NoiseArea[]): Chart {
   const layers = new Set(noiseLayers(chart).map(layer => layer.id));
-  if (areas.some(area => !layers.has(area.layerId))) throw new Error('目标噪域层已不存在，请重新选择');
+  if (areas.some(area => !layers.has(area.layerId ?? ''))) throw new Error('目标噪域层已不存在，请重新选择');
   const next = withNoiseAreas(chart, [...(chart.blockAreaList ?? []), ...areas]);
   assertChart(next); return next;
 }
