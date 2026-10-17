@@ -16,7 +16,7 @@ import type { Chart, Beat, ChartEvent, NoiseLayer } from '../core/types.ts';
 import type { IntervalIndex } from '../core/interval-index.ts';
 
 /** A judge line's or noise area's entry in the noise timeline, as `drawEntry` builds it. */
-interface NoiseRect {
+export interface NoiseRect {
   x: number;
   y: number;
   width: number;
@@ -31,10 +31,10 @@ interface NoiseRect {
 }
 
 /** A rect plus the handle the pointer is over, if any. */
-type NoiseHover = NoiseRect & { kind: 'start' | 'end' | 'move' };
+export type NoiseHover = NoiseRect & { kind: 'start' | 'end' | 'move' };
 
 /** The offscreen bounds `selectionRects` yields; rectangle selection reads only these members. */
-interface SelectionRect {
+export interface SelectionRect {
   x: number;
   width: number;
   index: number;

@@ -2,55 +2,56 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { parseEditorSkin, compileEditorSkin, resolveEditorSkin, editorSkinSelector, editorSkinPath, EDITOR_SKIN_COMPONENTS, EDITOR_SKIN_LIMITS, EDITOR_SKIN_API } from '../src/core/editor-skin.ts';
+import type { EditorSkinPackage, EditorSkinParameter, SkinDocument } from '../src/core/editor-skin.ts';
 import { EDITOR_SKIN_DEFAULT_TOKENS } from '../src/ui/editor-skin-base.ts';
 import { importEditorSkin, exportEditorSkin, builtinEditorSkins } from '../src/platform/editor-skins.ts';
 import { editorSkinContext, setEditorCanvasSkin } from '../src/ui/editor-skin-canvas.ts';
 import { readZip, writeZip } from '../src/platform/archive.ts';
 import { editorSkinFixture } from './fixtures/editor-skin.ts';
 
-const encode = value => new TextEncoder().encode(typeof value === 'string' ? value : JSON.stringify(value));
-const manifest = () => ({ protocol: 'rpen-editor-skin', version: 1, id: 'example', name: '测试皮肤' });
-const record = (skin, extra = []) => parseEditorSkin(new Map([['skin.json', encode(skin)], ...extra]));
+const encode = (value: unknown): Uint8Array => new TextEncoder().encode(typeof value === 'string' ? value : JSON.stringify(value));
+const manifest = (): SkinDocument => ({ protocol: 'rpen-editor-skin', version: 1, id: 'example', name: '测试皮肤' });
+const record = (skin: unknown, extra: [string, Uint8Array][] = []): EditorSkinPackage => parseEditorSkin(new Map<string, Uint8Array>([['skin.json', encode(skin)], ...extra]));
 test('协议测试数据可打包、导入并往返导出', async () => {
   const original = editorSkinFixture();
   const archive = exportEditorSkin(original);
   const imported = await importEditorSkin([new File([archive], 'test-skin.rpenskin')]);
   assert.deepEqual(imported.skin, original.skin);
   assert.deepEqual(imported.files, original.files);
-  const directory = await importEditorSkin([...original.files].map(([path, bytes]) => ({ name: path.split('/').at(-1), webkitRelativePath: 'Fixture/' + path, size: bytes.length, arrayBuffer: async () => bytes.buffer })), true);
+  const directory = await importEditorSkin([...original.files].map(([path, bytes]) => ({ name: path.split('/').at(-1) ?? path, webkitRelativePath: 'Fixture/' + path, size: bytes.length, arrayBuffer: async () => bytes.slice().buffer as ArrayBuffer })), true);
   assert.deepEqual(directory.files, original.files);
-  assert.ok(!JSON.parse(await readFile(new URL('../assets/editor-skins/index.json', import.meta.url))).some(entry => entry.directory === original.skin.id));
+  assert.ok(!JSON.parse((await readFile(new URL('../assets/editor-skins/index.json', import.meta.url))).toString()).some((entry: { directory?: string }) => entry.directory === original.skin.id));
 });
 
 test('Inkline 内置资源完整且可以直接加载，保留作者、颜色参数与字体', async context => {
   // `assetUrl` returns a document-relative path, so resolve it against the repository root.
-  context.mock.method(globalThis, 'fetch', async url => new Response(await readFile(new URL(String(url).replace(/^\/+/, ''), new URL('../', import.meta.url)))));
+  context.mock.method(globalThis, 'fetch', async (url: string) => new Response(await readFile(new URL(String(url).replace(/^\/+/, ''), new URL('../', import.meta.url)))));
   const skins = await builtinEditorSkins();
   assert.deepEqual(skins.map(record => record.skin.id), ['inkline']);
-  const skin = skins[0]; assert.equal(skin.builtin, true);
-  assert.equal(skin.skin.name, '墨线 Inkline'); assert.equal(skin.skin.author, 'cmdysj'); assert.equal(skin.skin.compatibility.minApi, 3);
+  const skin = skins[0]!; assert.equal(skin.builtin, true);
+  assert.equal(skin.skin.name, '墨线 Inkline'); assert.equal(skin.skin.author, 'cmdysj'); assert.equal((skin.skin.compatibility as { minApi?: number }).minApi, 3);
   const directory = new URL('../assets/editor-skins/inkline/', import.meta.url);
   const files = await readdir(directory, { recursive: true, withFileTypes: true });
   assert.equal(files.filter(entry => entry.isFile()).length, skin.files.size);
-  assert.ok(skin.files.get('fonts/ui.woff').length > 0);
+  assert.ok(skin.files.get('fonts/ui.woff')!.length > 0);
   const resolved = resolveEditorSkin(skin.skin, { parameters: { 'event-fill': '#123456' } });
-  assert.equal(resolved.canvas.palette['#e58d24'], '#123456');
-  assert.equal(skin.skin.canvas.palette['#e58d24'], 'parameter(event-fill)');
+  assert.equal(resolved.canvas!.palette!['#e58d24'], '#123456');
+  assert.equal(skin.skin.canvas!.palette!['#e58d24'], 'parameter(event-fill)');
 });
 
 test('生成的机器可读目录与运行时约定一致', async () => {
-  const catalogue = JSON.parse(await readFile(new URL('../schemas/editor-skin-components.v1.json', import.meta.url)));
+  const catalogue = JSON.parse((await readFile(new URL('../schemas/editor-skin-components.v1.json', import.meta.url))).toString());
   assert.deepEqual(catalogue.aliases, EDITOR_SKIN_COMPONENTS);
   assert.deepEqual(catalogue.tokens, EDITOR_SKIN_DEFAULT_TOKENS);
   assert.ok(catalogue.panels.includes('noise-properties'));
   assert.equal(catalogue.aliases['beat-display'], '#beat-display'); assert.equal(catalogue.aliases.clock, '#clock');
   assert.ok(catalogue.movableCommands.includes('time-readouts'));
-  const schema = JSON.parse(await readFile(new URL('../schemas/editor-skin-v1.schema.json', import.meta.url)));
+  const schema = JSON.parse((await readFile(new URL('../schemas/editor-skin-v1.schema.json', import.meta.url))).toString());
   assert.equal(schema.properties.version.const, 1);
 });
 
 test('作用域、含逗号的伪类、伪元素和素材宏均正确生成，图标可由主题样式进一步覆盖', () => {
-  const skin = { ...manifest(), assets: { icon: { type: 'image', path: 'i.svg' }, ui: { type: 'font', path: 'ui.woff2' } },
+  const skin: SkinDocument = { ...manifest(), assets: { icon: { type: 'image', path: 'i.svg' }, ui: { type: 'font', path: 'ui.woff2' } },
     tokens: { 'font-family': 'font(ui)' }, icons: { save: 'icon' },
     motions: { enter: { from: { opacity: '0' }, to: { opacity: '1' } } },
     styles: [{ selector: '@save::before,@open:not(.active,[disabled])::after', set: { content: 'asset(icon)', animation: 'motion(enter) 100ms ease' } }],
@@ -97,7 +98,7 @@ test('素材引用、布局白名单和分组唯一性在应用前验证', () =>
 });
 
 test('hide 支持组件与状态选择器，逐个作用域隔离且覆盖普通显示规则', () => {
-  const skin = { ...manifest(), hide: ['@migrate,@recover', '@toolbar .tools button[data-tool="4"]'], styles: [{ selector: '@migrate', set: { display: 'block' } }] };
+  const skin: SkinDocument = { ...manifest(), hide: ['@migrate,@recover', '@toolbar .tools button[data-tool="4"]'], styles: [{ selector: '@migrate', set: { display: 'block' } }] };
   record(skin);
   const css = compileEditorSkin(skin);
   assert.ok(css.includes(':root[data-editor-skin="example"] #migrate,:root[data-editor-skin="example"] #recover{display:none!important'));
@@ -110,7 +111,7 @@ test('hide 支持组件与状态选择器，逐个作用域隔离且覆盖普通
 });
 
 test('响应式变量、根状态、完整条件规则、属性注册与受限优先级均可编译', () => {
-  const skin = { ...manifest(), compatibility: { minApi: 2, maxApi: EDITOR_SKIN_API }, properties: { '--skin-example-progress': { syntax: '<number>', inherits: false, initialValue: '0' } }, styles: [
+  const skin: SkinDocument = { ...manifest(), compatibility: { minApi: 2, maxApi: EDITOR_SKIN_API }, properties: { '--skin-example-progress': { syntax: '<number>', inherits: false, initialValue: '0' } }, styles: [
     { media: '(width <= 900px), (aspect-ratio < 4/3)', rules: [{ selector: '@root[data-rpen-playing=true],html[data-rpen-dirty=true]', set: { '--rpen-inspector-width': '280px', 'color-scheme': 'light' } }] },
     { container: '(width <= 360px)', rules: [{ supports: '(display: grid)', rules: [{ selector: '@panel-title', set: { padding: '8px' }, important: ['padding'] }] }] },
     { startingStyle: true, rules: [{ selector: '@inspector', set: { opacity: '0' } }] },
@@ -129,14 +130,14 @@ test('响应式变量、根状态、完整条件规则、属性注册与受限�
 });
 
 test('可调参数和同包变体可独立解析，声明内置图标和高 DPI 素材不要求复制应用资源', () => {
-  const skin = { ...manifest(), assets: { save: { type: 'image', builtin: 'save' }, picture: { type: 'image', path: 'i.svg', sources: [{ path: 'i2.svg', scale: 2 }] } }, preview: 'picture',
+  const skin: SkinDocument = { ...manifest(), assets: { save: { type: 'image', builtin: 'save' }, picture: { type: 'image', path: 'i.svg', sources: [{ path: 'i2.svg', scale: 2 }] } }, preview: 'picture',
     parameters: { width: { type: 'number', label: '宽度', min: 200, max: 500, default: 300, unit: 'px' }, accent: { type: 'color', label: '颜色', default: '#123456' } },
     tokens: { 'inspector-width': 'parameter(width)' }, variants: { light: { name: '日间', colorScheme: 'light', tokens: { surface: '#ffffff' } }, dark: { name: '夜间', colorScheme: 'dark', tokens: { surface: '#111111' } } }, systemVariants: { light: 'light', dark: 'dark' },
     icons: [{ selector: '@play[data-playing=true]', asset: 'save' }], decorations: [{ id: 'mark', selector: '@header', asset: 'picture', placement: 'append' }],
   };
   record(skin, [['i.svg', encode('<svg/>')], ['i2.svg', encode('<svg/>')]]);
   const resolved = resolveEditorSkin(skin, { variant: 'dark', parameters: { width: 999, accent: '#abcdef' } });
-  assert.equal(resolved.tokens['param-width'], '500px'); assert.equal(resolved.tokens['param-accent'], '#abcdef'); assert.equal(resolved.tokens.surface, '#111111');
+  assert.equal(resolved.tokens!['param-width'], '500px'); assert.equal(resolved.tokens!['param-accent'], '#abcdef'); assert.equal(resolved.tokens!.surface, '#111111');
   const css = compileEditorSkin(resolved, { images: new Map([['save', 'blob:save']]) });
   assert.ok(css.includes('--rpen-inspector-width:var(--rpen-param-width)'));
   assert.ok(css.includes('#play[data-playing=true]'));
@@ -146,32 +147,32 @@ test('可调参数和同包变体可独立解析，声明内置图标和高 DPI 
 });
 
 test('画布色板可引用颜色参数，解析后交给绘制器的仍是 #rrggbb', () => {
-  const parameters = { fill: { type: 'color', label: '底色', default: '#123456' }, undefined: { type: 'color', label: '干扰项', default: '#999999' }, size: { type: 'number', label: '尺寸', min: 0, max: 9, default: 1 } };
-  const skin = { ...manifest(), parameters, canvas: { palette: { '#e58d24': 'parameter(fill)', '#ffffff': '#010203' }, targets: { events: { palette: { '#ffa334': 'parameter(fill)' } } } },
+  const parameters: Record<string, EditorSkinParameter> = { fill: { type: 'color', label: '底色', default: '#123456' }, undefined: { type: 'color', label: '干扰项', default: '#999999' }, size: { type: 'number', label: '尺寸', min: 0, max: 9, default: 1 } };
+  const skin: SkinDocument = { ...manifest(), parameters, canvas: { palette: { '#e58d24': 'parameter(fill)', '#ffffff': '#010203' }, targets: { events: { palette: { '#ffa334': 'parameter(fill)' } } } },
     variants: { night: { name: '夜间', canvas: { palette: { '#303030': 'parameter(fill)' } } } } };
   record(skin);
-  const base = resolveEditorSkin(skin, { parameters: { fill: '#abcdef' } }).canvas;
-  assert.deepEqual(base.palette, { '#e58d24': '#abcdef', '#ffffff': '#010203' }); assert.equal(base.targets.events.palette['#ffa334'], '#abcdef');
-  assert.equal(resolveEditorSkin(skin, { parameters: { fill: 'red' } }).canvas.palette['#e58d24'], '#123456');
-  assert.equal(resolveEditorSkin(skin, { variant: 'night' }).canvas.palette['#303030'], '#123456');
+  const base = resolveEditorSkin(skin, { parameters: { fill: '#abcdef' } }).canvas!;
+  assert.deepEqual(base.palette, { '#e58d24': '#abcdef', '#ffffff': '#010203' }); assert.equal(base.targets!.events!.palette!['#ffa334'], '#abcdef');
+  assert.equal(resolveEditorSkin(skin, { parameters: { fill: 'red' } }).canvas!.palette!['#e58d24'], '#123456');
+  assert.equal(resolveEditorSkin(skin, { variant: 'night' }).canvas!.palette!['#303030'], '#123456');
   assert.throws(() => record({ ...skin, canvas: { palette: { '#e58d24': 'parameter(size)' } } }), /颜色参数/);
   assert.throws(() => record({ ...skin, canvas: { palette: { '#e58d24': 'parameter(missing)' } } }), /颜色参数/);
   assert.throws(() => record({ ...skin, variants: { night: { name: '夜间', canvas: { targets: { notes: { palette: { '#e58d24': 'var(--x)' } } } } } } }), /#rrggbb/);
 });
 
 test('分区画布映射处理离屏、渐变、虚线和绘制参数，保持上下文状态与预览隔离', () => {
-  const draws = []; const stops = []; const context = { canvas: {}, fillStyle: '', strokeStyle: '', globalAlpha: .8, lineWidth: 2, dash: [],
+  const draws: { color: string; alpha: number; width: number }[] = []; const stops: [number, string][] = []; const context = { canvas: {}, fillStyle: '', strokeStyle: '', globalAlpha: .8, lineWidth: 2, dash: [] as number[],
     fillRect() { draws.push({ color: this.fillStyle, alpha: this.globalAlpha, width: this.lineWidth }); },
-    setLineDash(values) { this.dash = values; }, createLinearGradient() { return { addColorStop(position, color) { stops.push([position, color]); } }; },
+    setLineDash(values: number[]) { this.dash = values; }, createLinearGradient() { return { addColorStop(position: number, color: string) { stops.push([position, color]); } }; },
   };
   try {
     setEditorCanvasSkin({ palette: { '#ffffff': '#aaaaaa' }, targets: { density: { palette: { '#ffffff': '#112233' }, opacity: .5, lineWidthScale: 2, lineDash: [1, 2] }, history: { palette: { '#ffffff': '#445566' } } } });
-    const density = editorSkinContext(context, 'density'); density.fillStyle = '#fff'; density.fillRect(0, 0, 1, 1);
+    const density = editorSkinContext(context as unknown as CanvasRenderingContext2D, 'density'); density.fillStyle = '#fff'; density.fillRect(0, 0, 1, 1);
     assert.deepEqual(draws[0], { color: '#112233', alpha: .4, width: 4 }); assert.equal(context.globalAlpha, .8); assert.equal(context.lineWidth, 2);
     density.setLineDash([5, 3]); assert.deepEqual(context.dash, [1, 2]); density.setLineDash([]); assert.deepEqual(context.dash, []);
     density.createLinearGradient(0, 0, 1, 1).addColorStop(.5, '#ffffff'); assert.deepEqual(stops[0], [.5, '#112233']);
-    editorSkinContext(context, 'history').fillStyle = '#fff'; assert.equal(context.fillStyle, '#445566');
-    const preview = { canvas: { id: 'preview' } }; assert.equal(editorSkinContext(preview, 'density'), preview);
+    editorSkinContext(context as unknown as CanvasRenderingContext2D, 'history').fillStyle = '#fff'; assert.equal(context.fillStyle, '#445566');
+    const preview = { canvas: { id: 'preview' } }; assert.equal(editorSkinContext(preview as unknown as CanvasRenderingContext2D, 'density'), preview);
   } finally { setEditorCanvasSkin(null); }
 });
 
@@ -182,26 +183,26 @@ test('解压及目录导入在资源分配前执行大小与数量上限', async
   await assert.rejects(readZip(zip, { maxBytes: 99 }), /大小超限/);
   await assert.rejects(readZip(zip, { maxFileBytes: 90 }), /大小超限/);
   let read = false;
-  await assert.rejects(importEditorSkin([{ name: 'x', size: EDITOR_SKIN_LIMITS.fileBytes + 1, arrayBuffer() { read = true; } }], true), /大小超限/);
+  await assert.rejects(importEditorSkin([{ name: 'x', size: EDITOR_SKIN_LIMITS.fileBytes + 1, arrayBuffer: async () => { read = true; return new ArrayBuffer(0); } }], true), /大小超限/);
   assert.equal(read, false);
   const wrapped = new Map([['skin/skin.json', encode(manifest())], ['outside.txt', encode('x')]]);
   await assert.rejects(importEditorSkin([new File([writeZip(wrapped)], 'skin.zip')]), /根目录以外/);
 });
 
 test('编辑画布色板保留 alpha，刷新映射且不改变播放预览或原始上下文', () => {
-  const context = { canvas: { id: 'notes' }, fillStyle: '', font: '', measureText(text) { return { width: this === context ? text.length : -1 }; } };
+  const context = { canvas: { id: 'notes' }, fillStyle: '', font: '', measureText(text: string) { return { width: this === context ? text.length : -1 }; } };
   const preview = { canvas: { id: 'preview' } }; const realtime = { canvas: { id: 'realtime-preview' } };
   try {
-    setEditorCanvasSkin(null); assert.equal(editorSkinContext(context), context);
+    setEditorCanvasSkin(null); assert.equal(editorSkinContext(context as unknown as CanvasRenderingContext2D), context);
     setEditorCanvasSkin({ palette: { '#FFFFFF': '#123456' }, fontScale: 1.2 }, 'custom-ui');
-    const proxy = editorSkinContext(context);
-    assert.notEqual(proxy, context); assert.equal(editorSkinContext(preview), preview); assert.equal(editorSkinContext(realtime), realtime);
+    const proxy = editorSkinContext(context as unknown as CanvasRenderingContext2D);
+    assert.notEqual(proxy, context); assert.equal(editorSkinContext(preview as unknown as CanvasRenderingContext2D), preview); assert.equal(editorSkinContext(realtime as unknown as CanvasRenderingContext2D), realtime);
     proxy.fillStyle = 'rgba(255,255,255,0.4)'; assert.equal(context.fillStyle, 'rgba(18,52,86,0.4)');
     proxy.fillStyle = '#fff'; assert.equal(context.fillStyle, '#123456');
-    proxy.fillStyle = '#ffffff80'; assert.ok(context.fillStyle.startsWith('rgba(18,52,86,0.5019'));
+    proxy.fillStyle = '#ffffff80'; assert.ok((context.fillStyle as string).startsWith('rgba(18,52,86,0.5019'));
     proxy.font = 'bold 10px RPE, sans-serif'; assert.equal(context.font, 'bold 12px "custom-ui", sans-serif');
     assert.equal(proxy.measureText('abc').width, 3);
     setEditorCanvasSkin({ palette: { '#ffffff': '#654321' } }); proxy.fillStyle = '#fff'; assert.equal(context.fillStyle, '#654321');
-    setEditorCanvasSkin(null); proxy.fillStyle = '#fff'; assert.equal(context.fillStyle, '#fff'); assert.equal(editorSkinContext(context), context);
+    setEditorCanvasSkin(null); proxy.fillStyle = '#fff'; assert.equal(context.fillStyle, '#fff'); assert.equal(editorSkinContext(context as unknown as CanvasRenderingContext2D), context);
   } finally { setEditorCanvasSkin(null); }
 });

@@ -13,7 +13,7 @@ function fixture(chart = createChart(), autoFit = true) {
   const realtimePreview = { viewDivisor: 1.3, aspectRatio: 1.5 };
   const context = { session, tempo: new TempoMap(chart.BPMList), preview, realtimePreview, previewVisible: false, sampleAutoFit: autoFit, seconds: () => 0 };
   const classes = new Set();
-  sampler.host = { closest: () => ({ classList: { toggle: (name, value) => value ? classes.add(name) : classes.delete(name) } }) };
+  sampler.host = { closest: () => ({ classList: { toggle: (name: string, value: boolean) => value ? classes.add(name) : classes.delete(name) } }) } as unknown as HTMLElement;
   sampler.canvas = { getBoundingClientRect: () => ({ left: 20, top: 100, width: 900, height: 600 }), setPointerCapture() {}, releasePointerCapture() {} };
   sampler.sampleBar = { getBoundingClientRect: () => ({ bottom: 170 }) };
   sampler.getContext = () => context; sampler.invalidate = () => {}; sampler.pause = () => {}; sampler.scene = new SceneRuntime();
@@ -30,7 +30,7 @@ test('移动取样按父线旋转后的轴反算，并保持预览与控制点�
   sampler.applyPoint({ x: point.x, y: point.y + 125 });
   assert.ok(Math.abs(sampler.draftChart.judgeLineList[1].eventLayers[0].moveXEvents[0].start - 125) < 1e-5);
   const display = sampler.previewState(); const scene = new SceneRuntime(); scene.compile(display.chart, sampler.context.tempo);
-  const state = scene.sampler(display.seconds)(1); const handle = sampler.handle(sampler.draftChart);
+  const state = scene.sampler(display!.seconds)(1)!; const handle = sampler.handle(sampler.draftChart!);
   assert.ok(Math.abs(state.x - handle.x) < 1e-8);
   assert.ok(Math.abs(state.y + handle.y) < 1e-8);
 });
@@ -93,7 +93,8 @@ test('多次数值取样仅在应用时提交，取消及完成均恢复编辑�
   sampler.updateValueDraft({ type: 'alphaEvents', index: 0, field: 'end', lineIndex: 0 }, 160);
   assert.equal(session.chart, chart); assert.ok(classes.has('event-sampling'));
   sampler.finish(true);
-  assert.equal(session.chart.judgeLineList[0].eventLayers[0].alphaEvents[0].start, 80);
-  assert.equal(session.chart.judgeLineList[0].eventLayers[0].alphaEvents[0].end, 160);
+  const line = session.chart.judgeLineList[0]!;
+  assert.equal(line.eventLayers![0]!.alphaEvents![0]!.start, 80);
+  assert.equal(line.eventLayers![0]!.alphaEvents![0]!.end, 160);
   assert.equal(classes.has('event-sampling'), false);
 });

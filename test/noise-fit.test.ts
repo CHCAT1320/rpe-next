@@ -8,10 +8,11 @@ import { createNoiseArea, noiseRuntime } from '../src/core/noise-areas.ts';
 import { EditorSession } from '../src/application/session.ts';
 import { TempoMap } from '../src/core/tempo.ts';
 import { beatValue } from '../src/core/beat.ts';
+import type { NoiseFitOptions } from '../src/application/noise-fit.ts';
 
-const defaults = { first: 4, last: 8, duration: 6, width: 800, x: 100, y: -80, rotation: 0, layerId: 'default', reveal: 'left', easingType: 1 };
-function raster(rows) { return { mask: Uint8Array.from(rows.join(''), Number), width: rows[0].length, height: rows.length }; }
-function fit(rows, options) { const { mask, width, height } = raster(rows); return fitNoiseRectangles(mask, width, height, options); }
+const defaults: NoiseFitOptions = { first: 4, last: 8, duration: 6, width: 800, x: 100, y: -80, rotation: 0, layerId: 'default', reveal: 'left', easingType: 1 };
+function raster(rows: string[]): { mask: Uint8Array; width: number; height: number } { return { mask: Uint8Array.from(rows.join(''), Number), width: rows[0]!.length, height: rows.length }; }
+function fit(rows: string[], options: { maxSpan?: number; merge?: boolean; trim?: boolean } = {}) { const { mask, width, height } = raster(rows); return fitNoiseRectangles(mask, width, height, options); }
 
 test('二值化深色、浅色、不透明度及反选均保留透明背景', () => {
   const pixels = new Uint8ClampedArray([0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 50, 50, 50, 100]);
@@ -44,7 +45,7 @@ test('不同浮现方式保持相同几何与数量，方向、随机种子可�
     assert.deepEqual(new Set(sorted), new Set(result.rectangles));
   }
   const left = orderedNoiseRectangles(result, 'left'); const right = orderedNoiseRectangles(result, 'right');
-  assert.ok(left[0].x < left.at(-1).x); assert.ok(right[0].x > right.at(-1).x);
+  assert.ok(left[0]!.x < left.at(-1)!.x); assert.ok(right[0]!.x > right.at(-1)!.x);
   assert.deepEqual(orderedNoiseRectangles(result, 'random', 12), orderedNoiseRectangles(result, 'random', 12));
   assert.notDeepEqual(orderedNoiseRectangles(result, 'random', 12), orderedNoiseRectangles(result, 'random', 13));
 });
@@ -56,12 +57,12 @@ test('生成按缓动分配出生拍并保证相同寿命，激活区间相对�
   for (const area of areas) {
     const start = beatValue(area.appearTime);
     assert.equal(beatValue(area.disappearTime) - start, 6);
-    assert.equal(beatValue(area.activeIntervals[0].startTime) - start, 1);
-    assert.equal(beatValue(area.activeIntervals[0].endTime) - start, 5);
-    assert.equal(area.activeIntervals[0].readyFlash, 0.5);
+    assert.equal(beatValue(area.activeIntervals[0]!.startTime) - start, 1);
+    assert.equal(beatValue(area.activeIntervals[0]!.endTime) - start, 5);
+    assert.equal(area.activeIntervals[0]!.readyFlash, 0.5);
   }
   const quad = fittedNoiseAreas(result, { ...defaults, easingType: 5 });
-  assert.ok(Math.abs(beatValue(quad[1].appearTime) - (4 + 4 * Math.sqrt(0.5))) < 1 / 19200);
+  assert.ok(Math.abs(beatValue(quad[1]!.appearTime) - (4 + 4 * Math.sqrt(0.5))) < 1 / 19200);
   assert.ok(fittedNoiseAreas(result, { ...defaults, first: 2, last: 2 }).every(area => beatValue(area.appearTime) === 2));
   assert.ok(fittedNoiseAreas(result, { ...defaults, active: false }).every(area => area.activeIntervals.length === 0));
 });
@@ -69,7 +70,7 @@ test('生成按缓动分配出生拍并保证相同寿命，激活区间相对�
 test('出现缓动控制随时间出现的数量比例：Out 先快后慢，In 先慢后快', () => {
   const rectangles = Array.from({ length: 101 }, (_, x) => ({ x, y: 0, width: 1, height: 1 }));
   const result = { rectangles, width: 101, height: 1 };
-  const counts = type => {
+  const counts = (type: number): number[] => {
     const areas = fittedNoiseAreas(result, { ...defaults, first: 0, last: 4, duration: 10, easingType: type });
     return [1, 2, 3, 4].map(beat => areas.filter(area => beatValue(area.appearTime) <= beat).length);
   };
@@ -78,7 +79,7 @@ test('出现缓动控制随时间出现的数量比例：Out 先快后慢，In �
   assert.deepEqual(counts(5), [7, 26, 57, 101]);
   for (const type of [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22]) {
     const offsets = noiseAppearanceOffsets(101, type);
-    for (let index = 1; index < 100; index++) assert.ok(Math.abs(easing(offsets[index], type) - index / 100) < 1e-6, `curve ${type}, rectangle ${index}`);
+    for (let index = 1; index < 100; index++) assert.ok(Math.abs(easing(offsets[index]!, type) - index / 100) < 1e-6, `curve ${type}, rectangle ${index}`);
   }
 });
 
@@ -86,10 +87,10 @@ test('全部出现缓动保留首尾时间和空间顺序，回弹与弹性使�
   for (let type = 1; type <= 29; type++) {
     const offsets = noiseAppearanceOffsets(201, type);
     assert.equal(offsets[0], 0); assert.equal(offsets.at(-1), 1);
-    for (let index = 1; index < offsets.length; index++) assert.ok(offsets[index] >= offsets[index - 1] && offsets[index] <= 1);
+    for (let index = 1; index < offsets.length; index++) assert.ok(offsets[index]! >= offsets[index - 1]! && offsets[index]! <= 1);
   }
   const bounce = noiseAppearanceOffsets(101, 26);
-  assert.ok(bounce[90] < 0.5, '90% is first crossed before the later bounce dips');
+  assert.ok(bounce[90]! < 0.5, '90% is first crossed before the later bounce dips');
   assert.deepEqual([...noiseAppearanceOffsets(1, 4)], [0]);
   assert.deepEqual([...noiseAppearanceOffsets(2, 4)], [0, 1]);
 });
@@ -99,11 +100,11 @@ test('整体顺时针旋转绕图案中心，块自身旋转绕各自中心，�
   const areas = fittedNoiseAreas(result, { ...defaults, x: 0, y: 0, width: 600, rotation: 90, layerId: 'picture' });
   const chart = createChart(); chart.noiseAreaLayers = [{ id: 'default', name: '默认层' }, { id: 'picture', name: '图案' }];
   chart.blockAreaList = [createNoiseArea(0, 30)]; const next = noiseFitChart(chart, areas); assertChart(next);
-  assert.equal(next.blockAreaList[0], chart.blockAreaList[0]); assert.equal(next.judgeLineList, chart.judgeLineList);
-  const tempo = new TempoMap(chart.BPMList); const first = noiseRuntime(areas[0], tempo).sample(tempo.seconds(4));
+  assert.equal(next.blockAreaList![0], chart.blockAreaList![0]); assert.equal(next.judgeLineList, chart.judgeLineList);
+  const tempo = new TempoMap(chart.BPMList); const first = noiseRuntime(areas[0]!, tempo).sample(tempo.seconds(4));
   assert.ok(Math.abs(first.center.x) < 1e-10); assert.ok(first.center.y > 0);
   assert.ok(first.points.every(point => Math.abs(point.x) <= 100.000001));
-  assert.equal(first.rotation, Math.PI / 2); assert.equal(areas[0].layerId, 'picture');
+  assert.equal(first.rotation, Math.PI / 2); assert.equal(areas[0]!.layerId, 'picture');
   assert.equal(next.META.RPEVersion, 230);
 });
 
@@ -111,7 +112,7 @@ test('一次生成可整体撤销重做，JSON 往返保持普通噪域结构', 
   const result = fit(['111', '101', '111']); const areas = fittedNoiseAreas(result, { ...defaults, rotation: 45 });
   const session = new EditorSession(); const original = session.chart;
   session.commit('噪域图案生成', noiseFitChart(original, areas)); const generated = session.chart;
-  assert.equal(session.history.undoStack.length, 1); assert.equal(generated.blockAreaList.length, areas.length);
+  assert.equal(session.history.undoStack.length, 1); assert.equal(generated.blockAreaList!.length, areas.length);
   session.travel('undo'); assert.equal(session.chart, original);
   session.travel('redo'); assert.equal(session.chart, generated);
   const restored = parseChart(serializeChart(generated));

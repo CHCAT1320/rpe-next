@@ -8,9 +8,11 @@ import { noiseRuntime } from '../src/core/noise-areas.ts';
 import { EditorSession } from '../src/application/session.ts';
 import { Preview } from '../src/ui/preview.ts';
 import { NoiseTrackingPanel } from '../src/ui/noise-tracking.ts';
+import type { NoiseTrackingOptions } from '../src/core/noise-tracking.ts';
+import type { Chart, NoteType } from '../src/core/types.ts';
 
-const options = { start: 0, end: 8, width: 320, height: 80, active: true, target: { mode: 'line', lineIndex: 0 } };
-function matches(chart, config = options) {
+const options: NoiseTrackingOptions = { start: 0, end: 8, width: 320, height: 80, active: true, target: { mode: 'line', lineIndex: 0 } };
+function matches(chart: Chart, config: NoiseTrackingOptions = options) {
   const tempo = new TempoMap(chart.BPMList); const area = trackedNoiseArea(chart, tempo, config);
   assertChart(noiseTrackingChart(chart, area));
   const source = noiseTrackingTarget(chart, tempo, config.target); const runtime = noiseRuntime(area, tempo);
@@ -35,7 +37,7 @@ test('追踪世界坐标、父线和多层事件，矩形以原点居中且旋�
   child.eventLayers.push({ moveXEvents: [createEvent(20, 40, 0, 8)] }); chart.judgeLineList.push(parent);
   const before = serializeChart(chart); const area = matches(chart);
   assert.deepEqual(area.bottomLeft, { x: -160, y: -40 }); assert.deepEqual(area.topRight, { x: 160, y: 40 });
-  assert.ok(area.rotateEvents.every(event => event.anchor.x === 0 && event.anchor.y === 0));
+  assert.ok(area.rotateEvents.every(event => event.anchor!.x === 0 && event.anchor!.y === 0));
   assert.equal(serializeChart(chart), before);
 });
 
@@ -63,7 +65,7 @@ test('音符跟随位置包含正反面、控制曲线、倾斜、速度和 Hold
     line.extended.inclineEvents = [createEvent(15, 15, 0, 8)];
     line.posControl = [{ x: -1000, pos: 0.8 }, { x: 1000, pos: 1.2, easing: 1 }];
     line.yControl = [{ x: -1000, y: 0.8 }, { x: 1000, y: 1.2, easing: 1 }];
-    line.notes = [{ ...createNote(type, 3, 100, 7), above, yOffset: 70, speed: 0.7 }];
+    line.notes = [{ ...createNote(type as NoteType, 3, 100, 7), above, yOffset: 70, speed: 0.7 }];
     matches(chart, { ...options, target: { mode: 'note', lineIndex: 0, noteIndex: 0 } });
   }
 });
@@ -74,22 +76,22 @@ test('生成保留拍数、层与状态，持久化后仍是普通噪域，撤�
   assert.deepEqual(area.appearTime, [1, 1, 7]); assert.deepEqual(area.disappearTime, [5, 2, 7]); assert.equal(area.isInvert, true);
   assert.deepEqual(area.activeIntervals, []); assert.ok(!Object.hasOwn(area, 'tracking'));
   const next = noiseTrackingChart(before, area); assertChart(next); assertChart(parseChart(serializeChart(next)));
-  session.commit('噪域追踪', next); assert.equal(session.chart.blockAreaList.length, 1);
-  session.travel('undo'); assert.equal(session.chart.blockAreaList.length, 0);
-  session.travel('redo'); assert.equal(session.chart.blockAreaList.length, 1);
+  session.commit('噪域追踪', next); assert.equal(session.chart.blockAreaList!.length, 1);
+  session.travel('undo'); assert.equal(session.chart.blockAreaList!.length, 0);
+  session.travel('redo'); assert.equal(session.chart.blockAreaList!.length, 1);
   assert.equal(session.chart.judgeLineList, before.judgeLineList);
 });
 
 test('拒绝空目标、过长区间和无效参数', () => {
   const chart = createChart(); const tempo = new TempoMap(chart.BPMList);
-  for (const change of [{ end: 0 }, { width: 0 }, { height: NaN }, { target: { mode: 'line', lineIndex: 7 } }, { target: { mode: 'note', lineIndex: 0, noteIndex: 0 } }, { end: 10000 }, { layerId: 'removed' }]) {
+  for (const change of ([{ end: 0 }, { width: 0 }, { height: NaN }, { target: { mode: 'line', lineIndex: 7 } }, { target: { mode: 'note', lineIndex: 0, noteIndex: 0 } }, { end: 10000 }, { layerId: 'removed' }] as Partial<NoiseTrackingOptions>[])) {
     assert.throws(() => trackedNoiseArea(chart, tempo, { ...options, ...change }));
   }
 });
 
 test('音符取样返回具体编号，Hold 身体可选且不会在预览外命中', () => {
-  const preview = new Preview({ getBoundingClientRect: () => ({ left: 20, top: 10 }) });
-  preview.visible = true; preview.viewport = { left: 0, top: 0, width: 600, height: 400 };
+  const preview = new Preview({ getBoundingClientRect: () => ({ left: 20, top: 10 }) } as unknown as HTMLCanvasElement);
+  preview.visible = true; preview.viewport = { left: 0, top: 0, width: 600, height: 400, scale: 1 };
   preview.noteHitAreas = [{ lineIndex: 2, noteIndex: 4, x1: 100, y1: 50, x2: 100, y2: 350, radius: 12 }];
   assert.deepEqual(preview.pickNoteTarget(120, 210), { lineIndex: 2, noteIndex: 4 }); assert.equal(preview.pickNote(120, 210), 2);
   assert.equal(preview.pickNoteTarget(160, 210), null); assert.equal(preview.pickNoteTarget(120, 500), null);
@@ -97,8 +99,8 @@ test('音符取样返回具体编号，Hold 身体可选且不会在预览外命
 
 test('追踪预览滚轮使用原调时逻辑并同步显示时间，可滚出噪域生命周期', () => {
   const panel = Object.create(NoiseTrackingPanel.prototype); let seconds = 2; let calls = 0;
-  const event = { deltaY: -100, altKey: true }; panel.animating = true; panel.animationEpoch = 1; panel.playButton = {};
-  panel.getContext = () => ({ wheel: value => { assert.equal(value, event); calls++; seconds += 5; }, seconds: () => seconds }); panel.invalidate = () => {};
+  const event = { deltaY: -100, altKey: true } as WheelEvent; panel.animating = true; panel.animationEpoch = 1; panel.playButton = {} as HTMLButtonElement;
+  panel.getContext = () => ({ wheel: (value: WheelEvent) => { assert.equal(value, event); calls++; seconds += 5; }, seconds: () => seconds }); panel.invalidate = () => {};
   panel.range = { start: 0, end: 4 }; panel.wheel(event);
   assert.equal(calls, 1); assert.equal(panel.previewSeconds, 7); assert.equal(panel.animating, false);
   assert.equal(panel.animationEpoch, null); assert.equal(panel.playButton.textContent, '▶ 演示追踪');

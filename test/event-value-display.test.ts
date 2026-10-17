@@ -11,17 +11,21 @@ import { easing, bezier } from '../src/core/easing.ts';
 import { eventDisplayIndex } from '../src/ui/event-display-index.ts';
 import { migratePreferences } from '../src/core/preferences.ts';
 import { readEditorPreferences, writeEditorPreferences } from '../src/platform/editor-preferences.ts';
+import type { Chart } from '../src/core/types.ts';
 
-function surface() {
-  const calls = []; const paths = []; let currentPath = []; let subpaths = [];
+type DrawCall = { method: string | symbol; args: unknown[] };
+type SurfaceContext = CanvasRenderingContext2D & { calls: DrawCall[]; paths: number[][][] };
+
+function surface(): { context: SurfaceContext; canvas: HTMLCanvasElement } {
+  const calls: DrawCall[] = []; const paths: number[][][] = []; let currentPath: number[][] = []; let subpaths: number[][][] = [];
   const context = new Proxy({ calls, paths, measureText: () => ({ width: 20 }),
-    beginPath() { currentPath = []; subpaths = []; }, moveTo(x, y) { currentPath = [[x, y]]; subpaths.push(currentPath); }, lineTo(x, y) { currentPath.push([x, y]); }, stroke() { paths.push(...subpaths.map(path=>path.map(point=>[...point]))); },
-  }, { get(target, key) { return target[key] ?? ((...args) => calls.push({ method: key, args })); } });
-  const canvas = { style: {}, clientWidth: 600, clientHeight: 600, addEventListener() {}, getContext: () => context, getBoundingClientRect: () => ({ width: 600, height: 600 }) };
-  return { context, canvas };
+    beginPath() { currentPath = []; subpaths = []; }, moveTo(x: number, y: number) { currentPath = [[x, y]]; subpaths.push(currentPath); }, lineTo(x: number, y: number) { currentPath.push([x, y]); }, stroke() { paths.push(...subpaths.map(path=>path.map(point=>[...point]))); },
+  }, { get(target, key) { return (target as Record<string | symbol, unknown>)[key] ?? ((...args: unknown[]) => calls.push({ method: key, args })); } });
+  const canvas = { style: {}, clientWidth: 600, clientHeight: 600, addEventListener() {}, getContext: () => context, getBoundingClientRect: () => ({ width: 600, height: 600 }) } as unknown as HTMLCanvasElement;
+  return { context: context as unknown as SurfaceContext, canvas };
 }
 
-const curvePaths = context => context.paths.filter(points => points.length >= 2 && points[0][0] !== points.at(-1)[0] && points[0][1] !== points.at(-1)[1]);
+const curvePaths = (context: SurfaceContext): number[][][] => context.paths.filter(points => points.length >= 2 && points[0]![0] !== points.at(-1)![0] && points[0]![1] !== points.at(-1)![1]);
 
 test('普通事件在单线和多线中都不在连续短事件接缝重复标注数值', () => {
   globalThis.devicePixelRatio = 1;
@@ -52,7 +56,7 @@ test('噪域与普通事件共用整组数值范围，短事件、反向变化�
   const editor = Object.create(NoiseAreaEditor.prototype); const noise = surface();
   const layout = { width: 1000, height: 600, split: 400, eventLeft: 430, eventWidth: 90 };
   editor.getContext = () => ({ timeline, tempo: new TempoMap(chart.BPMList), session: { chart: { blockAreaList: [area] } } });
-  editor.layout = () => layout; editor.y = beat => 508 - beat * 250; editor.beatAt = vertical => (508 - vertical) / 250;
+  editor.layout = () => layout; editor.y = (beat: number) => 508 - beat * 250; editor.beatAt = (vertical: number) => (508 - vertical) / 250;
   editor.selected = 0; editor.selection = new Set(['area:0']); editor.areaX = () => 100; editor.canvas = { setAttribute() {} }; editor.drawDistribution = editor.drawOwner = () => {};
   editor.drawTimeline(noise.context, layout.width, layout.height, layout);
   const noisePaths = curvePaths(noise.context); assert.equal(noisePaths.length, 3, 'short events must still draw their curve');
@@ -62,8 +66,8 @@ test('噪域与普通事件共用整组数值范围，短事件、反向变化�
     const normalValue = (normalX - normalBounds.x - 6) / (normalBounds.width - 12); const noiseValue = (noiseX - bounds.x - 6) / (bounds.width - 12);
     assert.ok(Math.abs(normalValue - noiseValue) < 1e-12); assert.ok(Math.abs(normalY - noiseY) < 1e-12);
   }
-  for (let event = 0; event < 2; event++) assert.ok(Math.hypot(...noisePaths[event].at(-1).map((value, axis) => value - noisePaths[event + 1][0][axis])) < 1e-8);
-  assert.ok(Math.abs((noisePaths[0].at(-1)[0] - bounds.x - 6) / (bounds.width - 12) - 30 / 55) < 1e-12);
+  for (let event = 0; event < 2; event++) assert.ok(Math.hypot(...noisePaths[event]!.at(-1)!.map((value, axis) => value - noisePaths[event + 1]![0]![axis]!)) < 1e-8);
+  assert.ok(Math.abs((noisePaths[0]!.at(-1)![0]! - bounds.x - 6) / (bounds.width - 12) - 30 / 55) < 1e-12);
   editor.clipboard = { start: 0.5, entries: events.map(value => ({ type: 'moveXEvents', value })) }; editor.cursor = { beat: 0.75 };
   noise.context.paths.length = 0; editor.drawTimeline(noise.context, layout.width, layout.height, layout);
   const withGhosts = curvePaths(noise.context); assert.equal(withGhosts.length, 6);
@@ -82,8 +86,8 @@ test('缓动超调与数值跳变按普通事件的映射绘制，裁剪到事�
   output.context.paths.length = 0;
   drawEventCurve(output.context, createEvent(10, 20, 0, 1), { min: 0, max: 100 }, rectangle, 100, 50);
   drawEventCurve(output.context, createEvent(60, 80, 1, 2), { min: 0, max: 100 }, rectangle, 50, 0);
-  assert.equal(output.context.paths.length, 2); assert.equal(output.context.paths[0].at(-1)[1], output.context.paths[1][0][1]);
-  assert.ok(output.context.paths[0].at(-1)[0] < output.context.paths[1][0][0]);
+  assert.equal(output.context.paths.length, 2); assert.equal(output.context.paths[0]!.at(-1)![1]!, output.context.paths[1]![0]![1]!);
+  assert.ok(output.context.paths[0]!.at(-1)![0]! < output.context.paths[1]![0]![0]!);
 });
 
 test('事件曲线缓存跟随缓动区间和 Bezier 控制点修改，线性事件仍精确经过首尾值', () => {
@@ -106,15 +110,15 @@ test('事件曲线缓存跟随缓动区间和 Bezier 控制点修改，线性事
 });
 
 test('事件显示索引复用排序结果，编辑、撤销和列表长度变化会刷新范围及命中索引', () => {
-  const owner = {}; const chart = {}; const events = [createEvent(0,10,0,1), createEvent(10,20,1,2)];
+  const owner: { eventDisplayChart?: Chart } = {}; const chart = {} as Chart; const events = [createEvent(0,10,0,1), createEvent(10,20,1,2)];
   const first = eventDisplayIndex(owner, events, chart);
   assert.equal(eventDisplayIndex(owner, events, chart), first); assert.equal(first.groups.length, 1);
-  events[1] = createEvent(10,40,3,4); const changed = eventDisplayIndex(owner, events, {});
+  events[1] = createEvent(10,40,3,4); const changed = eventDisplayIndex(owner, events, {} as Chart);
   assert.equal(changed.groups.length, 2); assert.deepEqual(changed.index.query(3,4).map(entry => entry.index), [1]);
-  assert.equal(changed.ranges.get(1).max, 40);
+  assert.equal(changed.ranges.get(1)!.max, 40);
   events.push({ ...createEvent(40,50,4,5), inst: true });
-  const next = eventDisplayIndex(owner, events, owner.eventDisplayChart); assert.notEqual(next, changed);
-  assert.ok(next.unmergeable.has(next.ranges.get(2)));
+  const next = eventDisplayIndex(owner, events, owner.eventDisplayChart!); assert.notEqual(next, changed);
+  assert.ok(next.unmergeable.has(next.ranges.get(2)!));
   const undone = eventDisplayIndex(owner, [createEvent(0,10,0,1),createEvent(10,20,1,2)], chart);
   assert.equal(undone.groups.length,1); assert.equal(undone.groups[0].max,20);
 });
@@ -122,7 +126,7 @@ test('事件显示索引复用排序结果，编辑、撤销和列表长度变�
 test('绘制事件曲线默认开启且保存布尔设置，关闭时普通单线和多线仍保留每段命中区域与数值', () => {
   assert.equal(migratePreferences().settings.drawEventCurves, true);
   for (const drawEventCurves of [false,true]) {
-    let saved; const storage = { setItem(key,value) { saved=value; }, getItem() { return saved; } };
+    let saved: string | undefined; const storage = { setItem(key: string, value: string) { saved = value; }, getItem() { return saved ?? null; } };
     writeEditorPreferences({ drawEventCurves },storage); assert.deepEqual(readEditorPreferences(storage),{drawEventCurves});
   }
   const chart=createChart(); chart.judgeLineList[0].eventLayers[0].moveXEvents=[createEvent(10,20,0.5,1)]; chart.judgeLineList.push(createLine());
@@ -141,11 +145,11 @@ test('多线事件只绘制可见面板，横向滚动后的框选仍选中框�
   const chart=createChart(); chart.judgeLineList=[0,1,2].map(()=>{const line=createLine();line.eventLayers[0].moveXEvents=[createEvent(10,20,0.5,1)];return line;});
   const session=new EditorSession(chart); session.multiLineEnabled=true; session.multiLineMode='events'; session.multiLineIndices=[0,1,2];
   const output=surface(); const timeline=new Timeline(surface().canvas,output.canvas,()=>session,()=>{},()=>{});
-  timeline.multiLineEventWidth=600; timeline.multiLineEventWidthExplicit=true; timeline.multiLineScroll.events=1000;
+  timeline.multiLineEventWidth=600; timeline.multiLineEventWidthExplicit=true; (timeline.multiLineScroll as { notes: number; events: number }).events=1000;
   timeline.drawMultiLineEvents(0);
   assert.ok(timeline.eventRects.every(rect=>rect.lineIndex!==0),'offscreen first panel does not get redrawn');
   timeline.point=()=>({x:599,y:100}); timeline.rectangleTimes=()=>[0,2];
   timeline.eventInteraction.drag={kind:'rectangle',finished:true,area:'events',start:{x:0,y:500},startWorldX:0,current:{x:599,y:100},append:false};
-  timeline.eventInteraction.up({});
+  timeline.eventInteraction.up({} as Parameters<typeof timeline.eventInteraction.up>[0]);
   for (const lineIndex of [0,1,2]) assert.ok(session.multiEventSelection.get(lineIndex)?.has('moveXEvents:0'),`line ${lineIndex} is still selectable across horizontal scrolling`);
 });

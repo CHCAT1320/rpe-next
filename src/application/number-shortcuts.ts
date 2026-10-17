@@ -10,7 +10,7 @@ import type { ChartEvent, Note } from '../core/types.ts';
  * directly; the note branch additionally needs `transformSelection`, which the session provides.
  */
 export interface NumberShortcutSession extends EventEditSession {
-  transformSelection(label: string, change: (note: Note, entry: { lineIndex: number; index: number; note: Note }) => Note): void;
+  transformSelection(label: string, change: (note: Note | undefined, entry: { lineIndex: number; index: number; note: Note | undefined }) => Note): void;
 }
 
 /**
@@ -23,7 +23,7 @@ export interface NumberShortcutSession extends EventEditSession {
 export function applyNumberShortcut(session: NumberShortcutSession, action: string): boolean {
   if (!['NumberMirror', 'NumberFill'].includes(action)) return false;
   if (session.focus === 'notes' && session.selection.size === 1) {
-    session.transformSelection(action === 'NumberMirror' ? '镜像音符 X' : '切换音符上下侧', note => action === 'NumberMirror'
+    session.transformSelection(action === 'NumberMirror' ? '镜像音符 X' : '切换音符上下侧', note => note === undefined ? note as never : action === 'NumberMirror'
       ? { ...note, positionX: -note.positionX }
       : { ...note, above: noteIsAbove(note) ? note.type === 2 ? 0 : 2 : 1 });
     return true;

@@ -8,7 +8,7 @@ import { packageEntries } from '../src/platform/files.ts';
 
 // `assetUrl` returns a document-relative path (`/assets/...`, or a subdirectory build prefix),
 // so resolve it against the repository root the same way a browser would against the origin.
-const readAsset = async url => new Response(await readFile(new URL(String(url).replace(/^\/+/, ''), new URL('../', import.meta.url))));
+const readAsset = async (url: string): Promise<Response> => new Response(await readFile(new URL(String(url).replace(/^\/+/, ''), new URL('../', import.meta.url))));
 
 test('两套内置皮肤资源完整、作者正确、可解析且普通与低性能通道互相独立', async () => {
   const skins = await loadBuiltinNoiseSkins(readAsset);
@@ -46,8 +46,8 @@ test('选用的内置皮肤可通过 JSON 引用和 PEZ 完整携带，不依赖
     return { id: index ? 'ocean' : 'default', name: skin.name, skin: root, parameters: {} };
   });
   const restored = parseChart(serializeChart(chart)); const exported = packageEntries(restored, assets, 'chart.json');
-  for (const [index, layer] of restored.noiseAreaLayers.entries()) {
-    const relative = new Map([...exported].filter(([path]) => path.startsWith(layer.skin + '/')).map(([path, bytes]) => [path.slice(layer.skin.length + 1), bytes]));
+  for (const [index, layer] of restored.noiseAreaLayers!.entries()) {
+    const relative = new Map([...exported].filter(([path]) => path.startsWith(layer.skin! + '/')).map(([path, bytes]) => [path.slice(layer.skin!.length + 1), bytes]));
     assert.equal(parseNoiseSkin(relative).author, skins[index].author); assert.ok(relative.size > 5);
   }
   assert.ok(![...exported.keys()].some(path => path.startsWith('assets/')));

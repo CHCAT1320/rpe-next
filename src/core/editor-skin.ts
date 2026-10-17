@@ -231,8 +231,8 @@ function canvasConfig(config: unknown, parameters: Record<string, unknown> = {})
   if (!plain(settings.targets ?? {})) fail('Canvas targets 无效');
   for (const [key, target] of Object.entries((settings.targets ?? {}) as Record<string, unknown>)) { if (!Object.hasOwn(EDITOR_SKIN_CANVASES, key) || (plain(target) && target.targets !== undefined)) fail('未知或嵌套画布：' + key); canvasConfig(target, parameters); }
 }
-export function resolveEditorSkin(skin: Record<string, unknown>, { variant = 'base', parameters = {} }: { variant?: string; parameters?: Record<string, unknown> } = {}): Record<string, unknown> {
-  const variants = (skin.variants ?? {}) as Record<string, Record<string, unknown>>;
+export function resolveEditorSkin(skin: SkinDocument, { variant = 'base', parameters = {} }: { variant?: string; parameters?: Record<string, unknown> } = {}): SkinDocument {
+  const variants = (skin.variants ?? {}) as unknown as Record<string, SkinDocument>;
   const selected = variant === 'base' ? {} : variants[variant];
   if (!selected) fail('变体不存在：' + variant);
   const definitions = (skin.parameters ?? {}) as Record<string, EditorSkinParameter>;
@@ -248,7 +248,7 @@ export function resolveEditorSkin(skin: Record<string, unknown>, { variant = 'ba
   const palette = (entries: Record<string, string> | undefined): Record<string, string> | undefined => entries && Object.fromEntries(Object.entries(entries).map(([from, to]): [string, string] => { const reference = String(to).match(paletteParameter); return [from, reference ? String(values['param-' + reference[1]!] ?? to) : to]; }));
   const canvas = { ...(skin.canvas as EditorSkinCanvasConfig | undefined), ...(selected.canvas as EditorSkinCanvasConfig | undefined) };
   const targets = { ...(skin.canvas as EditorSkinCanvasConfig | undefined)?.targets, ...(selected.canvas as EditorSkinCanvasConfig | undefined)?.targets };
-  return { ...skin, colorScheme: selected.colorScheme ?? skin.colorScheme, tokens: { ...(skin.tokens as Record<string, string> | undefined), ...(selected.tokens as Record<string, string> | undefined), ...values }, styles: [...(skin.styles as EditorSkinRule[] | undefined ?? []), ...(selected.styles as EditorSkinRule[] | undefined ?? [])], canvas: { ...canvas, palette: palette({ ...(skin.canvas as EditorSkinCanvasConfig | undefined)?.palette, ...(selected.canvas as EditorSkinCanvasConfig | undefined)?.palette }) as Record<string, string> | undefined, targets: Object.fromEntries(Object.entries(targets).map(([role, target]) => [role, { ...target, palette: palette(target.palette) }])) } };
+  return { ...skin, colorScheme: (selected.colorScheme as 'light' | 'dark' | undefined) ?? skin.colorScheme, tokens: { ...(skin.tokens as Record<string, string> | undefined), ...(selected.tokens as Record<string, string> | undefined), ...values as Record<string, string> }, styles: [...(skin.styles as EditorSkinRule[] | undefined ?? []), ...(selected.styles as EditorSkinRule[] | undefined ?? [])], canvas: { ...canvas, palette: palette({ ...(skin.canvas as EditorSkinCanvasConfig | undefined)?.palette, ...(selected.canvas as EditorSkinCanvasConfig | undefined)?.palette }) as Record<string, string> | undefined, targets: Object.fromEntries(Object.entries(targets).map(([role, target]) => [role, { ...target, palette: palette(target.palette) }])) } };
 }
 export function parseEditorSkin(files: Map<string, Uint8Array>): EditorSkinPackage {
   if (!(files instanceof Map) || files.size > EDITOR_SKIN_LIMITS.files) fail('皮肤文件数量超限');

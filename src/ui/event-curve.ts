@@ -1,6 +1,6 @@
 import { easing, bezier } from '../core/easing.ts';
 import type { ChartEvent } from '../core/types.ts';
-import type { EventChain, Point } from '../core/editor-display.ts';
+import type { Point } from '../core/editor-display.ts';
 
 /** The curve cache key for one event at one sample count. */
 interface CurveShape { key: string; samples: number[] }
@@ -17,10 +17,13 @@ export interface CurveOptions {
   append?: boolean;
 }
 
+/** The value range a chain spans, which is all a curve needs to normalise its samples. */
+export interface ValueRange { min: number; max: number }
+
 /** One curve in a batch: the event, its chain's value range, and the vertical span to draw into. */
 export interface CurveBatchEntry {
   event: ChartEvent;
-  range: EventChain;
+  range: ValueRange;
   startY: number;
   endY: number;
 }
@@ -46,7 +49,7 @@ function curveShape(event: ChartEvent, steps: number): number[] {
 }
 
 // All timeline views use the chain's value range, including short event segments.
-export function drawEventCurve(context: CanvasRenderingContext2D, event: ChartEvent, range: EventChain | null | undefined, rectangle: CurveRect, startY: number, endY: number, { steps = 36, padding = 6, lineWidth = 2, drawConstant = false, append = false }: CurveOptions = {}): boolean {
+export function drawEventCurve(context: CanvasRenderingContext2D, event: ChartEvent, range: ValueRange | null | undefined, rectangle: CurveRect, startY: number, endY: number, { steps = 36, padding = 6, lineWidth = 2, drawConstant = false, append = false }: CurveOptions = {}): boolean {
   const start = Number(event.start); const end = Number(event.end);
   if (![start, end, range?.min, range?.max].every(Number.isFinite)) return false;
   const span = (range?.max ?? 0) - (range?.min ?? 0);

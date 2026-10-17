@@ -27,7 +27,7 @@ type EventSession = TimelineSession & EventListSource & EventEditSession & Batch
 type BeatLike = number | Beat;
 
 /** One pointer event on the event grid; only the members read below are declared. */
-interface PointerLike {
+export interface PointerLike {
   button: number;
   pointerId: number;
   ctrlKey: boolean;

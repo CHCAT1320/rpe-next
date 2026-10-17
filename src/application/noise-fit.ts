@@ -24,18 +24,18 @@ export interface NoiseFitOptions {
   invert?: boolean;
   name?: string;
   reveal: string;
-  seed: number;
+  seed?: number;
 }
 
 /** Turns one fitted bitmap plus the panel's layout into the 噪域 areas it generates. */
-export function fittedNoiseAreas(fit: NoiseFit, options: NoiseFitOptions): NoiseArea[] {
+export function fittedNoiseAreas(fit: Pick<NoiseFit, 'rectangles' | 'width' | 'height'>, options: NoiseFitOptions): NoiseArea[] {
   const { first, last, duration, width, x, y, rotation = 0, easingType = 1, active = true, activeStart = 0, activeEnd = duration, readyFlash = 0.5, layerId, invert = false, name = '' } = options;
   if (![first, last, duration, width, x, y, rotation, readyFlash].every(Number.isFinite) || last < first || duration <= 0 || width <= 0 || width > 20000 || readyFlash < 0 || readyFlash > 600) throw new Error('首尾出现拍、存在时间、大小、坐标或预备闪烁时长无效');
   if (!Number.isInteger(easingType) || easingType < 1 || easingType > 29) throw new Error('缓动编号须在 1–29 内');
   if (active && (![activeStart, activeEnd].every(Number.isFinite) || activeStart < 0 || activeEnd <= activeStart || activeEnd > duration)) throw new Error('激活范围须满足 0 ≤ 起拍 < 止拍 ≤ 存在时间');
   if (!fit?.rectangles?.length || fit.width <= 0 || fit.height <= 0) throw new Error('请先拟合文字或图片');
   if (fit.rectangles.length > 20000) throw new Error('一次最多生成 20000 个噪域，请降低精度或增大合并范围');
-  const rectangles = orderedNoiseRectangles(fit, options.reveal, options.seed);
+  const rectangles = orderedNoiseRectangles(fit as NoiseFit, options.reveal, options.seed ?? 1);
   const offsets = noiseAppearanceOffsets(rectangles.length, easingType);
   const scale = width / fit.width; const angle = rotation * Math.PI / 180; const cosine = Math.cos(angle); const sine = Math.sin(angle);
   return rectangles.map((rectangle, index) => {
