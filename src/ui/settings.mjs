@@ -26,7 +26,8 @@ export function createSettingsPanel() {
   group('实时预览判定线', [['line-numbers', '显示判定线编号', 'checkbox', true], ['line-arrows', '显示方向箭头', 'checkbox', true], ['line-tint', '当前判定线染色', 'checkbox', true], ['merge-line-numbers', '合并相近且同向的编号', 'checkbox', true], ['pick-preview-lines', '点击预览判定线切换编辑线', 'checkbox', true]]);
   group('提示与通知', [['tips-enabled', '显示右下角 Tips', 'checkbox', true], ['success-notifications', '显示绿色完成通知', 'checkbox', true], ['note-source-hover', '悬停音符显示来源线', 'checkbox', true]]);
   group('噪域预览', [['pick-preview-noise-areas', '点击预览噪域进入编辑（优先于音符和判定线）', 'checkbox', true], ['seamless-noise-areas', '融合连贯噪域，隐藏内部接缝', 'checkbox', true], ['force-simple-noise', '忽略皮肤，使用简易渲染', 'checkbox', false]]);
-  group('事件编辑', [['event-cut-density', '事件切割密度（每横线间隔的段数）', 'number', 4, 0.1, 128, 0.1], ['sample-auto-fit', '取样时自动扩大视野（结束后恢复）', 'checkbox', true]]);
+  group('事件编辑', [['event-cut-density', '事件切割密度（每横线间隔的段数）', 'number', 4, 0.1, 128, 0.1], ['event-drag-sensitivity', '拖动属性名称灵敏度（倍率，越大越快）', 'range', 1, 0.1, 8, 0.1], ['sample-auto-fit', '取样时自动扩大视野（结束后恢复）', 'checkbox', true]]);
+  const dragHint = document.createElement('p'); dragHint.className = 'hint'; dragHint.textContent = '灵敏度以 1 为基准：每像素对应各事件类型的默认步长，调低更精细、调高更快。Shift 粗调（×10 并吸附 10）与 Alt 微调（×0.1）在其上叠加，吸附步长不受灵敏度影响。'; body.lastElementChild.append(dragHint);
   group('文本输入', [['text-selection-drag', '允许拖拽文本框中已选中的文字', 'checkbox', false]]);
   group('判定线切换', [['line-switcher-enabled', 'Ctrl+滚轮切线时显示附近线缩略图', 'checkbox', true]]);
   group('剪贴板', [['clipboard-history-enabled', '启用剪贴板历史（长按 Ctrl+V）', 'checkbox', true]]);

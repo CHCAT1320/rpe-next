@@ -32,5 +32,5 @@
     "build:desktop": "node tools/build-desktop.mjs",
     "desktop": "vite build && electron desktop/main.cjs --dist"
   },
-  "devDependencies": { "electron": "44.5.1", "vite": "^8.3.3" }
+  "devDependencies": { "@electron/packager": "20.3.0", "electron": "44.5.1", "vite": "^8.3.3", "yazl": "3.3.1" }
 }

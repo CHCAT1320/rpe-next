@@ -82,7 +82,7 @@ export function commitEventLists(session, label, updates, selection = session.ev
   session.commit(label, chart, beforeSelection);
 }
 
-function transformedEventLists(session, lineIndex, selection, transform) {
+export function transformedEventLists(session, lineIndex, selection, transform) {
   const updates = new Map();
   const linked = new Map();
   for (const key of selection) {

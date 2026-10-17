@@ -97,3 +97,80 @@ test('多次数值取样仅在应用时提交，取消及完成均恢复编辑�
   assert.equal(session.chart.judgeLineList[0].eventLayers[0].alphaEvents[0].end, 160);
   assert.equal(classes.has('event-sampling'), false);
 });
+
+test('数值取样提交可使用调用方标签，空取样不产生历史', () => {
+  const { sampler, session } = fixture();
+  sampler.updateValueDraft({ type: 'alphaEvents', index: 0, field: 'start', lineIndex: 0 }, 80);
+  sampler.finishValue(true, '拖动修改事件起始透明度');
+  assert.equal(session.history.undoStack.at(-1).label, '拖动修改事件起始透明度');
+  const historyLength = session.history.undoStack.length;
+  sampler.finishValue(false);
+  sampler.finishValue(true, '拖动修改事件起始透明度');
+  assert.equal(session.history.undoStack.length, historyLength);
+});
+
+test('数值取样暂停时循环预览事件时间段，播放中跟随当前时间', () => {
+  const { sampler, session, context } = fixture();
+  const event = session.chart.judgeLineList[0].eventLayers[0].alphaEvents[0];
+  const start = context.tempo.seconds(event.startTime, 1);
+  const end = context.tempo.seconds(event.endTime, 1);
+  assert.ok(end > start, '默认事件有正的时间跨度');
+  sampler.updateValueDraft({ type: 'alphaEvents', index: 0, field: 'start', lineIndex: 0 }, 80);
+  assert.equal(sampler.looping, true);
+  const first = sampler.previewState().seconds;
+  assert.ok(first >= start - 1e-9 && first <= end + 1e-9, `${first} 应落在 [${start}, ${end}]`);
+  sampler.valueDraft.startedAt -= 200;
+  const second = sampler.previewState().seconds;
+  assert.notEqual(second, first, '预览时间随时间推进');
+  assert.ok(second >= start - 1e-9 && second <= end + 1e-9);
+  context.playing = () => true;
+  assert.equal(sampler.looping, false);
+  assert.equal(sampler.previewState().seconds, 0, '播放中沿用当前时间');
+  context.playing = () => false;
+  sampler.finishValue(false);
+  assert.equal(sampler.looping, false, '结束取样后停止循环');
+  assert.equal(sampler.previewState(), null);
+});
+
+test('无时间跨度的事件退化为当前时间静态预览', () => {
+  const chart = createChart();
+  chart.judgeLineList[0].eventLayers[0].alphaEvents = [createEvent(0, 0, 2, 2)];
+  const { sampler, context } = fixture(chart);
+  sampler.updateValueDraft({ type: 'alphaEvents', index: 0, field: 'start', lineIndex: 0 }, 80);
+  assert.equal(sampler.looping, false);
+  assert.equal(sampler.previewState().seconds, context.seconds());
+});
+
+test('数值拖动和取样沿用绑定组同步规则，钩定首尾一致并作为一步撤销',()=>{
+  const chart=createChart(),events=[{...createEvent(20,120,0,4),linkgroup:7,inst:1},{...createEvent(20,120,4,8),linkgroup:7}];
+  chart.judgeLineList[0].eventLayers[0].moveXEvents=events;
+  const {sampler,session}=fixture(chart);
+  sampler.updateValueDraft({type:'moveXEvents',index:0,lineIndex:0,field:'end'},50);
+  assert.deepEqual(sampler.valueDraft.chart.judgeLineList[0].eventLayers[0].moveXEvents.map(event=>[event.start,event.end]),[[50,50],[50,50]]);
+  assert.equal(session.chart,chart);sampler.finishValue(true);assert.equal(session.history.undoStack.length,1);
+  session.travel('undo');assert.equal(session.chart,chart);
+});
+
+test('草稿期间发生其他编辑或撤销时，不覆盖新谱面或清空重做',()=>{
+  for(const action of ['commit','undo','session','layer']){
+    const {sampler,session,context}=fixture();
+    session.commit('改名',{...session.chart,META:{...session.chart.META,name:'Changed'}});
+    sampler.updateValueDraft({type:'alphaEvents',index:0,field:'start',lineIndex:0},80);
+    if(action==='commit')session.commit('其他修改',{...session.chart,META:{...session.chart.META,name:'Other'}});
+    if(action==='undo')session.travel('undo');
+    if(action==='session')context.session=new EditorSession();
+    if(action==='layer')session.eventLayer=1;
+    const current=context.session.chart,history=context.session.history.undoStack.length,redo=context.session.history.redoStack.length;
+    sampler.finishValue(true);
+    assert.equal(context.session.chart,current,action);assert.equal(context.session.history.undoStack.length,history,action);assert.equal(context.session.history.redoStack.length,redo,action);
+    assert.equal(sampler.previewState(),null);assert.equal(session.liveEventEdit,false);
+  }
+});
+
+test('过期草稿停止预览且后续拖动更新不会悄悄恢复旧修改',()=>{
+  const {sampler,session}=fixture();
+  sampler.updateValueDraft({type:'alphaEvents',index:0,field:'start',lineIndex:0},80);
+  session.commit('其他修改',{...session.chart,META:{...session.chart.META,name:'Other'}});
+  assert.equal(sampler.updateValueDraft({type:'alphaEvents',index:0,field:'end',lineIndex:0},120),false);
+  assert.equal(sampler.valueDraft,null);assert.equal(session.chart.META.name,'Other');assert.equal(session.history.undoStack.length,1);
+});

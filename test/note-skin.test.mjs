@@ -64,6 +64,35 @@ test('图集参数变化会清除帧和重复身体缓存，时长或颜色修�
   runtime.crops.set('body-mh',{});runtime.setInfo({...runtime.info,holdAtlasMH:[30,40]});assert.equal(runtime.crops.size,0);
 });
 
+function withFrameCanvases(run) {
+  const previous=globalThis.document,canvases=[];
+  globalThis.document={createElement(name){assert.equal(name,'canvas');const context=drawContext(),canvas={width:0,height:0,getContext:()=>context};canvases.push(canvas);return canvas;}};
+  try {run(canvases);} finally {if(previous===undefined)delete globalThis.document;else globalThis.document=previous;}
+}
+
+test('70 帧打击动画跨预览和循环复用完整缓存，不重复裁切染色或占用共享音符缓存',()=>withFrameCanvases(canvases=>{
+  const record=parseNoteSkin(noteSkinFixture('hitFxDuration: 0.65\nhideParticles: true'));record.info.hitFx=[7,10];
+  const runtime=new ResourceNoteSkin(record,new Map([['hit_fx.png',{naturalWidth:2509,naturalHeight:3585}]]),()=>assert.fail('打击动画不应生成共享临时染色源'));
+  const contexts=[drawContext(),drawContext()],draw=(index,color)=>runtime.drawHit(contexts[index%2],{age:(index+.5)/70*.65,x:0,y:0,size:100,color});
+  for(let pass=0;pass<4;pass++)for(let index=0;index<70;index++)draw(index);
+  assert.equal(canvases.length,70);assert.equal(runtime.hitFrames.size,70);assert.equal(runtime.hitFrameBytes,70*359*359*4);
+  assert.equal(runtime.crops.size,0);
+  draw(4,[100.1,200.2,255]);draw(4,[100.2,200.1,255]);assert.equal(canvases.length,71,'相同渲染颜色应复用同一帧');
+  runtime.setInfo({...runtime.info,hitFxDuration:1,holdAtlas:[14,18]});assert.equal(runtime.hitFrames.size,71);
+  runtime.setInfo({...runtime.info,hitFx:[5,14]});assert.equal(runtime.hitFrames.size,0);assert.equal(runtime.hitFrameBytes,0);
+  runtime.drawHit(contexts[0],{age:.1,x:0,y:0,size:100});runtime.dispose();assert.equal(runtime.hitFrames.size,0);assert.equal(runtime.hitFrameBytes,0);
+}));
+
+test('打击帧按像素预算限制缓存，最近使用的帧在淘汰时保留',()=>withFrameCanvases(canvases=>{
+  const record=parseNoteSkin(noteSkinFixture('hitFxDuration: 1\nhideParticles: true'));record.info.hitFx=[7,10];
+  const runtime=new ResourceNoteSkin(record,new Map([['hit_fx.png',{naturalWidth:512*7,naturalHeight:512*10}]]),()=>assert.fail());
+  const context=drawContext(),draw=index=>runtime.drawHit(context,{age:(index+.5)/70,x:0,y:0,size:100});
+  for(let index=0;index<64;index++)draw(index);
+  draw(0);draw(64);
+  const allocated=canvases.length;draw(0);assert.equal(canvases.length,allocated);draw(1);assert.equal(canvases.length,allocated+1);
+  assert.equal(runtime.hitFrames.size,64);assert.equal(runtime.hitFrameBytes,64*1024*1024);
+}));
+
 test('可选皮肤音效解码失败明确报错，切换保留谱面自定义音效且跨谱面仍使用选中的皮肤',async()=>{
   const record=parseNoteSkin(new Map([...noteSkinFixture(),['click.ogg',new Uint8Array([1,2,3])]]));
   const decoded={duration:0.08};const buffers=await decodeNoteSkinSounds(record,{decodeAudioData:async()=>decoded});assert.equal(buffers.get('tap'),decoded);

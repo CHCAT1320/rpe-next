@@ -97,7 +97,7 @@ export async function smokeAssetLibrary(contents, service, controls) {
       [...host.querySelectorAll('.asset-detail-actions button')].find(node => node.textContent === '打开文件夹').click();
       await new Promise(resolve => setTimeout(resolve, 250));
     });
-  });
+  }, 2);
   assert.deepEqual(opened, [expected, await service.call('assetFolder', id, 'charts/art/empty', true)]);
   assert.ok((await readFile(join(expected, 'same.png'))).length > 0);
   assert.deepEqual(await readdir(opened[1]), []);

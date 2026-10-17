@@ -2,6 +2,9 @@ import { packager } from '@electron/packager';
 import { cp, mkdir, readFile, writeFile, readdir, rm, symlink, stat } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { ZipFile } from 'yazl';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve, basename, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +28,7 @@ const product = kind === 'server' ? 'RePhiEdit Collaboration Server' : 'RePhiEdi
 const executableName = kind === 'server' ? 'RPE-Collaboration-Server' : 'RePhiEdit-Next';
 const stem = 'rpe-next-' + (kind === 'server' ? 'collaboration-server-' : '') + metadata.version + '-' + platformName + '-' + arch;
 const output = join(root, 'release', 'v' + metadata.version);
-const work = join(root, 'release', '.build-' + platform + '-' + arch + '-' + kind), stage = join(work, 'source');
+const work = join(root, 'release', '.build-' + platform + '-' + arch + '-' + kind + '-' + sourceCommit.slice(0, 8)), stage = join(work, 'source');
 const packageFolder = join(work, 'packages');
 await mkdir(work, { recursive: true });
 if (await readdir(work).then(items => items.length)) throw Error('Build workspace already exists; use a fresh checkout or remove this build workspace before rebuilding: ' + work);
@@ -89,7 +92,7 @@ const packaged = await packager({
   appBundleId: kind === 'server' ? 'io.github.kclg-ysj.rpe-next.server' : 'io.github.kclg-ysj.rpe-next',
   appCopyright: 'Copyright 2026 cmdysj', prune: false, asar: false, overwrite: false,
   darwinDarkModeSupport: true,
-  ...(platform === 'darwin' ? { osxSign: { identity: '-', gatekeeperAssess: false } } : {}),
+  ...(platform === 'darwin' ? { osxSign: { identity: '-', identityValidation: false, continueOnError: false } } : {}),
   afterExtract: [async ({ buildPath }) => trimLocales(buildPath)]
 });
 if (packaged.length !== 1) throw Error('Unexpected package count');
@@ -99,9 +102,10 @@ const executable = platform === 'darwin' ? join(bundle, 'Contents/MacOS', execut
 if (platform === 'win32') execFileSync('icacls.exe', [directory, '/grant', '*S-1-15-2-1:(OI)(CI)(RX)', '/T', '/Q'], { windowsHide: true, stdio: 'pipe' });
 const args = kind === 'server' ? ['--smoke-test'] : ['--smoke-native', '--mods-off'];
 if (platform === 'linux') args.push('--no-sandbox');
-args.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
+if (platform === 'darwin') args.push('--use-angle=metal', '--ignore-gpu-blocklist');
+else args.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
 console.log('Testing packaged application: ' + platform + '/' + arch + ' ' + kind);
-const smoke = await run(executable, args, { env: { ...process.env, RPE_NATIVE_TEST_HOME: join(work, 'test-profile') }, timeout: 240000 });
+const smoke = await run(executable, args, { env: { ...process.env, RPE_NATIVE_TEST_HOME: join(work, 'test-profile') }, timeout: platform === 'darwin' && arch === 'x64' ? 480000 : 240000 });
 if (kind === 'editor' ? !smoke.includes('"errors":[]') || !smoke.includes('real native IPC opens image parent') : !smoke.includes('"protocol":1') || !smoke.includes('"errors":[]')) throw Error('Packaged smoke result is incomplete');
 if (platform === 'darwin') execFileSync('codesign', ['--verify', '--deep', '--strict', bundle]);
 
@@ -125,13 +129,31 @@ if (platform === 'darwin') {
   await symlink('/Applications', join(image, 'Applications'));
   await writeFile(join(image, '使用说明.txt'), help);
   archive = join(output, stem + '.dmg');
-  await run('hdiutil', ['create', '-volname', product, '-srcfolder', image, '-format', 'UDZO', '-imagekey', 'zlib-level=9', archive], { timeout: 600000 });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await run('hdiutil', ['create', '-fs', 'HFS+', '-volname', product, '-srcfolder', image, '-format', 'UDZO', '-imagekey', 'zlib-level=9', archive], { timeout: 600000 });
+      break;
+    } catch (error) {
+      if (attempt >= 2 || !/Resource busy/i.test(error.message)) throw error;
+      await rm(archive, { force: true });
+      await new Promise(resolve => setTimeout(resolve, 3000 * (attempt + 1)));
+    }
+  }
   await run('hdiutil', ['verify', archive]);
 } else {
   await writeFile(join(directory, '使用说明.txt'), '\uFEFF' + help);
   if (platform === 'win32') {
     archive = join(output, stem + '.zip');
-    await run('tar', ['--format', 'zip', '--options', 'zip:compression-level=9', '-cf', archive, '-C', dirname(directory), basename(directory)], { timeout: 600000 });
+    const zip = new ZipFile(), finished = pipeline(zip.outputStream, createWriteStream(archive));
+    const add = async path => {
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        const file = join(path, entry.name);
+        if (entry.isDirectory()) await add(file);
+        else if (entry.isFile()) zip.addFile(file, relative(dirname(directory), file).replaceAll('\\', '/'), { compressionLevel: 9 });
+        else throw Error('Unexpected package file type: ' + file);
+      }
+    };
+    await add(directory); zip.end(); await finished;
   } else {
     archive = join(output, stem + '.tar.xz');
     await run('tar', ['-cJf', archive, '-C', dirname(directory), basename(directory)], { env: { ...process.env, XZ_OPT: '-9e -T2' }, timeout: 900000 });

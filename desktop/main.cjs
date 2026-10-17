@@ -203,10 +203,15 @@ else {
           const previous = dialog.showOpenDialog; dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
           try { return await action(); } finally { dialog.showOpenDialog = previous; }
         },
-        openedFolders: async action => {
+        openedFolders: async (action, expected = 1) => {
           const previous = shell.openPath, paths = [];
           shell.openPath = async path => { paths.push(path); return ''; };
-          try { await action(); return paths; } finally { shell.openPath = previous; }
+          try {
+            await action();
+            const deadline = Date.now() + 15000;
+            while (paths.length < expected) { if (Date.now() > deadline) throw Error('等待打开素材文件夹超时'); await new Promise(resolve => setTimeout(resolve, 25)); }
+            return paths;
+          } finally { shell.openPath = previous; }
         },
       });
       console.log(JSON.stringify({ ...result, errors }));

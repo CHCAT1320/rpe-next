@@ -10,14 +10,14 @@ import { HitSounds, hitTimeline } from '../src/platform/hitsounds.mjs';
 import { AudioTransport } from '../src/platform/audio.mjs';
 import { migratePreferences } from '../src/core/preferences.mjs';
 
-test('音乐和打击音量分别即时应用，打击音默认 30%，迁移保留原音量', async () => {
+test('音乐和打击音量分别即时应用，编辑器使用校准后的默认音量，迁移保留原音量', async () => {
   const context = { destination: {}, createGain: () => ({ gain: { value: 1 }, connect() {} }) };
   const audio = new AudioTransport(() => context); audio.ensureContext();
   const sounds = new HitSounds(audio);
   for (const name of ['tap', 'drag', 'flick']) sounds.buffers.set(name, {});
   await sounds.prepare();
   assert.equal(sounds.volume, 0.3);
-  assert.equal(migratePreferences().settings.hitVolume, 0.3);
+  assert.equal(migratePreferences().settings.hitVolume, 0.2573);
   audio.setVolume(0.2); sounds.setVolume(0.6);
   assert.equal(audio.gain.gain.value, 0.2); assert.equal(sounds.gain.gain.value, 0.6);
   audio.setVolume(0); assert.equal(sounds.gain.gain.value, 0.6);
