@@ -5,7 +5,7 @@ import { chartWithEventLists, eventListAt } from '../application/event-commands.
 import { prepareCanvas } from './timeline.ts';
 import type { EditorSession } from '../application/session.ts';
 import type { TempoMap } from '../core/tempo.ts';
-import type { Chart, ChartEvent, JudgeLine } from '../core/types.ts';
+import type { AnyEventType, Chart, ChartEvent, JudgeLine } from '../core/types.ts';
 
 /** The numeric event tracks the sampler can drag. */
 type SampledType = 'moveXEvents' | 'moveYEvents' | 'rotateEvents';
@@ -30,16 +30,16 @@ export interface EventSamplerContext {
   sampleAutoFit?: boolean;
 }
 
-/** One event field the sampler targets. */
+/** One event field the sampler targets. Non-numeric tracks are accepted by the value draft. */
 export interface SampleTarget {
   lineIndex?: number;
-  type: SampledType;
+  type: AnyEventType;
   index: number;
   field: SampledField;
 }
 
-/** The target once the sampler has resolved the active line. */
-interface SampleMode extends SampleTarget { lineIndex: number }
+/** The target once the sampler has resolved the active line and confirmed a draggable track. */
+interface SampleMode extends SampleTarget { type: SampledType; lineIndex: number }
 
 /** The collaborators the sampler is wired to. */
 export interface EventSamplerOptions {
@@ -159,7 +159,7 @@ export class EventSampler {
     if (!line || !event || !Number.isFinite(numericField(event, target.field))) return false;
     this.pause();
     this.draftChart = source;
-    this.mode = { ...target, lineIndex };
+    this.mode = { ...target, type: target.type as SampledType, lineIndex };
     const factor = line.bpmfactor ?? 1;
     this.seconds = this.context.tempo.seconds(target.field === 'end' ? event.endTime : event.startTime, factor);
     this.session.liveEventEdit = true;

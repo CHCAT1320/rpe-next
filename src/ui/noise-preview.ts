@@ -4,6 +4,7 @@ import { IntervalIndex } from '../core/interval-index.ts';
 import { NoiseEdgeFilter } from './noise-edge-filter.ts';
 import { noiseLayers, noiseLayerId } from '../core/noise-skin.ts';
 import { NoiseSkinRenderer } from './noise-skin-renderer.ts';
+import type { SkinnedLayer } from './noise-skin-renderer.ts';
 import type { Chart, NoiseLayer as NoiseAreaLayer } from '../core/types.ts';
 import type { Point, PreviewViewport } from '../core/editor-display.ts';
 import type { TempoMap } from '../core/tempo.ts';
@@ -141,7 +142,7 @@ export class NoisePreview {
       if (this.usesSkin(definition)) {
         this.gpu ??= new NoiseSkinRenderer(() => this.invalidate?.(), (message: string) => this.report?.(message));
         const musicSeconds = seconds + Number(chart.META?.offset ?? 0) / 1000;
-        if (this.gpu.render(target, definition, this.getAssets?.() ?? new Map(), items, musicSeconds, viewport, scale, width, height)) continue;
+        if (this.gpu.render(target, definition as unknown as SkinnedLayer, this.getAssets?.() ?? new Map(), items, musicSeconds, viewport, scale, width, height)) continue;
       }
       if (!items.length) continue;
       const composite = this.layer('composite', width, height, ratio);

@@ -164,7 +164,7 @@ export function assertChart(chart: unknown): asserts chart is Chart {
   // malformed list is reported by name rather than surfacing later as a rendering failure.
   if (document.blockAreaList != null) validateNoiseAreas(document.blockAreaList as Parameters<typeof validateNoiseAreas>[0]);
   // Layered noise areas are validated by the skin module, which owns their shape.
-  validateNoiseLayers(document);
+  validateNoiseLayers(document as unknown as Chart);
   if (document.noiseAreaOptions !== undefined) {
     const options = document.noiseAreaOptions;
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('noiseAreaOptions 必须为对象');

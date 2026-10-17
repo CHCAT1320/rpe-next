@@ -13,20 +13,27 @@ export interface EventDisplay {
   index: IntervalIndex<ChartEvent>;
 }
 
-/** The owner fields the index caches against; the panels store them on themselves. */
+/** The owner field the index caches against; the panels store it on themselves. */
 export interface EventDisplayOwner {
   eventDisplayChart?: Chart;
-  eventDisplayCache?: WeakMap<ChartEvent[], EventDisplay>;
 }
+
+/**
+ * Per-owner display caches.
+ *
+ * Keeping the event-list cache out of the owner avoids requiring every panel to declare a
+ * `WeakMap` field just so this helper can memoise against its chart.
+ */
+const caches = new WeakMap<EventDisplayOwner, WeakMap<ChartEvent[], EventDisplay>>();
 
 // Chart edits replace event lists. Keep geometry-independent work until that chart changes.
 export function eventDisplayIndex(owner: EventDisplayOwner, events: ChartEvent[], chart: Chart): EventDisplay {
   if (owner.eventDisplayChart !== chart) {
     owner.eventDisplayChart = chart;
-    owner.eventDisplayCache = new WeakMap();
+    caches.set(owner, new WeakMap());
   }
-  owner.eventDisplayCache ??= new WeakMap();
-  let display = owner.eventDisplayCache.get(events);
+  let cache = caches.get(owner); if (!cache) { cache = new WeakMap(); caches.set(owner, cache); }
+  let display = cache.get(events);
   if (!display || display.length !== events.length) {
     const groups = eventChains(events); const ranges = new Map<number, EventChain>(); const unmergeable = new Set<EventChain>();
     for (const group of groups) for (const { event, index } of group.entries) {
@@ -35,7 +42,7 @@ export function eventDisplayIndex(owner: EventDisplayOwner, events: ChartEvent[]
     }
     display = { length: events.length, groups, ranges, unmergeable,
       index: new IntervalIndex(events, event => beatValue(event.startTime), event => beatValue(event.endTime)) };
-    owner.eventDisplayCache.set(events, display);
+    cache.set(events, display);
   }
   return display;
 }

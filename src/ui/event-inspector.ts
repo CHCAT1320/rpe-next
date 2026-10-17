@@ -94,7 +94,7 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     const panel = document.createElement('div'); panel.className = 'event-sample-panel'; panel.hidden = true;
     const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = `${title}取样 · 拖动控制条实时预览，完成后统一应用`;
     panel.append(hint);
-    const target = { type: eventType, index: entries[0]!.index, lineIndex: entries[0]!.lineIndex ?? session.lineIndex, field: key };
+    const target = { type: eventType, index: entries[0]!.index, lineIndex: entries[0]!.lineIndex ?? session.lineIndex, field: key as 'start' | 'end' };
     let sampleValue: EventValue = structuredClone(value);
     const applySample = (next: EventValue): void => safely(() => {
       sampleValue = structuredClone(next);

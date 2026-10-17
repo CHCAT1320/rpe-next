@@ -10,8 +10,9 @@ import { NoiseAreaList } from './noise-list.ts';
 import { NoiseLayerPanel } from './noise-layer-panel.ts';
 import { noiseLayers, noiseLayerId } from '../core/noise-skin.ts';
 import { drawEventCurve, drawEventCurveBatch } from './event-curve.ts';
+import type { CurveBatchEntry } from './event-curve.ts';
 import { eventDisplayIndex, selectedEventGroups } from './event-display-index.ts';
-import type { Chart, Beat, NoiseLayer } from '../core/types.ts';
+import type { Chart, Beat, ChartEvent, NoiseLayer } from '../core/types.ts';
 import type { IntervalIndex } from '../core/interval-index.ts';
 
 /** A judge line's or noise area's entry in the noise timeline, as `drawEntry` builds it. */
@@ -186,6 +187,7 @@ interface NoiseDistribution {
  * every edit round-trips through `withNoiseAreas` — which also validates and bumps `META.RPEVersion`.
  */
 export class NoiseAreaEditor {
+  eventDisplayChart?: Chart;
   host: HTMLElement;
   canvas: HTMLCanvasElement;
   getContext: () => NoiseEditorContext;
@@ -753,7 +755,7 @@ export class NoiseAreaEditor {
       if (!type) context.fillText(((entry.Name as string) || '噪域 ' + index) + (entry.isInvert ? ' ⊕' : ''), x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, Math.min(height - 12, top + 18)), Math.max(1, entryWidth - 4));
       else if (type === 'activeIntervals') context.fillText(readyFlashValue(entry.readyFlash) > 0 ? `预闪 ${durationText(readyFlashValue(entry.readyFlash))}s` : '无预闪', x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, top + 18), Math.max(1, entryWidth - 4));
       else if (timeline.drawEventCurves !== false && layout.eventWidth >= (timeline.eventCurveThreshold ?? 24)) {
-        drawEventCurve(context, entry, range, { x, y: Math.max(HEADER_HEIGHT, top), width: entryWidth, height: Math.max(2, Math.min(height, bottom) - Math.max(HEADER_HEIGHT, top)) }, head, tail);
+        drawEventCurve(context, entry as unknown as ChartEvent, range, { x, y: Math.max(HEADER_HEIGHT, top), width: entryWidth, height: Math.max(2, Math.min(height, bottom) - Math.max(HEADER_HEIGHT, top)) }, head, tail);
       }
       if (!clipped) context.restore();
     };
@@ -778,7 +780,7 @@ export class NoiseAreaEditor {
         // A batched chain always spans at least two entries, so both ends exist.
         const top = Math.max(HEADER_HEIGHT, this.y(beatValue(group.entries.at(-1)!.event.endTime)));
         const bottom = Math.min(height, this.y(beatValue(group.entries[0]!.event.startTime)));
-        drawEventCurveBatch(context, curves, { x: bounds.x, y: top, width: bounds.width, height: Math.max(2, bottom - top) });
+        drawEventCurveBatch(context, curves as unknown as CurveBatchEntry[], { x: bounds.x, y: top, width: bounds.width, height: Math.max(2, bottom - top) });
       }
       context.restore();
       if (type !== 'activeIntervals') this.drawEventValues(context, events, type, bounds, height, ghost, groups);

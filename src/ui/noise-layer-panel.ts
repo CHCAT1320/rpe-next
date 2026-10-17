@@ -4,19 +4,19 @@ import { loadBuiltinNoiseSkins, installBuiltinNoiseSkin, builtinNoiseSkinRoot } 
 import type { BuiltinNoiseSkin } from '../platform/noise-skins.ts';
 import type { NoiseSkinDefinition } from '../core/noise-skin.ts';
 import type { NoiseArea, NoiseLayer, NoiseSkinSettings } from '../core/types.ts';
-import type { EditorSession } from '../application/session.ts';
+import type { Chart } from '../core/types.ts';
 
 /** The assets a chart carries: skin files are binary, other assets may be text. */
 type AssetMap = Map<string, Uint8Array | string>;
 
 /** The editor surface the layer panel drives. */
 export interface NoiseLayerEditor {
-  context: { session: EditorSession };
-  chart: EditorSession['chart'];
+  context: { session: { chart: Chart } };
+  chart: Chart;
   hiddenLayers: Set<string>;
   simpleLayers: Set<string>;
   flush(): void;
-  commit(label: string, chart: EditorSession['chart']): void;
+  commit(label: string, chart: Chart): void;
   render(): void;
   invalidate(): void;
   getAssets(): AssetMap;

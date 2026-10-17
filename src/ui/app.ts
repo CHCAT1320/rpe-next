@@ -1909,8 +1909,8 @@ window.addEventListener('keydown', async event => {
   const hasMultiSelection = [...(session.multiLineSelection?.values() ?? [])].some(values => values.size) || [...(session.multiEventSelection?.values() ?? [])].some(values => values.size);
   const hasSelection = noiseEditor.active ? noiseEditor.selection.size > 0 : Boolean(session.selection.size || session.eventSelection.size || hasMultiSelection);
   const action = shortcutAction(event, preferences, area, { hasSelection: hasSelection && !preview.visible });
-  if (noiseFitPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
-  if (noiseTrackingPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+  if (action && noiseFitPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+  if (action && noiseTrackingPanel.action(action)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
   if (noiseEditor.active && (!preview.visible || noiseEditor.sampleMode)) {
     // `shortcutAction` reports a miss as `undefined`, which `noiseEditor.action` treats as no match; the
     // guard is what makes the string parameter honest rather than a cast.

@@ -317,6 +317,7 @@ export function prepareCanvas(canvas: HTMLCanvasElement): { context: CanvasRende
  * exist once something has been drawn at least once.
  */
 export class Timeline {
+  eventDisplayChart?: Chart;
   notesCanvas: HTMLCanvasElement;
   eventsCanvas: HTMLCanvasElement;
   getSession: () => TimelineSession;

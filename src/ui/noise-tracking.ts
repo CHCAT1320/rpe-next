@@ -13,7 +13,7 @@ import type { Beat, Chart, NoiseArea, NoiseLayer, Note } from '../core/types.ts'
 export interface TrackingPreview {
   visible: boolean;
   pickPreviewLines?: boolean;
-  pick(clientX: number, clientY: number): number;
+  pick(clientX: number, clientY: number): number | null;
   pickNoteTarget(clientX: number, clientY: number): { lineIndex: number; noteIndex: number } | null;
 }
 
@@ -255,7 +255,7 @@ export class NoiseTrackingPanel {
     const visible = renderer.visible; const enabled = renderer.pickPreviewLines; renderer.visible = true; renderer.pickPreviewLines = true;
     try {
       if (this.options.mode === 'line') {
-        const index = renderer.pick(event.clientX, event.clientY); if (!Number.isInteger(index)) return;
+        const index = renderer.pick(event.clientX, event.clientY); if (index === null || !Number.isInteger(index)) return;
         this.options.lineIndex = index; const select = this.control('lineIndex'); if (select) select.value = String(index);
       } else {
         const target = renderer.pickNoteTarget(event.clientX, event.clientY); if (!target) return;

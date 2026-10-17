@@ -88,7 +88,7 @@ export function curveDialog(session: CurveDialogSession, division: number, ancho
   };
   const generate: CurveGenerator = generateCurveNotes;
   const refresh = (): void => {
-    const context = editorSkinContext(canvas.getContext('2d'), 'curve'); context.clearRect(0, 0, canvas.width, canvas.height);
+    const context = editorSkinContext(canvas.getContext('2d')!, 'curve'); context.clearRect(0, 0, canvas.width, canvas.height);
     picture.src = assetUrl(`easing/${controls.easingType.value}.svg`);
     try {
       const values = read(); const notes = generate(values);
