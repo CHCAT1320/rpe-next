@@ -5,6 +5,7 @@ import { EditorSession } from '../src/application/session.ts';
 import { createChart, createLine, createEvent } from '../src/core/chart.ts';
 import { TempoMap } from '../src/core/tempo.ts';
 import { SceneRuntime } from '../src/core/scene.ts';
+import type { ChartEvent } from '../src/core/types.ts';
 
 function fixture(chart = createChart(), autoFit = true) {
   const sampler = Object.create(EventSampler.prototype);
@@ -147,7 +148,7 @@ test('数值拖动和取样沿用绑定组同步规则，钩定首尾一致并�
   chart.judgeLineList[0].eventLayers[0].moveXEvents=events;
   const {sampler,session}=fixture(chart);
   sampler.updateValueDraft({type:'moveXEvents',index:0,lineIndex:0,field:'end'},50);
-  assert.deepEqual(sampler.valueDraft.chart.judgeLineList[0].eventLayers[0].moveXEvents.map((event: any)=>[event.start,event.end]),[[50,50],[50,50]]);
+  assert.deepEqual(sampler.valueDraft.chart.judgeLineList[0].eventLayers[0].moveXEvents.map((event: ChartEvent)=>[event.start,event.end]),[[50,50],[50,50]]);
   assert.equal(session.chart,chart);sampler.finishValue(true);assert.equal(session.history.undoStack.length,1);
   session.travel('undo');assert.equal(session.chart,chart);
 });

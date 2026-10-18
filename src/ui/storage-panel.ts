@@ -95,7 +95,7 @@ export class StoragePanel {
       button('备份完整库到文件夹', 'storage-backup-folder', async () => {
         this.status.textContent = '正在复制并校验完整谱面库，请稍候…';
         await flushLocalPreferences();
-        const result = await native.call('backupFolder');
+        const result = await native.call<{ root: string } | null>('backupFolder');
         if (result) { noteExternalBackup(); this.notify('已完成独立备份：' + result.root, 'success', 7000); }
         await this.refresh();
       });
@@ -109,7 +109,7 @@ export class StoragePanel {
       });
       button('重建库索引', 'storage-rebuild', async () => { await native.call('rebuild'); document.dispatchEvent(new Event('rpen-library-refresh')); await this.refresh(); this.notify('已从项目文件重建索引', 'success'); });
       button('清理无引用素材', 'storage-collect', () => this.confirm('清理无引用素材', '仅清理没有被项目、保留版本、回收站、恢复记录或皮肤模组引用的素材文件。历史版本仍会保留。', async () => {
-        const result = await native.call('collect'); this.notify(`已释放 ${bytes(result.bytes)}，清理 ${result.removed} 个素材文件`, 'success'); await this.refresh();
+        const result = await native.call<{ bytes: number; removed: number }>('collect'); this.notify(`已释放 ${bytes(result.bytes)}，清理 ${result.removed} 个素材文件`, 'success'); await this.refresh();
       }));
     }
     this.host.append(title, this.status, hint, actions); settings.querySelector('.settings-body')!.append(this.host);

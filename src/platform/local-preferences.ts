@@ -1,4 +1,5 @@
 import { nativeStorage, nativeReady, nativeWrite } from './native.ts';
+import type { NativeEnvelope } from './native.ts';
 
 const values = new Map<string, string>();
 const pending = new Set<Promise<unknown>>();
@@ -7,9 +8,10 @@ const dirty = new Map<string, { value: string | null }>();
 export async function initializeLocalPreferences(): Promise<void> {
   if (!nativeStorage) return;
   await nativeReady();
-  const record = await nativeStorage.call('read', 'preferences', 'ui-settings');
+  const record = await nativeStorage.call<NativeEnvelope | null>('read', 'preferences', 'ui-settings');
   if (record) {
-    for (const [key, value] of Object.entries(record.data.values ?? {})) if (typeof value === 'string') values.set(key, value);
+    const stored = record.data.values as Record<string, unknown> | undefined;
+    for (const [key, value] of Object.entries(stored ?? {})) if (typeof value === 'string') values.set(key, value);
   } else {
     await nativeWrite('preferences', 'ui-settings', { id: 'ui-settings', values: Object.fromEntries(values) });
   }

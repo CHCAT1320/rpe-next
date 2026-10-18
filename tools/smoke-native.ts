@@ -7,8 +7,17 @@ import { smokeAssetLibrary } from './smoke-asset-library.ts';
 
 export interface NativeSmokeControls {
   service(): NativeService;
-  selectFolder(path: string, action: () => Promise<any>): Promise<any>;
-  openedFolders(action: () => Promise<any>): Promise<string[]>;
+  selectFolder<T>(path: string, action: () => Promise<T>): Promise<T>;
+  openedFolders(action: () => Promise<unknown>): Promise<string[]>;
+}
+
+interface NativeSmokeEditor {
+  save(): Promise<void>;
+  libraryProject: { id: string };
+  raw: { setHome(value: boolean): void };
+}
+interface NativeSmokeWindow {
+  rpenMods: { manager: { ready: Promise<unknown> }; editor: NativeSmokeEditor };
 }
 
 const run = <A extends unknown[], R>(contents: WebContents, fn: (...args: A) => R | Promise<R>, ...args: A): Promise<Awaited<R>> =>
@@ -19,7 +28,7 @@ export async function prepareNative(contents: WebContents): Promise<void> {
     const { createChart } = await import('/src/core/chart.ts' as string) as typeof import('../src/core/chart.ts');
     const { builtinEditorSkins } = await import('/src/platform/editor-skins.ts' as string) as typeof import('../src/platform/editor-skins.ts');
     const { builtinMods } = await import('/src/platform/mods.ts' as string) as typeof import('../src/platform/mods.ts');
-    const put = async (name: string, stores: [string, boolean][], records: [string, any, any?][]): Promise<void> => {
+    const put = async (name: string, stores: [string, boolean][], records: [string, unknown, unknown?][]): Promise<void> => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open(name, 1);
         request.onupgradeneeded = () => { for (const [store, keyed] of stores) request.result.createObjectStore(store, keyed ? { keyPath: 'id' } : undefined); };
@@ -27,7 +36,7 @@ export async function prepareNative(contents: WebContents): Promise<void> {
       });
       try { await new Promise<void>((resolve, reject) => {
         const tx = db.transaction(stores.map(([store]) => store), 'readwrite');
-        for (const [store, value, key] of records) key === undefined ? tx.objectStore(store).put(value) : tx.objectStore(store).put(value, key);
+        for (const [store, value, key] of records) key === undefined ? tx.objectStore(store).put(value) : tx.objectStore(store).put(value, key as IDBValidKey);
         tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
       }); } finally { db.close(); }
     };
@@ -58,10 +67,10 @@ export async function prepareNative(contents: WebContents): Promise<void> {
   });
 }
 
-export async function smokeNative(contents: WebContents, service: NativeService, controls: NativeSmokeControls): Promise<{ checks: string[]; migration: any; storage: any }> {
+export async function smokeNative(contents: WebContents, service: NativeService, controls: NativeSmokeControls): Promise<{ checks: string[]; migration: unknown; storage: unknown }> {
   const checks: string[] = [], restart = process.env.RPE_NATIVE_TEST_PHASE === 'restart';
   await run(contents, async () => {
-    const w = window as any;
+    const w = window as unknown as NativeSmokeWindow;
     const deadline = Date.now() + 30000;
     while (!w.rpenMods) { if (Date.now() > deadline) throw Error('App startup timeout'); await new Promise(resolve => setTimeout(resolve, 25)); }
     await w.rpenMods.manager.ready;
@@ -117,7 +126,7 @@ export async function smokeNative(contents: WebContents, service: NativeService,
     assert.ok(result.ticks > 0); assert.ok(result.conflict); assert.ok(result.controls); assert.ok(result.persistHidden); assert.ok(result.status!.includes('谱面库：'));
     checks.push('real preload IPC saves asynchronously, detects stale snapshots and exposes native storage controls');
     const fixtureId = await run(contents, async () => {
-      const w = window as any;
+      const w = window as unknown as NativeSmokeWindow;
       (document.querySelector('#settings-modal') as HTMLDialogElement).close(); (document.querySelector('#new') as HTMLElement).click(); (document.querySelector('#metadata') as HTMLElement).click();
       const button = document.querySelector('#open-project-folder') as HTMLButtonElement;
       if (button.hidden || !button.disabled) throw Error('Unsaved project folder button state');
@@ -135,7 +144,7 @@ export async function smokeNative(contents: WebContents, service: NativeService,
     });
     assert.deepEqual(opened, [folder]);
     await run(contents, async () => {
-      const w = window as any;
+      const w = window as unknown as NativeSmokeWindow;
       const editor = w.rpenMods.editor; editor.raw.setHome(true);
       const deadline = Date.now() + 5000;
       let card: HTMLElement | undefined;
@@ -156,19 +165,19 @@ export async function smokeNative(contents: WebContents, service: NativeService,
       if ((await library.readProject(project!.id))!.assets[0]![1][124] !== 73) throw Error('Mutable bytes were incorrectly reused');
     });
     checks.push('in-place binary changes are saved rather than mistaken for cached immutable assets');
-    const root = (await service.call('status')).root;
-    const copied = await service.call('copyTo', join(root, '..', 'independent-backup'));
+    const root = (await service.call<{ root: string }>('status')).root;
+    const copied = await service.call<{ root: string }>('copyTo', join(root, '..', 'independent-backup'));
     assert.ok(await readFile(join(copied.root, 'library.json'))); checks.push('verified independent library backup written');
     await contents.executeJavaScript(`(async()=>{document.querySelector('#settings-modal').close();await import('/src/platform/local-preferences.ts').then(module=>module.flushLocalPreferences());})()`);
     // Reload must neither overwrite newer native data nor restart completed migration.
     await new Promise<void>(resolve => { contents.once('did-finish-load', () => resolve()); contents.reload(); });
-    await run(contents, async () => { while (!(window as any).rpenMods) await new Promise(resolve => setTimeout(resolve, 20)); const library = await import('/src/platform/library.ts' as string) as typeof import('../src/platform/library.ts'); if ((await library.readProject('native-migration-project'))!.chart.META.name !== '原生存储的新版本') throw Error('Migration overwrote native changes'); });
+    await run(contents, async () => { while (!(window as unknown as NativeSmokeWindow).rpenMods) await new Promise(resolve => setTimeout(resolve, 20)); const library = await import('/src/platform/library.ts' as string) as typeof import('../src/platform/library.ts'); if ((await library.readProject('native-migration-project'))!.chart.META.name !== '原生存储的新版本') throw Error('Migration overwrote native changes'); });
     checks.push('reload resumes safely without replaying stale legacy records');
     await writeFile(join(root, '..', 'native-test-complete.json'), JSON.stringify({ revision: result.revision }));
-    const moved = await controls.selectFolder(join(root, '..', 'moved'), () => run(contents, async () => (await import('/src/platform/native.ts' as string) as typeof import('../src/platform/native.ts')).nativeStorage!.call('chooseRoot')));
+    const moved = await controls.selectFolder(join(root, '..', 'moved'), () => run(contents, async () => (await import('/src/platform/native.ts' as string) as typeof import('../src/platform/native.ts')).nativeStorage!.call<{ root: string }>('chooseRoot')));
     assert.ok(moved.root.endsWith('RPENLibrary')); assert.ok(await readFile(join(root, 'library.json')));
-    assert.equal((await controls.service().call('read', 'projects', 'native-migration-project')).data.chart.META.name, '原生存储的新版本');
-    const returned = await controls.selectFolder(root, () => run(contents, async () => (await import('/src/platform/native.ts' as string) as typeof import('../src/platform/native.ts')).nativeStorage!.call('useRoot')));
+    assert.equal((await controls.service().call<{ data: { chart: { META: { name: string } } } }>('read', 'projects', 'native-migration-project')).data.chart.META.name, '原生存储的新版本');
+    const returned = await controls.selectFolder(root, () => run(contents, async () => (await import('/src/platform/native.ts' as string) as typeof import('../src/platform/native.ts')).nativeStorage!.call<{ root: string }>('useRoot')));
     assert.equal(returned.root, root);
     checks.push('privileged folder migration switches the worker and config safely, preserves source and can reopen an existing library');
   } else {

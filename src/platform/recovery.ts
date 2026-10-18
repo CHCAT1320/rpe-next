@@ -80,7 +80,7 @@ export function saveDraft(id: string, name: string, chart: Chart): Promise<unkno
  * is removed because the snapshot being added counts toward the limit.
  */
 export function saveSnapshot(projectId: string | undefined, name: string, chart: Chart, assets: ArchiveEntries | [string, Uint8Array][] | undefined, limit = 10, viewState: Record<string, unknown> = {}): Promise<void> {
-  if (nativeStorage) { const id = crypto.randomUUID(); return nativeReady().then(() => nativeWrite('drafts', id, { id, projectId, name, chart, assets, viewState, updated: Date.now() }, { limit })); }
+  if (nativeStorage) { const id = crypto.randomUUID(); return nativeReady().then(() => nativeWrite('drafts', id, { id, projectId, name, chart, assets, viewState, updated: Date.now() }, { limit })).then(() => undefined); }
   if (typeof Worker === 'undefined') return saveSnapshotDirect(projectId, name, chart, assets, limit, viewState);
   try {
     const worker = new Worker(new URL('./recovery-worker.ts', import.meta.url), { type: 'module' });
@@ -108,7 +108,7 @@ export async function saveSnapshotDirect(projectId: string | undefined, name: st
 
 /** Lists draft summaries, newest first, optionally limited to one project. */
 export async function listDrafts(projectId: string | null = null): Promise<DraftSummary[]> {
-  if (nativeStorage) { await nativeReady(); return nativeStorage.call('listDrafts', projectId); }
+  if (nativeStorage) { await nativeReady(); return nativeStorage.call<DraftSummary[]>('listDrafts', projectId); }
   const drafts = await transaction<DraftSummary[]>(['summaries'], 'readonly', operation => (projectId == null
     ? operation.objectStore('summaries').getAll()
     : operation.objectStore('summaries').index('projectId').getAll(projectId)) as IDBRequest<DraftSummary[]>);
@@ -117,9 +117,9 @@ export async function listDrafts(projectId: string | null = null): Promise<Draft
 
 export const readDraft = async (id: string): Promise<Draft | undefined> => {
   if (!nativeStorage) return transaction<Draft>(['drafts'], 'readonly', operation => operation.objectStore('drafts').get(id) as IDBRequest<Draft>);
-  const draft = await nativeRead('drafts', id);
-  if (draft?.assets) draft.assets = await Promise.all((draft.assets as [string, unknown][]).map(async ([name, value]): Promise<[string, unknown]> => [name, await nativeAssetBytes(value)]));
-  return draft;
+  const draft = await nativeRead<Draft>('drafts', id);
+  if (draft?.assets) { const assets = draft.assets as unknown as [string, Uint8Array | Blob][]; draft.assets = await Promise.all(assets.map(async ([name, value]) => [name, await nativeAssetBytes(value) as Uint8Array])) as [string, Uint8Array][]; }
+  return draft ?? undefined;
 };
 
 export const deleteDraft = async (id: string): Promise<unknown> => {

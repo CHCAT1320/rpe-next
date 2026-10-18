@@ -47,12 +47,13 @@ test('手动保存途中再保存会写入新快照，沿用首个项目标识�
 test('谱面库分批传送完整数据、未知字段和素材，不转移原缓冲区并保留后台错误类型', async () => {
   const chart = createChart(); (chart as unknown as Record<string, unknown>)['x-extra'] = { rows: Array.from({ length: 1000 }, (_, index) => ({ index, points: [{ x: index }] })) };
   const bytes = new Uint8Array(3 * 1024 ** 2 + 1); bytes[bytes.length - 1] = 77;
-  const messages: any[] = []; let restored: unknown, terminated = false;
+  interface SnapshotMessage { kind: string; bytes?: Uint8Array; project?: { custom?: string; chart?: unknown; assets?: unknown } }
+  const messages: SnapshotMessage[] = []; let restored: unknown, terminated = false;
   const worker: TransferWorker = {
     onmessage: null, onerror: null, onmessageerror: null,
     postMessage(value, transfer) {
       const data = structuredClone(value, { transfer: transfer ?? [] });
-      messages.push(data);
+      messages.push(data as SnapshotMessage);
       if (data.kind === 'chart') restored = applySnapshotPart(restored, data.part);
       queueMicrotask(() => this.onmessage?.({ data: { ok: true, result: data.kind === 'commit' ? 'revision' : undefined } } as MessageEvent));
     },
@@ -61,8 +62,8 @@ test('谱面库分批传送完整数据、未知字段和素材，不转移原�
   const saving = transferProject(worker, { id: 'id', chart, assets: [['music.ogg', bytes]], custom: 'kept' } as unknown as Parameters<typeof transferProject>[1]);
   queueMicrotask(() => worker.onmessage?.({ data: { ready: true } } as MessageEvent));
   assert.equal(await saving, 'revision'); assert.equal(terminated, true); assert.deepEqual(restored, chart); assert.equal(bytes.at(-1), 77);
-  assert.equal(messages.filter(message => message.kind === 'asset').length, 4); assert.ok(messages.filter(message => message.kind === 'asset').every(message => message.bytes.length <= 1024 ** 2));
-  assert.equal(messages[0].project.custom, 'kept'); assert.equal(messages[0].project.chart, undefined); assert.equal(messages[0].project.assets, undefined);
+  assert.equal(messages.filter(message => message.kind === 'asset').length, 4); assert.ok(messages.filter(message => message.kind === 'asset').every(message => (message.bytes?.length ?? 0) <= 1024 ** 2));
+  assert.equal(messages[0]?.project?.custom, 'kept'); assert.equal(messages[0]?.project?.chart, undefined); assert.equal(messages[0]?.project?.assets, undefined);
   const failing: TransferWorker = {
     onmessage: null, onerror: null, onmessageerror: null,
     postMessage() { queueMicrotask(() => this.onmessage?.({ data: { ok: false, name: 'QuotaExceededError', message: 'disk full' } } as MessageEvent)); },

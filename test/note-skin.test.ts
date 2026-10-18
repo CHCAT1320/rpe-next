@@ -85,16 +85,17 @@ test('图集参数变化会清除帧和重复身体缓存，时长或颜色修�
   runtime.crops.set('body-mh',{});runtime.setInfo({...runtime.info,holdAtlasMH:[30,40]});assert.equal(runtime.crops.size,0);
 });
 
-function withFrameCanvases(run: (canvases: any[]) => void) {
-  const previous = globalThis.document, canvases: any[] = [];
+interface CanvasStub { width: number; height: number; getContext(): DrawContext }
+function withFrameCanvases(run: (canvases: CanvasStub[]) => void) {
+  const previous = globalThis.document, canvases: CanvasStub[] = [];
   globalThis.document = { createElement(name: string) { assert.equal(name, 'canvas'); const context = drawContext(), canvas = { width: 0, height: 0, getContext: () => context }; canvases.push(canvas); return canvas; } } as unknown as Document;
   try { run(canvases); } finally { if (previous === undefined) Reflect.deleteProperty(globalThis, 'document'); else globalThis.document = previous; }
 }
 
 test('70 帧打击动画跨预览和循环复用完整缓存，不重复裁切染色或占用共享音符缓存',()=>withFrameCanvases(canvases=>{
   const record=parseNoteSkin(noteSkinFixture('hitFxDuration: 0.65\nhideParticles: true')) as unknown as NoteSkinRecord;record.info.hitFx=[7,10];
-  const runtime=new ResourceNoteSkin(record,new Map([['hit_fx.png',{naturalWidth:2509,naturalHeight:3585}]]) as any,()=>assert.fail('打击动画不应生成共享临时染色源'));
-  const contexts=[drawContext(),drawContext()],draw=(index: number,color?: any)=>runtime.drawHit(contexts[index%2],{age:(index+.5)/70*.65,x:0,y:0,size:100,color});
+  const runtime=new ResourceNoteSkin(record,new Map([['hit_fx.png',{naturalWidth:2509,naturalHeight:3585}]]) as unknown as Map<string, HTMLImageElement>,()=>assert.fail('打击动画不应生成共享临时染色源'));
+  const contexts=[drawContext(),drawContext()],draw=(index: number,color?: [number, number, number])=>runtime.drawHit(contexts[index%2],{age:(index+.5)/70*.65,x:0,y:0,size:100,color});
   for(let pass=0;pass<4;pass++)for(let index=0;index<70;index++)draw(index);
   assert.equal(canvases.length,70);assert.equal(runtime.hitFrames.size,70);assert.equal(runtime.hitFrameBytes,70*359*359*4);
   assert.equal(runtime.crops.size,0);
@@ -106,7 +107,7 @@ test('70 帧打击动画跨预览和循环复用完整缓存，不重复裁切�
 
 test('打击帧按像素预算限制缓存，最近使用的帧在淘汰时保留',()=>withFrameCanvases(canvases=>{
   const record=parseNoteSkin(noteSkinFixture('hitFxDuration: 1\nhideParticles: true')) as unknown as NoteSkinRecord;record.info.hitFx=[7,10];
-  const runtime=new ResourceNoteSkin(record,new Map([['hit_fx.png',{naturalWidth:512*7,naturalHeight:512*10}]]) as any,()=>assert.fail());
+  const runtime=new ResourceNoteSkin(record,new Map([['hit_fx.png',{naturalWidth:512*7,naturalHeight:512*10}]]) as unknown as Map<string, HTMLImageElement>,()=>assert.fail());
   const context=drawContext(),draw=(index: number)=>runtime.drawHit(context,{age:(index+.5)/70,x:0,y:0,size:100});
   for(let index=0;index<64;index++)draw(index);
   draw(0);draw(64);

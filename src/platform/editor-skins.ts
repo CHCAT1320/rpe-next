@@ -33,7 +33,7 @@ function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => 
     transaction.onabort = transaction.onerror = () => { connection.close(); reject(transaction.error ?? new Error('皮肤存储已中止')); };
   }));
 }
-export const readEditorSkins = (): Promise<StoredSkin[]> => nativeStorage ? nativePackages('editor-skins', 'read') as Promise<StoredSkin[]> : access('readonly', store => store.getAll());
+export const readEditorSkins = (): Promise<StoredSkin[]> => nativeStorage ? nativePackages<StoredSkin>('editor-skins', 'read') : access('readonly', store => store.getAll());
 export const storeEditorSkin = (record: ParsedSkin): Promise<unknown> => { const stored: StoredSkin = { id: record.skin.id ?? '', files: [...record.files], imported: Date.now() }; return nativeStorage ? nativePackages('editor-skins', 'write', stored.id, stored) : access('readwrite', store => store.put(stored)); };
 export const deleteEditorSkin = (id: string): Promise<unknown> => nativeStorage ? nativePackages('editor-skins', 'delete', id) : access('readwrite', store => store.delete(id));
 export const exportEditorSkin = (record: ParsedSkin): Blob => writeZip(record.files);

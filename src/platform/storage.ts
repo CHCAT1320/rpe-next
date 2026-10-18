@@ -59,7 +59,7 @@ export interface StorageStatus {
 }
 
 export async function storageStatus(manager: StorageManager | undefined = globalThis.navigator?.storage): Promise<StorageStatus> {
-  if (nativeStorage) { await nativeReady(); return { supported: true, persistent: true, ...await nativeStorage.call('status') }; }
+  if (nativeStorage) { await nativeReady(); const status = await nativeStorage.call<Record<string, unknown>>('status'); return { ...status, supported: true, persistent: true }; }
   if (!manager) return { supported: false, persistent: null, usage: null, quota: null };
   const [persistent, estimate] = await Promise.all([manager.persisted?.() ?? null, manager.estimate?.() ?? {}]);
   return { supported: true, persistent, usage: estimate.usage ?? null, quota: estimate.quota ?? null };

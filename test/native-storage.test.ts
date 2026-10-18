@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile, readFile, readdir, utimes, mkdir, symlink } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NativeStore } from '../desktop/native-store.ts';
+import type { BinaryRef, CommitResult, NativeEnvelope, NativeRecordData } from '../desktop/native-store.ts';
 import { NativeService } from '../desktop/native-service.ts';
 import { createChart } from '../src/core/chart.ts';
 import { snapshotParts } from '../src/platform/recovery-transfer.ts';
@@ -18,9 +19,11 @@ interface ProjectData {
   assets: [string, Uint8Array][];
   unknown: unknown;
   assetFolders?: string[];
+  storageRevision?: string;
+  [key: string]: unknown;
 }
 
-async function write(store: NativeStore, kind: string, data: any, options: any = {}): Promise<any> {
+async function write(store: NativeStore, kind: string, data: NativeRecordData, options: Record<string, unknown> = {}): Promise<CommitResult> {
   const token = await store.begin(kind, data.id, options), binaries: SnapshotBinary[] = [];
   try {
     for (const part of snapshotParts(data, [], binaries)) store.part(token, part);
@@ -39,6 +42,9 @@ async function fixture(run: (store: NativeStore, root: string) => Promise<void>)
   finally { await store?.close(); await rm(root, { recursive: true, force: true }); }
 }
 
+type ProjectEnvelope = { data: ProjectData; binaries: BinaryRef[] };
+const readProject = async (store: NativeStore, id: string): Promise<ProjectEnvelope> => { const envelope = await store.read('projects', id); assert.ok(envelope); return envelope as unknown as ProjectEnvelope; };
+const headOf = async (store: NativeStore, id: string) => { const head = await store.head('projects', id); assert.ok(head); return head; };
 const project = (id = 'project'): ProjectData => ({
   id, chart: createChart(), chartName: 'chart.json', imported: Date.now(),
   assets: [['song', new Uint8Array([1, 2, 3])]], unknown: { extension: 42 },
@@ -46,10 +52,10 @@ const project = (id = 'project'): ProjectData => ({
 
 test('native storage preserves unknown chart data, deduplicates blobs and rejects stale saves', () => fixture(async store => {
   const data = project(); const first = await write(store, 'projects', data);
-  const read = await store.read('projects', data.id);
-  assert.equal(read.data.unknown.extension, 42);
+  const read = await readProject(store, data.id);
+  assert.equal((read.data.unknown as { extension: number }).extension, 42);
   assert.equal(read.binaries.length, 1);
-  assert.deepEqual(await store.blob(read.binaries[0].hash, 0, 3), new Uint8Array([1, 2, 3]));
+  assert.deepEqual(await store.blob(read.binaries[0]!.hash!, 0, 3), new Uint8Array([1, 2, 3]));
   await write(store, 'projects', data, { expectedRevision: first.revision });
   assert.equal((await store.status()).blobs, 1);
   await assert.rejects(write(store, 'projects', data, { expectedRevision: first.revision }), { name: 'ProjectConflictError' });
@@ -60,7 +66,7 @@ test('native save interruption preserves committed version and rebuilds missing 
   const data = project(); const first = await write(store, 'projects', data);
   store.fault = phase => { if (phase === 'before-head') throw Error('simulated interruption'); };
   await assert.rejects(write(store, 'projects', { ...data, chart: { ...data.chart, META: { ...data.chart.META, name: 'lost' } } }, { expectedRevision: first.revision }), /interruption/);
-  assert.equal((await store.read('projects', data.id)).data.storageRevision, first.revision);
+  assert.equal((await readProject(store, data.id)).data.storageRevision, first.revision);
   await store.close(); await rm(join(store.root, 'index.sqlite'));
   const reopened = await new NativeStore(store.root).init();
   try { assert.equal(reopened.list('projects')[0].data.storageRevision, first.revision); } finally { await reopened.close(); }
@@ -72,14 +78,14 @@ test('native trash restore, permanent deletion, retained references and independ
   assert.equal(await store.read('projects', data.id), null);
   assert.equal(store.list('projects', true).length, 1);
   await store.collect(); assert.equal((await store.status()).blobs, 1);
-  const trashRevision = (await store.head('projects', data.id)).revision;
+  const trashRevision = (await headOf(store, data.id)).revision;
   await store.restore(data.id, trashRevision);
-  assert.ok(await store.read('projects', data.id));
+  assert.ok(await readProject(store, data.id));
   await store.copyTo(join(root, 'backup'));
   const backup = await new NativeStore(join(root, 'backup')).init();
-  try { assert.deepEqual((await backup.read('projects', data.id)).data.chart, data.chart); } finally { await backup.close(); }
-  await store.remove('projects', data.id, (await store.head('projects', data.id)).revision);
-  await store.purge(data.id, (await store.head('projects', data.id)).revision);
+  try { assert.deepEqual((await readProject(backup, data.id)).data.chart, data.chart); } finally { await backup.close(); }
+  await store.remove('projects', data.id, (await headOf(store, data.id)).revision);
+  await store.purge(data.id, (await headOf(store, data.id)).revision);
   await assert.rejects(write(store, 'projects', data), { name: 'ProjectConflictError' });
   assert.equal((await store.collect()).removed, 1);
   assert.equal((await readdir(join(root, 'backup', 'blobs'))).length, 1);
@@ -90,9 +96,9 @@ test('native migration is verified, resumable, never replaces newer native data'
   await store.markMigration('old/projects', 'projects', data.id);
   assert.equal(await store.migrationDone('old/projects', 'projects', data.id), true);
   const skipped = await write(store, 'projects', { ...data, unknown: 'old' }, { migration: true });
-  assert.equal(skipped.skipped, true); assert.equal((await store.read('projects', data.id)).data.unknown.extension, 42);
-  const ref = (await store.read('projects', data.id)).binaries[0];
-  await writeFile(join(store.root, 'blobs', ref.hash), new Uint8Array([0, 0, 0]));
+  assert.equal(skipped.skipped, true); assert.equal(((await readProject(store, data.id)).data.unknown as { extension: number }).extension, 42);
+  const ref = (await readProject(store, data.id)).binaries[0]!;
+  await writeFile(join(store.root, 'blobs', ref.hash!), new Uint8Array([0, 0, 0]));
   await assert.rejects(store.markMigration('other', 'projects', data.id), /校验失败/);
 }));
 
@@ -129,8 +135,8 @@ test('native image paths open named independent copies and preserve empty folder
   await writeFile(join(folder, 'a.png'), new Uint8Array([99]));
   await store.assetFolder(data.id, 'pictures/a.png');
   assert.deepEqual([...await readFile(join(folder, 'a.png'))], [99]);
-  const envelope = await store.read('projects', data.id), ref = envelope.binaries.find((entry: any) => entry.path[1] === 0);
-  assert.deepEqual([...await readFile(join(store.root, 'blobs', ref.hash))], [1, 2, 3]);
+  const envelope = await readProject(store, data.id), ref = envelope.binaries.find((entry: { path: (string | number)[] }) => entry.path[1] === 0)!;
+  assert.deepEqual([...await readFile(join(store.root, 'blobs', ref.hash!))], [1, 2, 3]);
   await assert.rejects(store.assetFolder(data.id, 'shader/Ocean/hidden.png'), /找不到/);
   await assert.rejects(store.assetFolder(data.id, '../escape', true), /无效/);
   await store.copyTo(join(root, 'backup-without-views'));
@@ -155,7 +161,7 @@ test('native batched parts preserve order and reject inherited paths or invalid 
   const token = await store.begin('preferences', 'batch');
   store.parts(token, [{ path: [], value: { id: 'batch' } }, { path: ['list'], length: 2 }, { path: ['list'], offset: 0, values: [{ x: 1 }, { x: 2 }] }]);
   await store.commit(token);
-  assert.deepEqual((await store.read('preferences', 'batch')).data.list, [{ x: 1 }, { x: 2 }]);
+  assert.deepEqual((await store.read('preferences', 'batch'))!.data.list, [{ x: 1 }, { x: 2 }]);
   const invalid = await store.begin('preferences', 'invalid');
   assert.throws(() => store.parts(invalid, new Array(129)), /批次无效/);
   assert.throws(() => store.parts(invalid, [{ path: [], value: {} }, { path: ['__proto__', 'polluted'], value: true }]), /路径不存在/);
@@ -166,8 +172,8 @@ test('native cleanup keeps media referenced by old versions, drafts and imported
   const data = project(), first = await write(store, 'projects', data);
   await write(store, 'projects', { ...data, assets: [] }, { expectedRevision: first.revision });
   assert.equal((await store.collect()).removed, 0);
-  const deleted = await store.head('projects', data.id); await store.remove('projects', data.id, deleted.revision);
-  await store.purge(data.id, (await store.head('projects', data.id)).revision);
+  const deleted = await headOf(store, data.id); await store.remove('projects', data.id, deleted.revision);
+  await store.purge(data.id, (await headOf(store, data.id)).revision);
   await write(store, 'drafts', { ...data, id: 'draft', projectId: data.id });
   await write(store, 'mods', { id: 'package', files: [['asset', new Uint8Array([1, 2, 3])]] });
   assert.equal((await store.collect()).removed, 0);
@@ -178,7 +184,7 @@ test('native cleanup keeps media referenced by old versions, drafts and imported
 test('native committed save still succeeds if optional old-version cleanup fails', () => fixture(async store => {
   store.trimRevisions = async () => { throw Error('cleanup sharing violation'); };
   const result = await write(store, 'projects', project());
-  assert.equal((await store.read('projects', 'project')).data.storageRevision, result.revision);
+  assert.equal((await store.read('projects', 'project'))!.data.storageRevision, result.revision);
   assert.match((await store.status()).warnings.join(' '), /保存已完成/);
 }));
 
@@ -189,7 +195,7 @@ test('native corrupt SQLite index and damaged HEAD recover from canonical files'
   await writeFile(join(store.root, 'index.sqlite'), 'broken index'); await writeFile(join(directory, 'HEAD.json'), '{}');
   const reopened = await new NativeStore(store.root).init();
   try {
-    assert.equal((await reopened.read('projects', data.id)).data.storageRevision, first.revision);
+    assert.equal((await reopened.read('projects', data.id))!.data.storageRevision, first.revision);
     assert.equal(reopened.list('projects').length, 1);
     assert.equal((await readdir(store.root)).filter(name => name.startsWith('index.sqlite.corrupt-')).length, 1);
   } finally { await reopened.close(); }
@@ -202,7 +208,7 @@ test('native worker drains queued preference writes before closing', async () =>
     const writes = Array.from({ length: 12 }, (_, index) => service!.call('setLocalPreference', 'key-' + index, 'value-' + index));
     const closed = service.close(); await Promise.all(writes); await closed;
     service = new NativeService(root); await service.ready;
-    const values = (await service.call('read', 'preferences', 'ui-settings')).data.values;
+    const values = (await service.call<NativeEnvelope>('read', 'preferences', 'ui-settings')).data.values as Record<string, string>;
     assert.equal(Object.keys(values).length, 12); assert.equal(values['key-11'], 'value-11');
   } finally { await service?.close(); await rm(root, { recursive: true, force: true }); }
 });

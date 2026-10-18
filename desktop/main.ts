@@ -10,6 +10,11 @@ import { NativeService } from './native-service.ts';
 const here = dirname(fileURLToPath(import.meta.url));
 
 const origin = 'rpe://app';
+
+interface StorageRequest { method: string; args?: unknown[] }
+interface StorageFailure { name?: string | undefined; message?: string | undefined; code?: string | undefined; projectId?: string | undefined; expectedRevision?: string | null | undefined; actualRevision?: string | null | undefined }
+interface StorageResponse { ok: boolean; result?: unknown; error?: StorageFailure }
+
 const smokeSettings = process.argv.includes('--smoke-settings');
 const smokeMedia = process.argv.includes('--smoke-media');
 const smokeMods = process.argv.includes('--smoke-mods');
@@ -72,7 +77,7 @@ else {
         if (choice.response !== 0) { app.quit(); return; }
         const selected = await dialog.showOpenDialog({ title: '选择已有谱面库，或新库的上级文件夹', properties: ['openDirectory', 'createDirectory'] });
         if (selected.canceled) { app.quit(); return; }
-        const candidate = resolve(selected.filePaths[0]);
+        const candidate = resolve(selected.filePaths[0]!);
         let marker: { format?: string; version?: number } | undefined;
         try { marker = JSON.parse(await readFile(resolve(candidate, 'library.json'), 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         nativeRoot = marker ? candidate : resolve(candidate, 'RPENLibrary');
@@ -81,23 +86,23 @@ else {
     if (!config || config.root !== nativeRoot) { config = { ...config, version: 1, root: nativeRoot }; await atomicJson(configPath, config); }
     const tokens = new Set<string>(); let rendererGeneration = 0;
     const allowed = new Set(['begin', 'part', 'parts', 'binaryBegin', 'binaryChunk', 'commit', 'abort', 'blob', 'read', 'list', 'remove', 'restore', 'purge', 'collect', 'status', 'rebuild', 'listDrafts', 'readRevision', 'migrationDone', 'markMigration', 'setLocalPreference']);
-    ipcMain.handle('rpen-native-storage', async (event, request: { method: string; args?: unknown[] }) => {
+    ipcMain.handle('rpen-native-storage', async (event, request: StorageRequest): Promise<StorageResponse> => {
       try {
         if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame || !event.senderFrame?.url.startsWith(origin + '/')) throw Error('无权限');
         const { method, args = [] } = request ?? {};
         const generation = rendererGeneration;
         if (relocating || closing) throw Object.assign(Error('谱面库正在迁移或关闭，请稍后重试'), { name: 'StorageBusyError' });
         if (!Array.isArray(args)) throw Error('存储参数无效');
-        let result: any;
+        let result: unknown;
         if (method === 'legacyMigrationPending') result = !config!.legacyMigrated;
         else if (method === 'migrationComplete') { const next = { ...config, legacyMigrated: true }; await atomicJson(configPath, next); config = next; result = true; }
-        else if (method === 'openRoot') { const status = await native!.call('status'); const error = await shell.openPath(status.root); if (error) throw Error(error); result = true; }
-        else if (method === 'openProjectFolder') { const path = await native!.call('projectFolder', args[0]); const error = await shell.openPath(path); if (error) throw Error(error); result = true; }
-        else if (method === 'openAssetFolder') { const path = await native!.call('assetFolder', ...args); const error = await shell.openPath(path); if (error) throw Error(error); result = true; }
+        else if (method === 'openRoot') { const status = await native!.call<{ root: string }>('status'); const error = await shell.openPath(status.root); if (error) throw Error(error); result = true; }
+        else if (method === 'openProjectFolder') { const path = await native!.call<string>('projectFolder', args[0]); const error = await shell.openPath(path); if (error) throw Error(error); result = true; }
+        else if (method === 'openAssetFolder') { const path = await native!.call<string>('assetFolder', ...args); const error = await shell.openPath(path); if (error) throw Error(error); result = true; }
         else if (['chooseRoot', 'backupFolder', 'useRoot'].includes(method)) {
           const selected = await dialog.showOpenDialog(mainWindow!, { title: method === 'useRoot' ? '选择包含 library.json 的已有谱面库或完整备份' : method === 'chooseRoot' ? '选择新谱面库的上级文件夹' : '选择独立备份文件夹', properties: ['openDirectory', 'createDirectory'] });
           if (selected.canceled) return { ok: true, result: null };
-          const destination = method === 'useRoot' ? resolve(selected.filePaths[0]) : resolve(selected.filePaths[0], method === 'chooseRoot' ? 'RPENLibrary' : 'RPENBackup-' + new Date().toISOString().replace(/[:.]/g, '-'));
+          const destination = method === 'useRoot' ? resolve(selected.filePaths[0]!) : resolve(selected.filePaths[0]!, method === 'chooseRoot' ? 'RPENLibrary' : 'RPENBackup-' + new Date().toISOString().replace(/[:.]/g, '-'));
           if (relocating) throw Error('已有谱面库操作正在进行');
           if (tokens.size) throw Error('正在保存，请保存结束后再迁移或备份');
           relocating = true;
@@ -106,7 +111,7 @@ else {
             if (method === 'useRoot') {
               const marker = JSON.parse(await readFile(resolve(destination, 'library.json'), 'utf8'));
               if (marker.format !== 'rpen-native-library' || marker.version !== 1) throw Error('请选择有效的谱面库文件夹');
-            } else result = await native!.call('copyTo', destination);
+            } else result = await native!.call<{ root: string }>('copyTo', destination);
             if (method !== 'backupFolder') {
               next = new NativeService(destination); await next.ready;
               const nextConfig = { ...config, version: 1, root: destination }; await atomicJson(configPath, nextConfig); config = nextConfig;
@@ -120,12 +125,15 @@ else {
           result = await native!.call(method, ...args);
           if (method === 'begin') {
             if (generation !== rendererGeneration) { await native!.call('abort', result); throw Error('窗口已重新载入，保存操作已取消'); }
-            tokens.add(result);
+            tokens.add(result as string);
           }
           if (method === 'commit' || method === 'abort') tokens.delete(args[0] as string);
         }
         return { ok: true, result };
-      } catch (error: any) { return { ok: false, error: { name: error.name, message: error.message, code: error.code, projectId: error.projectId, expectedRevision: error.expectedRevision, actualRevision: error.actualRevision } }; }
+      } catch (error) {
+        const failure = error as StorageFailure;
+        return { ok: false, error: { name: failure.name, message: failure.message, code: failure.code, projectId: failure.projectId, expectedRevision: failure.expectedRevision, actualRevision: failure.actualRevision } };
+      }
     });
     const connectSources = collaborationConnectSources(process.env.RPE_MEDIA_ORIGINS);
     protocol.handle('rpe', async request => {
@@ -238,12 +246,14 @@ else {
       if (smokeMods) result.mods = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-mods.ts')).href)).smokeMods(mainWindow.webContents);
       if (smokeSaving) result.saving = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-saving.ts')).href)).smokeSaving(mainWindow.webContents);
       if (smokeNative) result.native = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-native.ts')).href)).smokeNative(mainWindow.webContents, native, {
-        service: () => native,
-        selectFolder: async (path: string, action: () => Promise<any>) => {
-          const previous = dialog.showOpenDialog; (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
-          try { return await action(); } finally { (dialog as any).showOpenDialog = previous; }
+        service: () => native!,
+        selectFolder: async (path: string, action: () => Promise<unknown>) => {
+          const mutableDialog = dialog as unknown as { showOpenDialog: typeof dialog.showOpenDialog };
+          const previous = mutableDialog.showOpenDialog;
+          mutableDialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
+          try { return await action(); } finally { mutableDialog.showOpenDialog = previous; }
         },
-        openedFolders: async (action: () => Promise<any>) => {
+        openedFolders: async (action: () => Promise<unknown>) => {
           const previous = shell.openPath, paths: string[] = [];
           shell.openPath = async (path: string) => { paths.push(path); return ''; };
           try { await action(); return paths; } finally { shell.openPath = previous; }

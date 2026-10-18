@@ -225,13 +225,16 @@ export const updateSummary = (summary: ProjectSummary): Promise<unknown> => nati
   return undefined;
 });
 
-export const listProjects = (): Promise<ProjectSummary[] | undefined> => nativeStorage ? nativeList('projects') : access<ProjectSummary[]>(['summaries'], 'readonly', transaction => transaction.objectStore('summaries').getAll());
+export const listProjects = (): Promise<ProjectSummary[] | undefined> => nativeStorage ? nativeList<ProjectSummary>('projects') : access<ProjectSummary[]>(['summaries'], 'readonly', transaction => transaction.objectStore('summaries').getAll());
 
 export async function readProject(id: string): Promise<StoredProject | undefined> {
   if (nativeStorage) {
-    const project = await nativeRead('projects', id);
-    if (project?.assets) project.assets = await Promise.all((project.assets as [string, unknown][]).map(async ([name, value]): Promise<[string, unknown]> => [name, await nativeAssetBytes(value)]));
-    return project;
+    const project = await nativeRead<StoredProject>('projects', id);
+    if (project?.assets) {
+      const assets = project.assets as unknown as [string, Uint8Array | Blob][];
+      project.assets = await Promise.all(assets.map(async ([name, value]) => [name, await nativeAssetBytes(value) as Uint8Array]));
+    }
+    return project ?? undefined;
   }
   const project = await access<StoredProject>(['projects'], 'readonly', transaction => transaction.objectStore('projects').get(id));
   if (project?.assets) {
@@ -243,11 +246,11 @@ export async function readProject(id: string): Promise<StoredProject | undefined
 }
 
 export const readProjectRevision = async (id: string): Promise<ProjectRevision | undefined> => {
-  if (nativeStorage) { await nativeReady(); return nativeStorage.call('readRevision', id); }
+  if (nativeStorage) { await nativeReady(); return (await nativeStorage.call<{ id: string; revision: string; deleted: boolean } | null>('readRevision', id)) ?? undefined; }
   return access<ProjectRevision>(['revisions'], 'readonly', transaction => transaction.objectStore('revisions').get(id));
 };
 
-const readPreference = async (key: string): Promise<unknown> => nativeStorage ? (await nativeRead('preferences', key))?.value : access<unknown>(['preferences'], 'readonly', transaction => transaction.objectStore('preferences').get(key));
+const readPreference = async (key: string): Promise<unknown> => nativeStorage ? (await nativeRead<{ value: unknown }>('preferences', key))?.value : access<unknown>(['preferences'], 'readonly', transaction => transaction.objectStore('preferences').get(key));
 const writePreference = async (key: string, value: unknown): Promise<unknown> => { if (nativeStorage) { await nativeReady(); return nativeWrite('preferences', key, { id: key, value }); } return access<IDBValidKey>(['preferences'], 'readwrite', transaction => transaction.objectStore('preferences').put(value, key)); };
 
 export const readPreferences = (): Promise<unknown> => readPreference('current');

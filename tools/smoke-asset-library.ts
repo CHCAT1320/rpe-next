@@ -3,6 +3,25 @@ import { join } from 'node:path';
 import { readFile, readdir } from 'node:fs/promises';
 import type { WebContents } from 'electron';
 import type { NativeService } from '../desktop/native-service.ts';
+import type { Chart, JudgeLine, Note } from '../src/core/types.ts';
+
+interface EditorSmoke {
+  raw: { replaceChart(chart: Chart, chartName: string, assets: Map<string, Uint8Array>, folders: string[]): void };
+  chart: Chart;
+  chartName: string;
+  assets: Map<string, Uint8Array>;
+  dirty?: boolean;
+  libraryProject: { id: string };
+  session: { line: { notes: Note[] }; setMultiLineEnabled(enabled: boolean): void; commit(label: string, chart: Chart): void };
+  timeline: { origin: number; noteIndexes: Map<unknown, unknown>; renderNoteScale: number; noteWidth(note: { size?: number }): number; hit(point: { x: number; y: number }): { item: Note } | null; vertical(seconds: number): number; draw(origin: number): void };
+  skin: { head: (...args: unknown[]) => boolean };
+  activatePane(pane: string): void;
+  save(): Promise<void>;
+}
+interface AssetSmokeWindow {
+  rpenMods: { editor: EditorSmoke };
+  assetTestProject?: string;
+}
 
 export interface SmokeAssetControls {
   openedFolders(action: () => Promise<unknown>): Promise<string[]>;
@@ -17,7 +36,7 @@ export async function smokeAssetLibrary(contents: WebContents, service: NativeSe
     const until = async (condition: () => boolean): Promise<void> => { const deadline = performance.now() + 6000; while (!condition()) { if (performance.now() > deadline) throw Error('Timed out: ' + condition); await new Promise(resolve => setTimeout(resolve, 15)); } };
     const { createChart, createLine, createNote } = await import('/src/core/chart.ts' as string) as typeof import('../src/core/chart.ts');
     const { assetPath } = await import('/src/platform/files.ts' as string) as typeof import('../src/platform/files.ts');
-    const w = window as any;
+    const w = window as unknown as AssetSmokeWindow;
     const e = w.rpenMods.editor, chart = createChart();
     const canvas = document.createElement('canvas'); canvas.width = 24; canvas.height = 20; const c = canvas.getContext('2d')!; c.fillStyle = '#3377aa'; c.fillRect(0, 0, 24, 20);
     const png = new Uint8Array(await (await new Promise<Blob>((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(Error('无法生成图片')), 'image/png'))).arrayBuffer());
@@ -89,13 +108,13 @@ export async function smokeAssetLibrary(contents: WebContents, service: NativeSe
     } finally { e.skin.head = previous; }
     results.push('size 3/10/100 scales width without capping or changing height, in single/multi-line drawing and hit testing');
     // Restore valid immutable chart updates for the save/reopen checks.
-    e.session.commit('测试音符', { ...e.chart, judgeLineList: e.chart.judgeLineList.map((line: unknown, index: number) => index ? line : { ...(line as object), notes: [...e.chart.judgeLineList[0].notes] }) });
+    e.session.commit('测试音符', { ...e.chart, judgeLineList: e.chart.judgeLineList.map((line: JudgeLine, index: number): JudgeLine => index ? line : { ...(line as object), notes: [...e.chart.judgeLineList[0].notes] } as JudgeLine) });
     await e.save(); open();
     w.assetTestProject = e.libraryProject.id;
     return results;
   });
-  const id = await run(contents, () => (window as any).assetTestProject);
-  const expected = await service.call('assetFolder', id, 'charts/renamed/same.png', false);
+  const id = await run(contents, () => (window as unknown as AssetSmokeWindow).assetTestProject);
+  const expected = await service.call<string>('assetFolder', id, 'charts/renamed/same.png', false);
   const opened = await controls.openedFolders(async () => {
     await run(contents, async () => {
       const host = document.querySelector('#asset-library') as HTMLElement;
@@ -112,9 +131,9 @@ export async function smokeAssetLibrary(contents: WebContents, service: NativeSe
   assert.deepEqual(await readdir(opened[1]!), []);
   const reopened = await run(contents, async () => {
     const { readProject } = await import('/src/platform/library.ts' as string) as typeof import('../src/platform/library.ts');
-    const w = window as any;
+    const w = window as unknown as AssetSmokeWindow;
     const e = w.rpenMods.editor, project = await readProject(w.assetTestProject!);
-    e.raw.replaceChart(project!.chart, project!.chartName, new Map(project!.assets), project!.assetFolders); e.activatePane('assets');
+    e.raw.replaceChart(project!.chart, project!.chartName, new Map(project!.assets), project!.assetFolders ?? []); e.activatePane('assets');
     return { paths: [...e.assets.keys()], folders: project!.assetFolders ?? [], library: (document.querySelector('#asset-library') as HTMLElement).textContent, texture: e.chart.judgeLineList[1].Texture };
   });
   assert.ok(reopened.paths.includes('charts/renamed/same.png'));
