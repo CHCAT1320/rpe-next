@@ -55,6 +55,8 @@ npm start
 
 Windows 也可双击 `start.cmd`。无需安装 npm 依赖。默认打开 `http://127.0.0.1:4173`，关闭终端会停止本地服务。
 
+Bun 1.3 或更新版本也可直接运行：`bun install`、`bun run start`、`bun run test:bun`、`bun run smoke-build:bun`；桌面与发布脚本使用 `bun run build:desktop:bun`、`bun run build:release:bun`。CI 仍以 Node 22+/npm 为准。
+
 ## Windows 桌面测试版
 
 桌面包内置 Electron 运行环境，无需另装 Node.js 或浏览器。发布页提供 Windows、macOS、Linux 的 x64 / ARM64 桌面包；Windows 使用 ZIP，macOS 使用 DMG，Linux 使用 tar.xz。Windows 解压后运行 `RePhiEdit-Next.exe`，macOS 将应用拖入 Applications，Linux 解压后运行 `RePhiEdit-Next`。
