@@ -7,6 +7,7 @@ import { EditorSkinRuntime } from './editor-skin-runtime.ts';
 import type { PreparedSkin, SkinRecord } from './editor-skin-runtime.ts';
 import { download } from '../platform/files.ts';
 import { assetUrl } from '../core/asset-url.ts';
+import { DEFAULT_APPEARANCE } from '../core/default-settings.ts';
 
 const ACTIVE_KEY = 'rpe-next-active-editor-skin-v1';
 const OPTIONS_KEY = 'rpe-next-editor-skin-options-v1';
@@ -79,7 +80,10 @@ export class EditorSkins {
   constructor(host: HTMLElement, { invalidate, notify }: EditorSkinsOptions) {
     this.host = host; this.invalidate = invalidate; this.notify = notify; this.records = new Map(); this.current = 'default'; this.generation = 0;
     this.directoryHandle = null; this.directoryId = null; this.previewTimer = null; this.previewId = null; this.restoreId = null; this.deadline = 0; this.previewUrl = null;
-    try { const stored: unknown = JSON.parse(localPreferences.getItem(OPTIONS_KEY) ?? 'null'); this.options = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored as Record<string, Appearance> : {}; } catch { this.options = {}; }
+    try {
+      const stored: unknown = JSON.parse(localPreferences.getItem(OPTIONS_KEY) ?? 'null') ?? structuredClone(DEFAULT_APPEARANCE.editorSkinOptions);
+      this.options = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored as Record<string, Appearance> : {};
+    } catch { this.options = structuredClone(DEFAULT_APPEARANCE.editorSkinOptions) as Record<string, Appearance>; }
     this.drafts = structuredClone(this.options); this.systemScheme = matchMedia('(prefers-color-scheme: dark)');
     this.systemScheme.addEventListener('change', () => { if (this.drafts[this.current]?.variant === 'auto') this.use(this.current, Boolean(this.previewTimer), true).catch(error => this.error(error)); });
     this.runtime = new EditorSkinRuntime(() => { document.dispatchEvent(new Event('rpen-editor-skin-changed')); invalidate(); });
@@ -114,7 +118,7 @@ export class EditorSkins {
       this.persistOptions();
       this.updateOptions();
       const requestedDefault = new URL(location.href).searchParams.get('skin') === 'default';
-      const id = requestedDefault ? 'default' : localPreferences.getItem(ACTIVE_KEY) ?? 'default';
+      const id = requestedDefault ? 'default' : localPreferences.getItem(ACTIVE_KEY) ?? DEFAULT_APPEARANCE.editorSkin;
       if (id !== 'default' && this.records.has(id)) await this.use(id);
       else if (id !== 'default') { const message = `找不到已保存的皮肤“${id}”，已恢复默认皮肤。`; this.message.textContent = message; this.notify(message, 'warning'); localPreferences.setItem(ACTIVE_KEY, 'default'); }
     } catch (error) { this.message.textContent = '皮肤载入失败，使用默认：' + (error instanceof Error ? error.message : String(error)); this.notify(this.message.textContent, 'warning'); }

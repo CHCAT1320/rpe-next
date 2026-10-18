@@ -4,6 +4,7 @@ import { registerModHook,emitModHook } from '../core/mod-hooks.ts';
 import { parseShortcut,formatShortcut } from '../core/shortcut-spec.ts';
 import { shortcutKey,shortcutMatches } from '../core/preferences.ts';
 import { isTextEntry } from './keyboard.ts';
+import { cancelValueDrag } from './draggable-value.ts';
 import type { ShortcutTarget } from './keyboard.ts';
 import type { Chart, GlobalEventValue } from '../core/types.ts';
 
@@ -269,10 +270,11 @@ export class ModRuntime {
     for (const command of [...this.commands.values()].reverse()) {
       const state = this.loaded.get(command.owner); const key = command.setting ? state?.settings[command.setting] : command.shortcut;
       if (!key || !shortcutMatches(event, key) || document.querySelector('dialog[open]') && !command.allowInDialog || this.locks.size && !this.locks.has(command.owner)) continue;
-      event.preventDefault(); event.stopImmediatePropagation(); command.run(); return true;
+      cancelValueDrag(); event.preventDefault(); event.stopImmediatePropagation(); command.run(); return true;
     } return false;
   }
   lock(owner: string, options: LockOptions = {}): Dispose {
+    cancelValueDrag();
     const token = Symbol(owner); const releases: (() => void)[] = []; const roots = options.roots ?? ['header nav > :not(#mods-open)', '.transport', '.editor-toolbar', '.timeline-head', '.editor-footer', '.inspector', '.preview-overlay', '.canvases', '#noise-editor-canvas', '.timeline-strips', '#home'];
     const nodes = new Set<HTMLElement>(); const protect = '#mods-open,#mods-status,[data-mod-interactive]'; const collect = (node: HTMLElement): void => { if (node.matches(protect)) return; if (node.querySelector(protect)) { for (const child of node.children) if (child instanceof HTMLElement) collect(child); } else nodes.add(node); }; for (const selector of roots) for (const node of document.querySelectorAll<HTMLElement>(selector)) collect(node);
     this.inertNodes ??= new WeakMap(); for (const node of nodes) { let state = this.inertNodes!.get(node); if (!state) { state = { previous: node.inert, count: 0 }; this.inertNodes!.set(node, state); } state.count++; node.inert = true; releases.push(() => { state!.count--; if (!state!.count) { node.inert = state!.previous; this.inertNodes!.delete(node); } }); }
@@ -280,7 +282,7 @@ export class ModRuntime {
     let done = false; return () => { if (done) return; done = true; releases.reverse().forEach(fn => fn()); tokens!.delete(entry); if (!tokens!.size) this.locks.delete(owner); if (!this.locks.size) delete document.documentElement.dataset.modEditingLocked; };
   }
   handleInput(event: Event): void {
-    const input = emitModHook('input:before', { event, handled: false }) as { event: Event; handled: boolean }; if (input.handled) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+    const input = emitModHook('input:before', { event, handled: false }) as { event: Event; handled: boolean }; if (input.handled) { cancelValueDrag(); event.preventDefault(); event.stopImmediatePropagation(); return; }
     if (event.type === 'keydown' && this.shortcut(event as KeyboardEvent)) return;
     if (!this.locks.size) return;
     const bypass = (event.target as Element | null)?.closest?.('[data-mod-interactive],#mod-manager,#mods-open,#mods-status,#mods-emergency'); if (bypass) return;

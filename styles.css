@@ -341,6 +341,16 @@ h2 { margin: 0; font-size: 21px; font-weight: 400; }
 .alpha-sample-wrap { display: flex; align-items: center; gap: 8px; width: 100%; }
 .alpha-sample-wrap output { min-width: 3em; }
 .sample-button { margin-left: 6px; padding: 2px 7px; }
+.field.draggable-value { cursor: ew-resize; touch-action: pan-y; }
+.field.draggable-value :is(input, select) { cursor: auto; }
+.field.draggable-value.dragging { color: var(--accent); }
+.field.draggable-value.dragging input { border-color: var(--accent); }
+/* Pointer Lock hides the system pointer for the whole gesture; this also covers
+   the moment before the lock engages, so the fixed drag cursor drawn at the press
+   point is the only pointer on screen and the cursor stays put. */
+html.value-dragging, html.value-dragging * { cursor: none !important; user-select: none !important; }
+.drag-cursor-ghost { position: fixed; z-index: 200; width: 24px; height: 24px; margin: -12px 0 0 -12px; pointer-events: none; filter: drop-shadow(0 2px 2px #0009); }
+.drag-cursor-ghost svg { display: block; width: 100%; height: 100%; stroke-linejoin: round; }
 .event-input-controls { display: inline-flex; align-items: center; width: 59%; min-width: 0; gap: 5px; }
 .event-input-controls > input, .event-input-controls > .duration-input { width: auto; flex: 1; min-width: 0; }
 .event-input-controls .sample-button { flex: none; width: 30px; min-width: 30px; padding: 2px; }

@@ -1,0 +1,62 @@
+name: Publish verified release
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful Build release packages run ID
+        type: string
+        required: true
+      source_commit:
+        description: Exact source commit used by every package
+        type: string
+        required: true
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-release-0.12.1
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RUN: ${{ inputs.build_run }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify build provenance
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" > build-run.json
+          node --input-type=module -e 'import fs from "node:fs"; const r=JSON.parse(fs.readFileSync("build-run.json")); if(r.name!=="Build release packages" || r.conclusion!=="success" || r.head_sha!==process.env.SOURCE_COMMIT || !/^[a-f0-9]{40}$/.test(r.head_sha)) throw Error("Build source or result mismatch");'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run }}
+          path: release-assets
+          pattern: release-*
+          merge-multiple: true
+      - name: Normalize artifact layout
+        run: |
+          if [ -d release-assets/v0.12.1 ]; then
+            mv release-assets/v0.12.1/* release-assets/
+            rmdir release-assets/v0.12.1
+          fi
+      - name: Verify all packages and generate checksums
+        run: node tools/verify-release-assets.mjs release-assets "$SOURCE_COMMIT"
+      - name: Create draft, upload and publish
+        run: |
+          if gh release view v0.12.1 --repo "$GITHUB_REPOSITORY" --json isDraft > existing-release.json; then
+            node --input-type=module -e 'import fs from "node:fs"; if(!JSON.parse(fs.readFileSync("existing-release.json")).isDraft)throw Error("Release is already published");'
+          else
+            gh release create v0.12.1 --repo "$GITHUB_REPOSITORY" --target "$SOURCE_COMMIT" --draft --prerelease --title "rpe-next 0.12.1" --notes-file .github/release-notes/v0.12.1.md
+          fi
+          gh release upload v0.12.1 --repo "$GITHUB_REPOSITORY" --clobber release-assets/*.zip release-assets/*.dmg release-assets/*.tar.xz release-assets/SHA256SUMS.txt
+          gh api "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.tag_name == "v0.12.1")' > release-result.json
+          node --input-type=module -e 'import fs from "node:fs"; const r=JSON.parse(fs.readFileSync("release-result.json")), v=JSON.parse(fs.readFileSync("release-assets/verified-assets.json")); if(!r.draft || r.assets.length!==8) throw Error("Incomplete draft"); for(const a of v.assets){const b=r.assets.find(x=>x.name===a.file); if(!b || b.size!==a.bytes || b.digest && b.digest!=="sha256:"+a.sha256)throw Error("Uploaded asset mismatch: "+a.file);}'
+          gh release edit v0.12.1 --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
+          gh release view v0.12.1 --repo "$GITHUB_REPOSITORY" --json url,isDraft,isPrerelease,assets

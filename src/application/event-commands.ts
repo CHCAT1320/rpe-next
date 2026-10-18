@@ -169,7 +169,7 @@ export function commitEventLists(session: EventEditSession, label: string, updat
  * Split out of {@link transformEvents} so a multi-line transform can fold every line's result into
  * a single chart and commit once.
  */
-function transformedEventLists(session: EventEditSession, lineIndex: number, selection: Set<string>, transform: EventTransform): EventListUpdates {
+export function transformedEventLists(session: EventEditSession, lineIndex: number, selection: Set<string>, transform: EventTransform): EventListUpdates {
   const updates: EventListUpdates = new Map();
   const linked = new Map<string, ChartEvent>();
   for (const key of selection) {

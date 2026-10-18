@@ -5,6 +5,7 @@ import { captureSelection, editCapturedSelection, commitSelectionEdit } from '..
 
 import { EASING_NAMES, createEasingPicker } from './easing-picker.ts';
 import { numericWheel } from './numeric-wheel.ts';
+import { attachDraggableValue } from './draggable-value.ts';
 import { beatInputControl } from './beat-input.ts';
 import { EVENT_WHEEL_STEPS } from '../core/note-editing.ts';
 import { renderShaderInspector } from './shader-inspector.ts';
@@ -40,6 +41,9 @@ type EventFieldTransform = (event: ChartEvent) => ChartEvent;
 
 /** Whether the easing gallery is open; shared across renders of the inspector. */
 const galleryState = { open: false };
+// Value change per pixel of label drag (the drag sensitivity setting scales it);
+// the wheel step stays coarser on purpose.
+const DRAG_UNITS: Partial<Record<AnyEventType, number>> = { moveXEvents: 1, moveYEvents: 1, rotateEvents: 0.5, alphaEvents: 1, speedEvents: 0.05, scaleXEvents: 0.01, scaleYEvents: 0.01 };
 
 function inspectorEntries(session: EditorSession): EventInspectorEntry[] {
   if (session.multiLineActive && session.multiLineMode === 'events') {
@@ -71,6 +75,16 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
   const valueKind = (type: AnyEventType, value: EventValue): EventFieldKind => type === 'colorEvents' && Array.isArray(value) ? 'array' : type === 'textEvents' && typeof value === 'string' ? 'text' : Array.isArray(value) ? 'array' : 'number';
   const valueTitle = eventType === 'alphaEvents' ? ['起始透明度', '结束透明度'] : eventType === 'speedEvents' ? ['起始速度', '结束速度'] : eventType === 'colorEvents' ? ['起始颜色', '结束颜色'] : eventType === 'textEvents' ? ['起始文字', '结束文字'] : ['起始值', '结束值'];
   const fields: [string, string, EventFieldKind][] = [['startTime', '开始拍', 'beat'], ['endTime', '结束拍', 'beat'], ['start', valueTitle[0], valueKind(eventType, event.start)], ['end', valueTitle[1], valueKind(eventType, event.end)], ['easingLeft', '缓动左边界', 'number'], ['easingRight', '缓动右边界', 'number'], ['linkgroup', '绑定组编号', 'number']];
+  const constrainNumber = (key: string, value: EventValue): EventValue => {
+    if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) return Math.trunc(Math.max(0, Math.min(255, Number(value))));
+    if (key === 'easingLeft' || key === 'easingRight') return Math.max(0, Math.min(1, Number(value)));
+    if (key === 'linkgroup') return Math.max(0, Math.round(Number(value)));
+    return value;
+  };
+  const writeValue = (key: string, title: string, value: EventValue): void => {
+    const next = constrainNumber(key, value);
+    applyEventTransform(session, `修改事件${title}`, current => ({ ...current, [key]: next, ...(current.inst && (key === 'start' || key === 'end') ? { start: next, end: structuredClone(next) } : {}) }));
+  };
   const applyField = (input: HTMLInputElement, key: string, title: string, kind: EventFieldKind, quiet = false): void => {
     const update = (): void => {
     let value: EventValue;
@@ -82,13 +96,34 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     } else if (kind === 'number') {
       value = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(value)) return;
-      if (eventType === 'alphaEvents' && (key === 'start' || key === 'end')) value = Math.trunc(Math.max(0, Math.min(255, value)));
-      if (key === 'easingLeft' || key === 'easingRight') value = Math.max(0, Math.min(1, value));
-      if (key === 'linkgroup') value = Math.max(0, Math.round(value));
     } else value = input.value;
-    applyEventTransform(session, `修改事件${title}`, current => ({ ...current, [key]: value, ...(current.inst && (key === 'start' || key === 'end') ? { start: value, end: structuredClone(value) } : {}) }));
+    writeValue(key, title, value);
     };
     try { update(); } catch (error) { if (!quiet) reportError(error); }
+  };
+  // Drag the property name to scrub the value; the sampler previews every step
+  // and the final value lands as a single undo step.
+  const attachValueDrag = (label: HTMLElement, input: HTMLInputElement, key: string, title: string, step: number): void => {
+    const entry = entries[0];
+    const target = { type: eventType, index: entry.index, lineIndex: entry.lineIndex ?? session.lineIndex, field: key };
+    const integerField = key === 'linkgroup' || eventType === 'alphaEvents' && (key === 'start' || key === 'end');
+    const base = key === 'easingLeft' || key === 'easingRight' ? 0.01 : key === 'linkgroup' ? 1 : DRAG_UNITS[eventType] ?? Math.max(0.01, step / 5);
+    // Read the setting on every step so a change applies without rebuilding the field.
+    const sensitivity = (): number => { const value = Number((session as EditorSession & { dragSensitivity?: number }).dragSensitivity); return Number.isFinite(value) && value > 0 ? value : 1; };
+    attachDraggableValue({
+      label, input,
+      canStart: () => !sampler?.mode,
+      unit: () => base * sensitivity(),
+      snap: base,
+      minimum: input.min === '' ? -Infinity : Number(input.min),
+      maximum: input.max === '' ? Infinity : Number(input.max),
+      integer: integerField,
+      hint: `${title}：左右拖动名称调值 · Shift 粗调（×10）· Alt 微调（×0.1）· 暂停时循环预览事件时间段 · 松开应用 · Esc 取消`,
+      read: () => { const text = String(input.value).trim(); const parsed = Number(text); return text && Number.isFinite(parsed) ? parsed : Number(event[key]) || 0; },
+      preview: value => sampler ? sampler.updateValueDraft(target, value) : true,
+      commit: value => safely(() => { if (sampler) { if (sampler.valueDraft) sampler.finishValue(true, `拖动修改事件${title}`); } else writeValue(key, title, value); }),
+      cancel: () => { if (sampler?.valueDraft) sampler.finishValue(false); },
+    });
   };
   const samplePanel = (key: string, title: string, kind: EventFieldKind, value: EventValue): { panel: HTMLDivElement; close: HTMLButtonElement } => {
     const panel = document.createElement('div'); panel.className = 'event-sample-panel'; panel.hidden = true;
@@ -158,6 +193,7 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     if (kind === 'number') {
       const step = key === 'easingLeft' || key === 'easingRight' ? 0.05 : key === 'linkgroup' ? 1 : session.eventWheelSteps?.[eventType] ?? EVENT_WHEEL_STEPS[eventType] ?? 1;
       input.step = String(step); numericWheel(input, step);
+      if (entries.length === 1) attachValueDrag(label, input, key, title, step);
     }
     // `session.division` is optional until `renderSession` attaches it; `?? 0` keeps the read a
     // number and hands the "no grid yet" case to `beatInputControl`'s own `division() || 4` fallback,

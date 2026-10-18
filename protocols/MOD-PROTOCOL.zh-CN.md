@@ -126,6 +126,8 @@ export function activate(api) {
 
 `lockEditing({reason,roots?})` 默认锁住编辑工具、原预览交互和面板，保留模组管理器。模组自己的可交互区域标记 `data-mod-interactive="true"` 可绕过输入拦截。它只锁人机编辑输入，不阻止其他模组、后台任务或联机操作；需要独占环境的工具应自行检查联机状态。`roots` 是要设 inert 的 CSS 选择器数组，替换默认列表；高级模组自行负责覆盖范围。代码层的强制语义禁止可使用提交钩子取消操作。
 
+模组命令接管、`input:before` 标记已处理或取得编辑锁时，会取消正在进行的属性名称拖动并释放指针锁定。普通拖动仅在松手时提交一次；预览草稿不触发提交钩子，最终提交仍经过 `session:before-commit`。草稿期间发生其他谱面提交、撤销或切换谱面时，旧草稿不会覆盖新状态。
+
 ## 5. 同步语义钩子
 
 钩子按优先级从高到低执行，同优先级按注册先后执行，共享可变 payload。必须同步修改属性，不等待 Promise；异常会被记录，其他钩子继续运行。避免在提交钩子中递归 `commit`。
@@ -141,6 +143,8 @@ export function activate(api) {
 | `chart:validate` | `{chart,handled:false}`；自行检查后设 `handled=true` 跳过内置 assertChart 检查 |
 | `chart:serialize` | `{chart,compact,text:null}`；可替换输入；`text!==null` 直接返回字符串并跳过内置校验和整形 |
 | `preview:before` | `{chart,seconds,lineIndex}`；在预览/背景预览绘制前替换渲染数据、谱面秒数和当前线，不修改存档 |
+
+事件取样及属性拖动可以使用临时谱面和循环预览时间，因此预览钩子、`onPreview` 和渲染包装函数应使用回调传入的 `chart/seconds`；它们不一定等于已提交谱面和实际播放头。`onFrame` 的 `chartSeconds/musicSeconds` 仍表示实际播放时间。以上行为沿用 API 1。
 
 原有 RPEN 导出路径有自己的排序、兼容转换和媒体打包流程。`chart:serialize` 对所有调用该函数的路径生效，但不是任意文件格式流水线的万能拦截点。要完全替换导入、保存、兼容导出或预览算法，可以包装相应实例 / 类原型，或者实现自己的按钮及流水线。
 

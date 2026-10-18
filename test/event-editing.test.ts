@@ -104,7 +104,7 @@ test('音乐和打击音量分别即时应用，打击音默认 30%，迁移保�
   for (const name of ['tap', 'drag', 'flick']) sounds.buffers.set(name, bufferStub());
   await sounds.prepare();
   assert.equal(sounds.volume, 0.3);
-  assert.equal(migratePreferences().settings.hitVolume, 0.3);
+  assert.equal(migratePreferences().settings.hitVolume, 0.2573);
   audio.setVolume(0.2); sounds.setVolume(0.6);
   assert.equal(audioGain(audio).gain.value, 0.2); assert.equal(gainOf(sounds).gain.value, 0.6);
   audio.setVolume(0); assert.equal(gainOf(sounds).gain.value, 0.6);

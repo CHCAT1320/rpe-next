@@ -33,7 +33,7 @@ jobs:
           - runner: windows-11-arm
             platform: windows
             arch: arm64
-          - runner: macos-15-intel
+          - runner: macos-15
             platform: macos
             arch: x64
           - runner: macos-15
@@ -49,6 +49,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - if: matrix.platform == 'macos' && matrix.arch == 'x64'
+        name: Install Rosetta for Intel package verification
+        run: sudo softwareupdate --install-rosetta --agree-to-license
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

@@ -74,6 +74,8 @@ interface HitDrawOptions {
 const names = { 1: 'click', 2: 'hold', 3: 'flick', 4: 'drag' } as const satisfies Record<NoteType, string>;
 const dimensions = (image: SkinImage): SkinSize => ({ width: image.naturalWidth ?? image.width ?? 0, height: image.naturalHeight ?? image.height ?? 0 });
 const tint = (color: Color | undefined): Color => Array.isArray(color) && color.length === 3 && color.every(Number.isFinite) ? color : [255, 255, 255];
+const HIT_FRAME_BYTES = 64 * 1024 * 1024;
+const HIT_FRAME_COUNT = 512;
 
 export class ResourceNoteSkin implements ResourceNoteSkinContract {
   id: string;
@@ -82,10 +84,13 @@ export class ResourceNoteSkin implements ResourceNoteSkinContract {
   tintSource: (name: string, source: SkinImage | null | undefined, color: Color) => DrawableImage | null;
   crops: Map<string, HTMLCanvasElement | DrawableImage>;
   patterns: WeakMap<CanvasRenderingContext2D, Map<string, CanvasPattern>>;
+  hitFrames: Map<string, HTMLCanvasElement>;
+  hitFrameBytes: number;
   highlightScale: number;
 
   constructor(record: NoteSkinRecord, images: Map<string, HTMLImageElement>, tintSource: (name: string, source: SkinImage | null | undefined, color: Color) => DrawableImage | null) {
     this.id = record.id; this.info = record.info; this.images = images; this.tintSource = tintSource; this.crops = new Map(); this.patterns = new WeakMap();
+    this.hitFrames = new Map(); this.hitFrameBytes = 0;
     const normal = images.get('click.png') ?? record.images?.['click.png'], highlighted = images.get('click_mh.png') ?? record.images?.['click_mh.png'];
     const width = (image: { naturalWidth?: number; width?: number } | undefined): number => image?.naturalWidth ?? image?.width ?? 0;
     const ratio = width(highlighted as { naturalWidth?: number; width?: number } | undefined) / width(normal as { naturalWidth?: number; width?: number } | undefined);
@@ -103,8 +108,12 @@ export class ResourceNoteSkin implements ResourceNoteSkinContract {
     })));
     return new ResourceNoteSkin(record, images, tintSource);
   }
-  dispose(): void { this.images.clear(); this.crops.clear(); this.patterns = new WeakMap(); }
-  setInfo(info: NoteSkinInfo): void { if (info.hitFx.join(',') !== this.info.hitFx.join(',') || info.holdAtlas.join(',') !== this.info.holdAtlas.join(',') || info.holdAtlasMH.join(',') !== this.info.holdAtlasMH.join(',')) { this.crops.clear(); this.patterns = new WeakMap(); } this.info = info; }
+  dispose(): void { this.images.clear(); this.crops.clear(); this.patterns = new WeakMap(); this.hitFrames.clear(); this.hitFrameBytes = 0; }
+  setInfo(info: NoteSkinInfo): void {
+    if (info.hitFx.join(',') !== this.info.hitFx.join(',')) { this.hitFrames.clear(); this.hitFrameBytes = 0; }
+    if (info.hitFx.join(',') !== this.info.hitFx.join(',') || info.holdAtlas.join(',') !== this.info.holdAtlas.join(',') || info.holdAtlasMH.join(',') !== this.info.holdAtlasMH.join(',')) { this.crops.clear(); this.patterns = new WeakMap(); }
+    this.info = info;
+  }
   source(name: string, color: Color | undefined): DrawableImage | null { const picture = this.images.get(name); return this.tintSource(`${this.id}:${name}`, picture, tint(color)); }
   get hitLifetime(): number { return this.info.hitFxDuration; }
   get perfectColor(): NoteSkinColor { return noteSkinColor(this.info.colorPerfect) as NoteSkinColor; }
@@ -143,13 +152,25 @@ export class ResourceNoteSkin implements ResourceNoteSkinContract {
   drawHit(context: CanvasRenderingContext2D, { age, x, y, size, rotation = 0, color, seed = 0, good = false }: HitDrawOptions): boolean {
     const frame = noteSkinFrame(this.info, age) as NoteSkinFrame | null; if (!frame) return true;
     const sheet = this.images.get('hit_fx.png')!; const sheetSize = dimensions(sheet); const frameWidth = sheetSize.width / this.info.hitFx[0]; const frameHeight = sheetSize.height / this.info.hitFx[1];
-    const base = noteSkinColor(this.info[good ? 'colorGood' : 'colorPerfect']) as NoteSkinColor; const rgb: Color = this.info.hitFxTinted ? tint(color ?? base.rgb) : [255, 255, 255];
-    const key = 'fx:' + frame.index + ':' + rgb.join(','); let picture = this.crops.get(key) as DrawableImage | undefined;
+    const base = noteSkinColor(this.info[good ? 'colorGood' : 'colorPerfect']) as NoteSkinColor; const rgb: number[] = this.info.hitFxTinted ? tint(color ?? base.rgb).map(value => Math.round(Math.max(0, Math.min(255, value)))) : [255, 255, 255];
+    const key = frame.index + ':' + rgb.join(','); let picture = this.hitFrames.get(key);
     if (!picture) {
       const crop = document.createElement('canvas'); const resolution = Math.min(1, 512 / frameWidth, 512 / frameHeight); crop.width = Math.max(1, Math.ceil(frameWidth * resolution)); crop.height = Math.max(1, Math.ceil(frameHeight * resolution));
-      crop.getContext('2d')!.drawImage(sheet, frame.column * frameWidth, frame.row * frameHeight, frameWidth, frameHeight, 0, 0, crop.width, crop.height);
-      picture = this.tintSource(`${this.id}:fx:${frame.index}`, crop, rgb)!;
-      if (this.crops.size >= 32) this.crops.delete(this.crops.keys().next().value!); this.crops.set(key, picture);
+      const cropContext = crop.getContext('2d')!;
+      const draw = (): void => cropContext.drawImage(sheet, frame.column * frameWidth, frame.row * frameHeight, frameWidth, frameHeight, 0, 0, crop.width, crop.height);
+      draw();
+      if (rgb.some(value => value !== 255)) {
+        cropContext.globalCompositeOperation = 'multiply'; cropContext.fillStyle = `rgb(${rgb.join(',')})`; cropContext.fillRect(0, 0, crop.width, crop.height);
+        cropContext.globalCompositeOperation = 'destination-in'; draw(); cropContext.globalCompositeOperation = 'source-over';
+      }
+      const bytes = crop.width * crop.height * 4;
+      while (this.hitFrames.size && (this.hitFrameBytes + bytes > HIT_FRAME_BYTES || this.hitFrames.size >= HIT_FRAME_COUNT)) {
+        const oldest = this.hitFrames.keys().next().value!; const previous = this.hitFrames.get(oldest)!;
+        this.hitFrameBytes -= previous.width * previous.height * 4; this.hitFrames.delete(oldest);
+      }
+      picture = crop; this.hitFrames.set(key, picture); this.hitFrameBytes += bytes;
+    } else {
+      this.hitFrames.delete(key); this.hitFrames.set(key, picture);
     }
     const progress = age / this.info.hitFxDuration; const alpha = progress < 0.5 ? 1 - progress * 0.6 : 1.4 * (1 - progress);
     const width = size * this.info.hitFxScale; const height = width * frameHeight / frameWidth;

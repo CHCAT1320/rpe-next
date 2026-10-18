@@ -1,11 +1,12 @@
 import { SceneRuntime } from '../core/scene.ts';
 import { previewViewport } from '../core/editor-display.ts';
 import { fitNoiseSampleView } from '../core/noise-sampling.ts';
-import { chartWithEventLists, eventListAt } from '../application/event-commands.ts';
+import { chartWithEventLists, eventListAt, eventKey, transformedEventLists } from '../application/event-commands.ts';
 import { prepareCanvas } from './timeline.ts';
+import type { EventEditSession } from '../application/event-commands.ts';
 import type { EditorSession } from '../application/session.ts';
 import type { TempoMap } from '../core/tempo.ts';
-import type { AnyEventType, Chart, ChartEvent, JudgeLine } from '../core/types.ts';
+import type { AnyEventType, Chart, ChartEvent, EventValue, JudgeLine } from '../core/types.ts';
 
 /** The numeric event tracks the sampler can drag. */
 type SampledType = 'moveXEvents' | 'moveYEvents' | 'rotateEvents';
@@ -27,14 +28,23 @@ export interface EventSamplerContext {
   realtimePreview: SamplerRenderer;
   previewVisible: boolean;
   seconds?: () => number;
+  playing?: () => boolean;
   sampleAutoFit?: boolean;
 }
 
-/** One event field the sampler targets. Non-numeric tracks are accepted by the value draft. */
-export interface SampleTarget {
+/**
+ * One event field the value draft targets. Non-numeric tracks are accepted by the value draft,
+ * which edits any named field of the event.
+ */
+export interface ValueDraftTarget {
   lineIndex?: number;
   type: AnyEventType;
   index: number;
+  field: string;
+}
+
+/** One event field the sampler targets in drag mode. */
+export interface SampleTarget extends ValueDraftTarget {
   field: SampledField;
 }
 
@@ -48,8 +58,19 @@ export interface EventSamplerOptions {
   notify?: (message?: string) => void;
 }
 
+/** A looping preview span in seconds. */
+interface ValueRange { start: number; end: number }
+
 /** The current value-draft being edited outside the drag mode. */
-interface ValueDraft { chart: Chart }
+interface ValueDraft {
+  chart: Chart;
+  base: Chart;
+  session: EditorSession;
+  layer: number;
+  startedAt: number;
+  targetKey: string | null;
+  range?: ValueRange | null;
+}
 
 /** The zoom state each preview renderer had before sampling began. */
 interface SampleZoom { renderer: SamplerRenderer; original: number; divisor: number }
@@ -63,6 +84,7 @@ interface DisplayCache { source: Chart; mode: SampleMode; chart: Chart }
 const sampledTypes = new Set<string>(['moveXEvents', 'moveYEvents', 'rotateEvents']);
 const round = (value: number): number => Math.round(value * 10000) / 10000;
 const numericField = (event: ChartEvent | undefined, field: SampledField): number => event ? Number((event as unknown as Record<string, unknown>)[field]) : NaN;
+const now = (): number => typeof performance === 'undefined' ? Date.now() : performance.now();
 
 export class EventSampler {
   host: HTMLElement;
@@ -103,6 +125,9 @@ export class EventSampler {
   get context(): EventSamplerContext { return this.getContext(); }
   get session(): EditorSession { return this.context.session; }
   get active(): boolean { return Boolean(this.mode || this.valueDraft); }
+  // While paused the value draft preview loops the edited event's own time range
+  // so the property effect is visible wherever the playhead happens to be.
+  get looping(): boolean { return Boolean(this.valueDraft?.range) && this.context.playing?.() !== true; }
 
   syncChrome(): void {
     (this.host.closest('.editor') as HTMLElement).classList.toggle('event-sampling', this.active);
@@ -112,7 +137,8 @@ export class EventSampler {
 
   beginValueDraft(): boolean {
     if (this.mode) return false;
-    if (!this.valueDraft) this.valueDraft = { chart: this.session.chart };
+    if (this.valueDraft && !this.valueDraftCurrent()) { this.finishValue(false); return false; }
+    if (!this.valueDraft) this.valueDraft = { chart: this.session.chart, base: this.session.chart, session: this.session, layer: this.session.eventLayer, startedAt: now(), targetKey: null };
     this.draftChart = this.valueDraft.chart;
     this.session.liveEventEdit = true;
     this.syncChrome();
@@ -120,31 +146,60 @@ export class EventSampler {
     return true;
   }
 
-  updateValueDraft(target: SampleTarget, value: unknown): boolean {
+  updateValueDraft(target: ValueDraftTarget, value: EventValue): boolean {
     if (!this.beginValueDraft()) return false;
-    const source = this.valueDraft!.chart;
+    const draft = this.valueDraft!;
+    const source = draft.chart;
     const lineIndex = target.lineIndex ?? this.session.lineIndex;
-    const temporary = { chart: source, lineIndex, eventLayer: this.session.eventLayer };
-    const events: ChartEvent[] = [...eventListAt(temporary, lineIndex, target.type)];
-    const event = events[target.index];
-    if (!event) return false;
-    const next: ChartEvent = { ...event, [target.field]: structuredClone(value) };
-    if (next.inst && (target.field === 'start' || target.field === 'end')) {
-      next.start = structuredClone(value) as ChartEvent['start']; next.end = structuredClone(value) as ChartEvent['start'];
+    const targetKey = `${lineIndex}:${target.type}:${target.index}`;
+    if (draft.targetKey !== targetKey) {
+      draft.targetKey = targetKey;
+      draft.range = this.valueRange(source, lineIndex, target.type, target.index);
+      draft.startedAt = now();
     }
-    events[target.index] = next;
-    this.valueDraft!.chart = chartWithEventLists(source, lineIndex, this.session.eventLayer, new Map([[target.type, events]]));
-    this.draftChart = this.valueDraft!.chart;
+    const temporary = { chart: source, lineIndex, eventLayer: draft.layer, shaderAutoAlign: this.session.shaderAutoAlign };
+    const event = eventListAt(temporary, lineIndex, target.type)[target.index];
+    if (!event) return false;
+    const updates = transformedEventLists(temporary as unknown as EventEditSession, lineIndex, new Set([eventKey(target.type, target.index)]), current => ({
+      ...current, [target.field]: structuredClone(value),
+      ...(current.inst && (target.field === 'start' || target.field === 'end') ? { start: structuredClone(value), end: structuredClone(value) } : {}),
+    }));
+    draft.chart = chartWithEventLists(source, lineIndex, draft.layer, updates);
+    this.draftChart = draft.chart;
     this.invalidate();
     return true;
   }
 
-  finishValue(apply: boolean): void {
+  /** Loop range of the drafted event in seconds, or null when it has no span. */
+  valueRange(chart: Chart, lineIndex: number, type: AnyEventType, index: number): ValueRange | null {
+    const line = chart.judgeLineList?.[lineIndex];
+    const event = eventListAt({ chart, lineIndex, eventLayer: this.session.eventLayer }, lineIndex, type)[index];
+    if (!line || !event) return null;
+    try {
+      const factor = line.bpmfactor ?? 1;
+      const start = this.context.tempo.seconds(event.startTime, factor);
+      const end = this.context.tempo.seconds(event.endTime, factor);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
+    } catch { return null; }
+  }
+
+  /** Preview time inside the drafted event range; the whole span plays once per loop. */
+  loopSeconds(): number {
+    const draft = this.valueDraft;
+    if (!draft?.range) return this.context.seconds?.() ?? 0;
+    const span = draft.range.end - draft.range.start;
+    const period = Math.min(3, Math.max(0.3, span)) * 1000;
+    const phase = ((now() - draft.startedAt) % period) / period;
+    return draft.range.start + span * phase;
+  }
+
+  finishValue(apply: boolean, label = '应用事件取样'): void {
     if (!this.valueDraft) return;
-    const chart = this.valueDraft.chart;
+    const draft = this.valueDraft, chart = draft.chart, current = this.valueDraftCurrent();
+    draft.session.liveEventEdit = false;
     this.valueDraft = null; this.draftChart = null; this.session.liveEventEdit = false;
     this.syncChrome();
-    if (apply && chart && chart !== this.session.chart) this.session.commit('应用事件取样', chart);
+    if (apply && current && chart && chart !== this.session.chart) this.session.commit(label, chart);
     else this.session.notify();
     this.invalidate();
   }
@@ -184,8 +239,14 @@ export class EventSampler {
 
   previewState(): { chart: Chart; seconds: number } | null {
     if (this.mode && this.draftChart) { this.fitView(); return { chart: this.samplingChart(this.draftChart), seconds: this.seconds }; }
-    if (this.valueDraft?.chart) return { chart: this.valueDraft.chart, seconds: this.context.seconds?.() ?? 0 };
+    if (this.valueDraft && !this.valueDraftCurrent()) { this.finishValue(false); return null; }
+    if (this.valueDraft?.chart) return { chart: this.valueDraft.chart, seconds: this.looping ? this.loopSeconds() : this.context.seconds?.() ?? 0 };
     return null;
+  }
+
+  valueDraftCurrent(): boolean {
+    const draft = this.valueDraft;
+    return Boolean(draft && draft.session === this.session && draft.base === this.session.chart && draft.layer === this.session.eventLayer);
   }
 
   view(): { rectangle: DOMRect; viewport: { scale: number }; scale: number; screen: (point: { x: number; y: number }) => { x: number; y: number }; world: (point: { x: number; y: number }) => { x: number; y: number } } {

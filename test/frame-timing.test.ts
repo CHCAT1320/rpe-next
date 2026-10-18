@@ -4,8 +4,8 @@ import { FrameLimiter, validFpsLimit } from '../src/core/frame-timing.ts';
 import { migratePreferences } from '../src/core/preferences.ts';
 import { readEditorPreferences, writeEditorPreferences } from '../src/platform/editor-preferences.ts';
 
-test('帧率默认无上限，支持大于 10 的有限数和原设置迁移', () => {
-  assert.equal(migratePreferences().settings.fpsLimit, 0);
+test('默认帧率上限为 120，支持无上限、大于 10 的有限数和原设置迁移', () => {
+  assert.equal(migratePreferences().settings.fpsLimit, 120);
   for (const value of [0, 10.01, 59.94, 60, 165, 360, 1000, Number.MAX_VALUE]) {
     assert.ok(validFpsLimit(value));
     assert.equal(migratePreferences(JSON.stringify({ FpsLimit: value })).settings.fpsLimit, value);

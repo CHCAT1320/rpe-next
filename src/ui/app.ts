@@ -31,6 +31,8 @@ import type { RpeSkin as RpeSkinType } from './skin.ts';
 import { ProjectImages } from '../platform/images.ts';
 import { HitSounds } from '../platform/hitsounds.ts';
 import { renderEventInspector } from './event-inspector.ts';
+import { cancelValueDrag, handleValueDragKey } from './draggable-value.ts';
+import { DEFAULT_EDITOR_PREFERENCES } from '../core/default-settings.ts';
 import { eventKey, eventList, deleteEvents, transformEvents, selectEvent, selectAllEvents } from '../application/event-commands.ts';
 import { BATCH_ACTIONS, applyBatchAction, nudgeSelection, captureSelection } from '../application/batch-edit.ts';
 import { copyObjects, cutObjects, pasteObjects, deleteObjects } from '../application/clipboard.ts';
@@ -328,10 +330,11 @@ const element = <T extends HTMLElement = HTMLElement>(selector: string): T => do
 let mods: ModManager | undefined;
 (globalThis as { __rpenModInputGate?: boolean }).__rpenModInputGate = true;
 for (const type of ['keydown', 'keyup', 'wheel', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'drop', 'dragstart', 'input', 'change', 'submit']) window.addEventListener(type, event => {
-  const runtime = mods?.runtime; if (!runtime) return;
+  const runtime = mods?.runtime;
   const key = event as KeyboardEvent;
-  if (type === 'keydown' && key.ctrlKey && key.altKey && key.shiftKey && key.key === 'F11') { event.preventDefault(); event.stopImmediatePropagation(); runtime.emergency?.(); return; }
-  runtime.handleInput(event);
+  if (type === 'keydown' && key.ctrlKey && key.altKey && key.shiftKey && key.key === 'F11') { cancelValueDrag(); event.preventDefault(); event.stopImmediatePropagation(); runtime?.emergency?.(); return; }
+  runtime?.handleInput(event);
+  if (!event.defaultPrevented && ['keydown', 'keyup'].includes(type)) handleValueDragKey(event as KeyboardEvent);
 }, { capture: true, passive: false });
 /**
  * The settings controls `applyDisplaySettings` writes, as `[element id, preference key, default]`.
@@ -347,6 +350,7 @@ const displayFields: [string, keyof EditorPreferences, string | number | boolean
 
   ['text-selection-drag', 'textSelectionDrag', false],
   ['event-cut-density', 'cutDensity', 4],
+  ['event-drag-sensitivity', 'dragSensitivity', 1],
   ['sample-auto-fit', 'sampleAutoFit', true],
   ['wheel-limit-audio-start', 'wheelStopAtAudioStart', true],
   ['draw-event-curves', 'drawEventCurves', true],
@@ -382,7 +386,7 @@ let preferences: MigratedPreferences = migratePreferences();
 let libraryProject: StoredProject | null = null;
 let persistenceRequested = false;
 const manualSaves = new ManualSaveQueue(storeProject);
-let editorPreferences: EditorPreferences = readEditorPreferences();
+let editorPreferences: EditorPreferences = { ...DEFAULT_EDITOR_PREFERENCES, ...readEditorPreferences() };
 let atHome = true;
 let hasDocument = false;
 let previewReturnTime = 0;
@@ -448,7 +452,7 @@ for (const renderer of [preview, realtimePreview]) {
   renderer.noisePreview.hiddenLayers = noiseEditor.hiddenLayers;
   renderer.noisePreview.simpleLayers = noiseEditor.simpleLayers;
 }
-const eventSampler = new EventSampler(element<HTMLElement>('.stage'), () => ({ session, tempo, preview, realtimePreview, previewVisible: preview.visible, timeline, seconds: chartSeconds, sampleAutoFit: element<HTMLInputElement>('#sample-auto-fit').checked }), { invalidate, pause: () => playback.pause(), notify });
+const eventSampler = new EventSampler(element<HTMLElement>('.stage'), () => ({ session, tempo, preview, realtimePreview, previewVisible: preview.visible, timeline, seconds: chartSeconds, playing: () => audio.playing, sampleAutoFit: element<HTMLInputElement>('#sample-auto-fit').checked }), { invalidate, pause: () => playback.pause(), notify });
 const audioAnalysis = new AudioAnalysis(element<HTMLCanvasElement>('#audio-analysis-overlay'), () => timeline, () => audio, () => persistEditor());
 /** The pending note-source hover timer; `null` when no reveal is scheduled. */
 let noteHoverTimer: number | ReturnType<typeof globalThis.setTimeout> | null = null;
@@ -1166,6 +1170,7 @@ function renderSession() {
   timeline.tempo = tempo;
   session.tempo = tempo; session.division = timeline.division;
   session.cutDensity = Number(element<HTMLInputElement>('#event-cut-density').value);
+  session.dragSensitivity = Number(element<HTMLInputElement>('#event-drag-sensitivity').value);
   updateLineInfo();
   // `scrollValueIncrement` is a key of the raw legacy `Settings.json`, which `MigratedPreferences`
   // deliberately keeps loosely typed (`Record<string, unknown>`), so the array is read through an
@@ -2171,7 +2176,7 @@ function frame(timestamp: number) {
   if (audio.playing && !mods?.runtime.locks.size && loop && currentBeat() >= loop.end) seekBeat(loop.start, false);
   if (audio.playing && audio.time >= audio.duration) { audio.pause(); invalidate(); }
   hitSounds.tick(session.chart, tempo, session.lineIndex);
-  if (!atHome && (audio.playing || dirtyFrame || trajectoryPanel.active || noiseTrackingPanel.active && noiseTrackingPanel.animating || noiseFitPanel.active && noiseFitPanel.options.animate && noiseFitPanel.options.show && noiseFitPanel.previewChart && !noiseFitPanel.fullPreview) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
+  if (!atHome && (audio.playing || dirtyFrame || eventSampler.looping || trajectoryPanel.active || noiseTrackingPanel.active && noiseTrackingPanel.animating || noiseFitPanel.active && noiseFitPanel.options.animate && noiseFitPanel.options.show && noiseFitPanel.previewChart && !noiseFitPanel.fullPreview) && frameLimiter.shouldRender(timestamp, editorPreferences.fpsLimit ?? preferences.settings.fpsLimit)) {
     frameSampleCount++;
     const start = performance.now();
     const beat = currentBeat();
@@ -2440,6 +2445,7 @@ function applyDisplaySettings() {
   timeline.seamlessEvents = element<HTMLInputElement>('#seamless-events').checked;
   timeline.drawEventCurves = element<HTMLInputElement>('#draw-event-curves').checked;
   session.cutDensity = Number(element<HTMLInputElement>('#event-cut-density').value);
+  session.dragSensitivity = Number(element<HTMLInputElement>('#event-drag-sensitivity').value);
   clipboardHistory.enabled = element<HTMLInputElement>('#clipboard-history-enabled').checked;
   lineSwitcher.enabled = element<HTMLInputElement>('#line-switcher-enabled').checked;
   if (!lineSwitcher.enabled) lineSwitcher.hide();
@@ -2506,4 +2512,5 @@ const modEditor: ModEditor = {
   },
 };
 mods=new ModManager(modEditor,{notify,invalidate});
+
 
