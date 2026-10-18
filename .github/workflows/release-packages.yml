@@ -17,6 +17,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm test
+      - run: npm run lint
       - run: npm ci --prefix collaboration-server --ignore-scripts
       - run: npm run test:collaboration-server
       - run: npm run build:pages
