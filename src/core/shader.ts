@@ -263,7 +263,7 @@ export class ShaderRuntime {
       if (beat < effect.startBeat || beat >= effect.endBeat) return [];
       // `vars` is a Map, so it is iterated directly: `Object.entries` on a Map yields nothing and
       // would silently produce an effect with no parameter values at all.
-      return [{ ...effect, values: Object.fromEntries([...effect.vars].map(([name, events]) => [name, sampleValue(events, seconds, this.tempo, factor, events[0]?.start)]).filter(([, value]) => value !== undefined)) }];
+      return [{ ...effect, values: Object.fromEntries([...effect.vars].map(([name, events]): [string, unknown] => [name, sampleValue(events, seconds, this.tempo, factor, events[0]?.start)]).filter(([, value]) => value !== undefined)) }];
     });
     return active.sort((left, right) => left.order - right.order || left.startBeat - right.startBeat);
   }

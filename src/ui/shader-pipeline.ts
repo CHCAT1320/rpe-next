@@ -224,10 +224,11 @@ export class ShaderPipeline {
       // the map stores needs the list to be widened to number[], which the literal GL enums are not.
       if (type !== undefined && ([gl.SAMPLER_2D, gl.INT, gl.BOOL] as number[]).includes(type)) { gl.uniform1i(location, Number(normalised) || 0); return; }
       if (Array.isArray(normalised)) {
-        if (normalised.length === 2) gl.uniform2fv(location, normalised);
-        else if (normalised.length === 3) gl.uniform3fv(location, normalised);
-        else if (normalised.length === 4) gl.uniform4fv(location, normalised);
-        else if (normalised.length === 1) gl.uniform1f(location, normalised[0]);
+        const components = normalised as number[];
+        if (components.length === 2) gl.uniform2fv(location, components);
+        else if (components.length === 3) gl.uniform3fv(location, components);
+        else if (components.length === 4) gl.uniform4fv(location, components);
+        else if (components.length === 1) gl.uniform1f(location, components[0]!);
       } else if (typeof normalised === 'number' && Number.isFinite(normalised)) gl.uniform1f(location, normalised);
     };
     set('u_texture', 0); set('u_time', seconds); set('resolution', resolution ?? [1350, 900]); set('rpeRectMin', rect?.min ?? [0, 0]); set('rpeRectMax', rect?.max ?? [1, 1]);

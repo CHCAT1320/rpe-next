@@ -154,8 +154,8 @@ export class CollaborationClient extends EventTarget {
     super(); this.transport = transport; this.getSession = session; this.receiveChart = receiveChart; this.notify = notify;
     this.interactionBusy = interactionBusy;
     this.queue = []; this.undo = []; this.redo = []; this.members = []; this.locks = new Map(); this.requests = []; this.chat = []; this.state = '未连接';
-    transport.addEventListener('message', event => this.message((event as CustomEvent).detail));
-    transport.addEventListener('state', event => { this.state = (event as CustomEvent).detail; this.changed(); });
+    transport.addEventListener('message', event => this.message((event as CustomEvent<WireMessage>).detail));
+    transport.addEventListener('state', event => { this.state = (event as CustomEvent<string>).detail; this.changed(); });
   }
   changed(): void { this.dispatchEvent(new Event('change')); }
   connect(server: string, profile: { name?: unknown; color?: unknown }, invitation: { server?: string; room?: string; token?: string } | null = null, creationKey = ''): void {

@@ -93,7 +93,7 @@ export class CollaborationMessageReader {
   constructor(acknowledge: (message: FragmentAck) => void = () => {}) { this.acknowledge = acknowledge; this.reset(); }
   reset(): void { this.parts = []; this.bytes = 0; this.total = 0; this.id = null; }
   read(text: string): WireMessage | null {
-    const message: WireMessage = JSON.parse(text);
+    const message = JSON.parse(text) as WireMessage;
     if (message?.type === '$rpeAck') return message;
     if (message?.type !== '$rpeFrame') {
       if (this.parts.length) throw new Error('联机同步分片被中断');
@@ -110,7 +110,7 @@ export class CollaborationMessageReader {
     this.total = frameTotal; this.id = frameId; this.parts.push(data);
     if (frameId !== undefined) this.acknowledge({ type: '$rpeAck', id: frameId, received: this.parts.length });
     if (this.parts.length < frameTotal) return null;
-    const result: WireMessage = JSON.parse(this.parts.join('')); this.reset(); return result;
+    const result = JSON.parse(this.parts.join('')) as WireMessage; this.reset(); return result;
   }
 }
 

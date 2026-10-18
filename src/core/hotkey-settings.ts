@@ -12,7 +12,7 @@ export const HOTKEY_GROUPS: HotkeyGroup[] = [
   ['播放与视图', { Pause: '播放 / 暂停', StartView: '开始预览', EndView: '结束预览', JumpView: '结束预览并保留时间', ReplayView: '从头预览', StartView_HOLD: '按住预览，松开返回', JumpView_HOLD: '按住预览，松开保留时间', LastBeat: '后退一横线', NextBeat: '前进一横线', SwitchUI: '切换音符 / 事件视图', ResetCamera: '重置视野', ShowLineInfo: '显示 / 隐藏当前线信息' }],
   ['选中物件与多线', { PageLeft: '选中物件左移', PageRight: '选中物件右移', PageUp: '选中物件时间后移', PageDown: '选中物件时间前移', ToggleMultiLine: '开启 / 关闭多线', SwitchMultiLineMode: '切换多线音符 / 事件' }],
 ];
-export const HOTKEY_LABELS: Record<string, string> = Object.assign({}, ...HOTKEY_GROUPS.map(([, entries]) => entries));
+export const HOTKEY_LABELS: Record<string, string> = Object.assign({}, ...HOTKEY_GROUPS.map(([, entries]) => entries)) as Record<string, string>;
 
 export function shortcutScope(action: string): string {
   if (['AddHold', 'AddDrag', 'AddFlick'].includes(action)) return '音符区域';

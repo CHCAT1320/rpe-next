@@ -15,7 +15,7 @@ const base = (mode: string): string => (mode === 'pages' ? PAGES_BASE : '/');
 // %APP_VERSION% token in index.html during both `vite` and `vite build`, and exposes the same
 // value to application code as the `__APP_VERSION__` constant.
 function appVersion(root: string): Plugin {
-  const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version as string;
+  const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as unknown as { version: string }).version;
   return {
     name: 'rpe-app-version',
     config: () => ({ define: { __APP_VERSION__: JSON.stringify(version) } }),

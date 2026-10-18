@@ -86,7 +86,7 @@ export class NoiseEdgeFilter {
       gl.uniform1i(gl.getUniformLocation(program, 'coverage'), 0); gl.uniform1i(gl.getUniformLocation(program, 'strokes'), 1);
       this.radius = gl.getUniformLocation(program, 'radius'); this.color = gl.getUniformLocation(program, 'color');
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-      this.maximumSize = gl.getParameter(gl.MAX_TEXTURE_SIZE); this.gl = gl;
+      this.maximumSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)); this.gl = gl;
       return true;
     } catch { this.disabled = true; return false; }
   }

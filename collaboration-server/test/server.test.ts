@@ -75,7 +75,7 @@ test('创建密钥与错误邀请被拒绝，健康接口不暴露房间', async
   const client = await peer(service.port); context.after(() => client.socket.terminate());
   client.send({ type: 'create', chart: identifyChart(createChart()), profile: {} }); assert.match((await client.wait('error')).message!, /密钥/);
   client.send({ type: 'join', room: 'invalid', token: 'invalid' }); assert.match((await client.wait('error')).message!, /邀请/);
-  const health = await fetch(`http://127.0.0.1:${service.port}/health`).then(response => response.json()); assert.equal(health.protocol, 1); assert.equal(health.rooms, undefined);
+  const health = await fetch(`http://127.0.0.1:${service.port}/health`).then(response => response.json()) as unknown as { protocol?: number; rooms?: unknown }; assert.equal(health.protocol, 1); assert.equal(health.rooms, undefined);
 });
 
 test('既没有 Pong 也没有有效数据的连接仍由心跳清理', async context => {

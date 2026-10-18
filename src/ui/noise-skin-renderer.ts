@@ -117,7 +117,7 @@ export class NoiseSkinRenderer {
     this.initialize();
   }
   initialize(): void {
-    const gl = this.gl; this.maximum = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const gl = this.gl; this.maximum = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
     this.buffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     this.quad = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
     this.copy = this.program(copy); this.maskProgram = this.program(maskFragment); this.downsample = this.program(downsample); this.imageConvert = this.program(imageConvert);
@@ -133,7 +133,7 @@ export class NoiseSkinRenderer {
     for (const shader of shaders) gl.attachShader(program, shader);
     gl.linkProgram(program); for (const shader of shaders) gl.deleteShader(shader);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { const message = gl.getProgramInfoLog(program); gl.deleteProgram(program); throw new Error(message ?? '着色器链接失败'); }
-    const uniforms = new Map();
+    const uniforms = new Map<string, { location: WebGLUniformLocation | null; type: number }>();
     for (let index = 0; index < Number(gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS)); index++) { const info = gl.getActiveUniform(program, index)!; const name = info.name.replace(/\[0\]$/, ''); uniforms.set(name, { location: gl.getUniformLocation(program, info.name), type: info.type }); }
     return { program, uniforms, position: gl.getAttribLocation(program, 'position') };
   }

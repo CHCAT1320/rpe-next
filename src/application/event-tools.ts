@@ -4,7 +4,7 @@ import { EVENT_TYPES } from '../core/chart.ts';
 import { snapTime } from '../core/edit-grid.ts';
 import { eventList, eventKey, selectedEvents, commitEventLists } from './event-commands.ts';
 import type { EventEditSession } from './event-commands.ts';
-import type { ChartEvent, Color, EventValue } from '../core/types.ts';
+import type { ChartEvent, Color, EventValue, AnyEventType } from '../core/types.ts';
 
 /** The tracks the cut tool understands: every base track plus the numeric extended ones. */
 const cutTypes = new Set<string>([...EVENT_TYPES, 'scaleXEvents', 'scaleYEvents', 'colorEvents']);
@@ -89,7 +89,7 @@ export function cutEventParts(type: string, event: ChartEvent, { division = 4, d
 }
 
 export function cutSelectedEvents(session: EventEditSession, options: CutOptions = {}): CutResult {
-  const updates = new Map(); const selection = new Set<string>(); let changed = 0; let generated = 0; let skipped = 0;
+  const updates = new Map<AnyEventType, ChartEvent[]>(); const selection = new Set<string>(); let changed = 0; let generated = 0; let skipped = 0;
   for (const type of new Set(selectedEvents(session).map(entry => entry.type))) {
     // Keeps each produced piece paired with the selection flag of the event it came from, so the
     // replacement segments of a selected event stay selected after the sort below.
@@ -112,7 +112,7 @@ export function cutSelectedEvents(session: EventEditSession, options: CutOptions
 
 /** Snaps each selected event's start value onto the end value of the event before it. */
 export function stickSelectedEvents(session: EventEditSession): { changed: number; skipped: number } {
-  const updates = new Map(); let changed = 0; let skipped = 0;
+  const updates = new Map<AnyEventType, ChartEvent[]>(); let changed = 0; let skipped = 0;
   for (const type of new Set(selectedEvents(session).map(entry => entry.type))) {
     const events = [...eventList(session, type)];
     if (type === 'paintEvents') { skipped += selectedEvents(session).filter(entry => entry.type === type).length; continue; }

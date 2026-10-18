@@ -12,7 +12,7 @@ export function parseDocument(text: string): Chart {
   text = custom.text;
   const trimmed = text.replace(/^\uFEFF/, '').trimStart();
   if (trimmed.startsWith('{')) {
-    const candidate = JSON.parse(trimmed);
+    const candidate = JSON.parse(trimmed) as unknown as { formatVersion?: unknown; META?: unknown };
     return emitModHook('chart:parsed',{chart:candidate.formatVersion && !candidate.META ? integerChartAlpha(parseOfficialChart(candidate)) : parseChart(trimmed)}).chart;
   }
   const bpm = trimmed.split(/\r?\n/).find(row => /^bp\s/.test(row.trim()));

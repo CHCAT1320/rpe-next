@@ -53,5 +53,5 @@ export function builtinNoiseSkinRoot(skin: BuiltinNoiseSkin, assets: Map<string,
 }
 export function installBuiltinNoiseSkin(skin: BuiltinNoiseSkin, assets: Map<string, Uint8Array | string>): { root: string; entries: Map<string, Uint8Array> } {
   const root = builtinNoiseSkinRoot(skin, assets);
-  return { root, entries: assets.has(root + '/main.glsl') ? new Map() : new Map([...skin.files].map(([path, bytes]) => [`${root}/${path}`, bytes.slice()])) };
+  return { root, entries: assets.has(root + '/main.glsl') ? new Map<string, Uint8Array>() : new Map([...skin.files].map(([path, bytes]) => [`${root}/${path}`, bytes.slice()])) };
 }

@@ -162,7 +162,11 @@ export interface EditorSkinDecoration {
   placement?: 'prepend' | 'append' | 'before' | 'after';
 }
 
-const plain = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+const plain = (value: unknown): value is Record<string, unknown> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+};
 const fail = (message: string): never => { throw new Error('编辑器皮肤：' + message); };
 const string = (value: unknown, name: string, max = 500): string => { if (typeof value !== 'string' || !value.trim() || value.length > max) fail(name + ' 无效'); return value as string; };
 const identifier = /^[a-z][a-z0-9-]{0,63}$/;
@@ -407,7 +411,7 @@ export function parseEditorSkin(files: Map<string, Uint8Array>): EditorSkinPacka
   canvasConfig(skin.canvas ?? {}, skin.parameters as SkinDocument);
   if (!plain((skin.canvas as SkinDocument | undefined)?.targets ?? {})) fail('Canvas targets 无效');
   for (const [key, config] of Object.entries(((skin.canvas as SkinDocument | undefined)?.targets ?? {}) as SkinDocument)) { if (!Object.hasOwn(EDITOR_SKIN_CANVASES, key)) fail('未知画布：' + key); canvasConfig(config, skin.parameters as SkinDocument); }
-  for (const canvas of [skin.canvas, ...Object.values((skin.variants ?? {}) as SkinDocument).map(variant => (variant as SkinDocument).canvas)]) for (const config of [canvas, ...Object.values((canvas as SkinDocument | undefined)?.targets ?? {})]) if ((config as SkinDocument | undefined)?.font !== undefined && (typeof (config as SkinDocument).font !== 'string' || (assets[(config as SkinDocument).font as string] as SkinDocument | undefined)?.type !== 'font')) fail('Canvas 字体引用无效');
+  for (const canvas of [skin.canvas, ...Object.values((skin.variants ?? {}) as SkinDocument).map(variant => (variant as SkinDocument).canvas)]) for (const config of [canvas, ...Object.values(((canvas as SkinDocument | undefined)?.targets ?? {}) as Record<string, unknown>)]) if ((config as SkinDocument | undefined)?.font !== undefined && (typeof (config as SkinDocument).font !== 'string' || (assets[(config as SkinDocument).font as string] as SkinDocument | undefined)?.type !== 'font')) fail('Canvas 字体引用无效');
   const allValues = JSON.stringify([skin.tokens, skin.styles, skin.motions, skin.variants]);
   for (const match of allValues.matchAll(/\b(asset|font|motion|parameter)\(([a-z][a-z0-9-]*)\)/g)) {
     const [, kind, id] = match as unknown as [string, string, string];

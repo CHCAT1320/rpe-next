@@ -151,8 +151,9 @@ export class CollaborationTransport extends EventTarget {
     };
     socket.onmessage = event => {
       if (this.socket !== socket) return;
+      const data = event.data as string;
       try {
-        const message = reader.read(event.data);
+        const message = reader.read(data);
         if (message?.type === '$rpeAck') { this.sender!.acknowledge(message as unknown as FragmentAck); return; }
         if (!synchronized) {
           if (!deadline.active) deadline.start(); else deadline.progress();
@@ -164,7 +165,7 @@ export class CollaborationTransport extends EventTarget {
           return;
         }
         const members = message.members as TransportMember[] | undefined;
-        if (!['presence', 'locks', 'pong', 'signal', 'lock-result', 'media-upload-progress', 'media-upload-result'].includes(String(message.type))) this.trace('receive', { type: message.type, bytes: event.data.length, members: members?.length });
+        if (!['presence', 'locks', 'pong', 'signal', 'lock-result', 'media-upload-progress', 'media-upload-result'].includes(String(message.type))) this.trace('receive', { type: message.type, bytes: data.length, members: members?.length });
         if (['welcome', 'waiting', 'error'].includes(String(message.type))) deadline.stop();
         if (message.type === 'welcome') {
           const welcome = message as WelcomeMessage;

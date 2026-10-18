@@ -13,6 +13,6 @@ test('诊断日志跨启动追加，按大小保留有限轮换文件', async co
   assert.match(await readFile(path, 'utf8'), /first/); assert.match(await readFile(path, 'utf8'), /second/);
   for (let index = 0; index < 25; index++) { second.write({ phase: 'more', index }); await second.flush(); }
   const files = await readdir(directory); assert.ok(files.length <= 4); assert.ok(files.includes('test.log.3'));
-  const lines = (await Promise.all(files.map(file => readFile(join(directory, file), 'utf8')))).flatMap(text => text.trim().split('\n').map(line => JSON.parse(line)));
+  const lines = (await Promise.all(files.map(file => readFile(join(directory, file), 'utf8')))).flatMap(text => text.trim().split('\n').map((line): unknown => JSON.parse(line) as unknown)) as unknown as { index?: number; time?: string }[];
   assert.ok(lines.some((line: { index?: number }) => line.index === 24)); assert.ok(lines.every((line: { time?: string }) => line.time));
 });

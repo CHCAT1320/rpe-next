@@ -69,7 +69,7 @@ export function editJson(title: string, description: string, value: unknown, onA
   content.append(textarea);
   apply.hidden = false;
   apply.onclick = () => {
-    try { onApply(JSON.parse(textarea.value)); modal.close(); }
+    try { onApply(JSON.parse(textarea.value) as unknown as ParsedJson); modal.close(); }
     catch (failure) { error.textContent = failureMessage(failure); }
   };
   if (onDelete) {

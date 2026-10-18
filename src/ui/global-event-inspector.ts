@@ -61,8 +61,8 @@ export class GlobalEventInspector {
       else input.value = kind === 'beat' ? formatBeat(value as [number, number, number]) : kind === 'json' ? JSON.stringify(value, null, 2) : kind === 'color' ? '#' + (value as number[]).map(channel => Math.round(channel).toString(16).padStart(2, '0')).join('') : String(value ?? '');
       const applyInput = (quiet=false): void => { try {
         if(document.activeElement===input)this.editing={input,selection:[...this.document.editor.eventSelection].join('|')};
-        const value = kind === 'beat' ? parseBeat(input.value) : kind === 'number' ? input.value.trim() ? Number(input.value) : NaN : kind === 'boolean' ? (input as HTMLInputElement).checked : kind === 'color' ? [1, 3, 5].map(index => Number.parseInt(input.value.slice(index, index + 2), 16)) : kind === 'json' ? JSON.parse(input.value) : input.value;
-        if (kind === 'number' && !Number.isFinite(value)) throw Error('请输入有效数值');
+        const value: unknown = kind === 'beat' ? parseBeat(input.value) : kind === 'number' ? input.value.trim() ? Number(input.value) : NaN : kind === 'boolean' ? (input as HTMLInputElement).checked : kind === 'color' ? [1, 3, 5].map(index => Number.parseInt(input.value.slice(index, index + 2), 16)) : kind === 'json' ? JSON.parse(input.value) : input.value;
+        if (kind === 'number' && !Number.isFinite(value as number)) throw Error('请输入有效数值');
         apply(value);input.removeAttribute('aria-invalid');
       } catch(error) { if(!quiet){input.setAttribute('aria-invalid','true');this.report(error);} } };
       input.onfocus=()=>{this.editing={input,selection:[...this.document.editor.eventSelection].join('|')};};
@@ -93,7 +93,7 @@ export class GlobalEventInspector {
       this.inspectorDispose = typeof dispose === 'function' ? dispose : null;
     }
     const advanced = node('details'); advanced.append(node('summary', '', '完整事件数据')); const raw = node('textarea'); raw.value = JSON.stringify(event, null, 2); raw.setAttribute('aria-label', '全局事件 JSON');
-    const apply = node('button', '', '应用 JSON'); apply.type = 'button'; apply.onclick = () => this.safely(() => { const value = JSON.parse(raw.value); update(() => value, '修改全局事件 JSON'); }); advanced.append(raw, apply); form.append(advanced);
+    const apply = node('button', '', '应用 JSON'); apply.type = 'button'; apply.onclick = () => this.safely(() => { const value: unknown = JSON.parse(raw.value); update(() => value as ChartEvent, '修改全局事件 JSON'); }); advanced.append(raw, apply); form.append(advanced);
     const remove = node('button', 'wide-button', '删除选中的全局事件'); remove.type = 'button'; remove.onclick = () => this.safely(() => this.remove()); form.append(remove);
   }
 }

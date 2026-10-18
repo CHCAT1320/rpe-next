@@ -148,7 +148,7 @@ export function stringifyPreservingNumbers(value: unknown, space: number | strin
   const ordinary = JSON.stringify(value, null, space);
   let marker = '\u0000rpe-negative-zero\u0000';
   while (ordinary.includes(JSON.stringify(marker))) marker += '#';
-  return JSON.stringify(value, (key, entry) => Object.is(entry, -0) ? marker : entry, space).replaceAll(JSON.stringify(marker), '-0');
+  return JSON.stringify(value, (key: string, entry: unknown): unknown => Object.is(entry, -0) ? marker : entry, space).replaceAll(JSON.stringify(marker), '-0');
 }
 
 export function assertChart(chart: unknown): asserts chart is Chart {
@@ -191,40 +191,49 @@ export function assertChart(chart: unknown): asserts chart is Chart {
     if (anchor !== undefined && (!Array.isArray(anchor) || anchor.length !== 2 || !anchor.every(value => typeof value === 'number' && Number.isFinite(value)))) throw new Error(`${path}.anchor 必须为两个有限数字`);
     const notes: unknown = record.notes;
     if (notes != null && !Array.isArray(notes)) throw new Error(`${path}.notes 必须为数组`);
-    for (const [index, note] of (notes ?? []).entries()) {
+    const noteList: unknown[] = Array.isArray(notes) ? notes : [];
+    for (const [index, note] of noteList.entries()) {
       if (!note || typeof note !== 'object') throw new Error(`${path}.notes[${index}]: 无效音符`);
-      beatValue(note.startTime, `${path}.notes[${index}].startTime`);
-      beatValue(note.endTime, `${path}.notes[${index}].endTime`);
-      if (!NOTE_NAMES[note.type] || !Number.isFinite(note.positionX)) throw new Error(`${path}.notes[${index}]: 非法类型或坐标`);
+      const noteRecord = note as Record<string, unknown>;
+      beatValue(noteRecord.startTime, `${path}.notes[${index}].startTime`);
+      beatValue(noteRecord.endTime, `${path}.notes[${index}].endTime`);
+      if (!NOTE_NAMES[noteRecord.type as number] || !Number.isFinite(noteRecord.positionX)) throw new Error(`${path}.notes[${index}]: 非法类型或坐标`);
       for (const property of ['speed', 'size', 'alpha', 'yOffset', 'visibleTime'] as const) {
-        if (note[property] !== undefined && !Number.isFinite(note[property])) throw new Error(`${path}.notes[${index}].${property} 必须为有限数字`);
+        if (noteRecord[property] !== undefined && !Number.isFinite(noteRecord[property])) throw new Error(`${path}.notes[${index}].${property} 必须为有限数字`);
       }
     }
     const eventLayers: unknown = record.eventLayers;
     if (eventLayers != null && !Array.isArray(eventLayers)) throw new Error(`${path}.eventLayers 必须为数组`);
+    const layerList: unknown[] = Array.isArray(eventLayers) ? eventLayers : [];
     const extended = record.extended;
-    for (const layer of [...(eventLayers ?? []), extended]) {
+    for (const layer of [...layerList, extended]) {
       if (!layer) continue;
+      const layerRecord = layer as Record<string, unknown>;
       for (const type of [...EVENT_TYPES, ...EXTENDED_TYPES]) {
-        const track = layer[type];
-        if (track != null && !Array.isArray(track)) throw new Error(`${path}.${type} 必须为数组`);
-        for (const [index, event] of (track ?? []).entries()) {
+        const rawTrack = layerRecord[type];
+        if (rawTrack != null && !Array.isArray(rawTrack)) throw new Error(`${path}.${type} 必须为数组`);
+        const track: unknown[] = Array.isArray(rawTrack) ? rawTrack : [];
+        for (const [index, rawEvent] of track.entries()) {
+          const event = rawEvent as Record<string, unknown>;
           // A whole-curve trajectory is validated through the same sampler and split rules the editor
           // uses, so a hand-edited file cannot smuggle in an expression that only fails at draw time.
-          if (event?.trajectory) {
-            if (type !== 'moveXEvents' || event.trajectory.version !== 1) throw new Error('整体轨迹必须位于 X 轨道，且使用受支持的版本');
-            sampleCurveTrajectory(event.trajectory.options, 65);
-            trajectorySplitSettings(event.trajectory.split);
-            if (!Number.isInteger(event.trajectory.segments) || event.trajectory.segments < 4 || event.trajectory.segments > 8192) throw new Error('轨迹拆分段数无效');
+          const trajectory = event.trajectory as { version?: unknown; options?: unknown; split?: unknown; segments?: unknown } | undefined;
+          if (trajectory) {
+            if (type !== 'moveXEvents' || trajectory.version !== 1) throw new Error('整体轨迹必须位于 X 轨道，且使用受支持的版本');
+            sampleCurveTrajectory(trajectory.options as Parameters<typeof sampleCurveTrajectory>[0], 65);
+            trajectorySplitSettings(trajectory.split as Parameters<typeof trajectorySplitSettings>[0]);
+            const segments = trajectory.segments as number;
+            if (!Number.isInteger(segments) || segments < 4 || segments > 8192) throw new Error('轨迹拆分段数无效');
           }
-          beatValue(event?.startTime, `${path}.${type}[${index}].startTime`);
-          beatValue(event?.endTime, `${path}.${type}[${index}].endTime`);
+          beatValue(event.startTime, `${path}.${type}[${index}].startTime`);
+          beatValue(event.endTime, `${path}.${type}[${index}].endTime`);
           const validValue = (value: unknown): boolean => type === 'textEvents' ? typeof value === 'string' : type === 'colorEvents' ? Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) : Number.isFinite(value);
           if (type !== 'paintEvents' && (!validValue(event.start) || !validValue(event.end))) throw new Error(`${path}.${type}[${index}]: 无效事件起始/结束值`);
           for (const property of ['easingLeft', 'easingRight'] as const) {
             if (event[property] !== undefined && !Number.isFinite(event[property])) throw new Error(`${path}.${type}[${index}].${property} 必须为有限数字`);
           }
-          if (event.bezier && (!Array.isArray(event.bezierPoints) || event.bezierPoints.length !== 4 || !event.bezierPoints.every(Number.isFinite))) throw new Error(`${path}.${type}[${index}].bezierPoints 必须为四个有限数字`);
+          const bezierPoints: unknown[] = Array.isArray(event.bezierPoints) ? event.bezierPoints : [];
+          if (event.bezier && (bezierPoints.length !== 4 || !bezierPoints.every(Number.isFinite))) throw new Error(`${path}.${type}[${index}].bezierPoints 必须为四个有限数字`);
         }
       }
     }

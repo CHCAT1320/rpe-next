@@ -304,6 +304,13 @@ interface PendingTimelineMenu {
   markerIndex: number | null;
 }
 
+/** A user-defined time marker stored on the chart's optional `markers` field. */
+interface TimelineMarker {
+  time: number;
+  name: string;
+  [key: string]: unknown;
+}
+
 /** What the keyup handler remembers about a held preview shortcut. */
 interface HeldPreview {
   /**
@@ -915,10 +922,15 @@ let pendingTimelineMenu: PendingTimelineMenu | null = null;
  * `markers` is an optional user-data field, so it is read as `unknown` and narrowed with
  * `Array.isArray`; the filter keeps the same truthiness test the original used.
  */
-function timelineMarkers() {
-  return Array.isArray(session.chart?.markers)
-    ? session.chart.markers.filter(marker => Number.isFinite(Number(marker?.time)) && String(marker?.name ?? '').trim())
-    : [];
+function timelineMarkers(): TimelineMarker[] {
+  const markers: unknown = session.chart?.markers;
+  if (!Array.isArray(markers)) return [];
+  const list: unknown[] = markers;
+  return list.filter((marker): marker is TimelineMarker => {
+    if (!marker || typeof marker !== 'object') return false;
+    const record = marker as Record<string, unknown>;
+    return Number.isFinite(Number(record.time)) && Boolean(String(record.name ?? '').trim());
+  });
 }
 function renderTimelineMarkers() {
   const root = element('#timeline-markers'); if (!root) return;
@@ -1476,7 +1488,7 @@ function save() {
     renderSession();
     const message = session.history.dirty || assetDirty ? '已保存开始保存时的版本；后续修改尚未保存' : '已保存到谱面库';
     status(message); notify(message, 'success'); editorSkinSignal('save-succeeded');mods?.runtime.emit('editor:save-succeeded',{message});
-  }).catch(error => { editorSkinSignal('save-failed');mods?.runtime.emit('editor:save-failed',{error}); throw error; });
+  }).catch((error: unknown) => { editorSkinSignal('save-failed');mods?.runtime.emit('editor:save-failed',{error}); throw error; });
 }
 
 function validateCommit(label: string, next: Chart) { assertChart(next); session.commit(label, next); }
@@ -1901,8 +1913,15 @@ function renderDiagnostics() {
     const list = issues.filter(issue => issue.severity === severity && (visible || severity !== 'info'));
     const details = document.createElement('details'); details.className = `diagnose-group ${severity}`; details.open = true;
     const summary = document.createElement('summary'); summary.textContent = `${title}（${list.length}）`; details.append(summary);
-    const groupedIssues = new Map();
-    for (const issue of list) { const [kind, sub] = category(issue); if (!groupedIssues.has(kind)) groupedIssues.set(kind, new Map()); if (!groupedIssues.get(kind).has(sub)) groupedIssues.get(kind).set(sub, []); groupedIssues.get(kind).get(sub).push(issue); }
+    const groupedIssues = new Map<string, Map<string, DiagnosticIssue[]>>();
+    for (const issue of list) {
+      const [kind, sub] = category(issue);
+      let groups = groupedIssues.get(kind);
+      if (!groups) { groups = new Map<string, DiagnosticIssue[]>(); groupedIssues.set(kind, groups); }
+      let entries = groups.get(sub);
+      if (!entries) { entries = []; groups.set(sub, entries); }
+      entries.push(issue);
+    }
     for (const [kind, subgroups] of groupedIssues) {
       const parent = document.createElement('details'); parent.className = 'diagnose-subgroup'; parent.open = true;
       const parentSummary = document.createElement('summary'); parentSummary.textContent = `${kind}（${[...subgroups.values()].reduce((sum, entries) => sum + entries.length, 0)}）`; parent.append(parentSummary);
@@ -1912,7 +1931,7 @@ function renderDiagnostics() {
         for (const issue of grouped) {
           const row = document.createElement('div'); row.className = `diagnose-item ${severity}`;
           const locate = document.createElement('button'); locate.type = 'button'; locate.textContent = `${issue.noiseArea !== undefined ? '噪域 ' + issue.noiseArea : 'Line ' + issue.line} · ${issue.beat} 拍 · ${issue.message}`;
-          locate.onclick = () => { if (issue.noiseArea !== undefined) { openNoisePanel(); noiseEditor.select(issue.noiseArea, issue.noiseTrack ? { type: issue.noiseTrack, index: issue.index } : null); } else session.selectLine(issue.line); seekBeat(issue.beat); };
+          locate.onclick = () => { if (issue.noiseArea !== undefined) { openNoisePanel(); noiseEditor.select(issue.noiseArea, issue.noiseTrack ? { type: issue.noiseTrack, index: issue.index as number } : null); } else session.selectLine(issue.line as number); seekBeat(issue.beat); };
           const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '删除'; remove.disabled = !issue.path.includes('[') && issue.path !== 'father'; remove.onclick = () => deleteDiagnosticIssue(issue);
           row.append(locate, remove); subgroup.append(row);
         }

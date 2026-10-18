@@ -73,7 +73,7 @@ export interface CommitResult {
 }
 
 const sha = (value: string | Uint8Array): string => createHash('sha256').update(value).digest('hex');
-const digest = async (path: string): Promise<string> => { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); };
+const digest = async (path: string): Promise<string> => { const hash = createHash('sha256'); for await (const chunk of createReadStream(path) as AsyncIterable<Buffer>) hash.update(chunk); return hash.digest('hex'); };
 const hashPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[a-f0-9-]{36}$/;
 const kinds = new Set(['projects', 'drafts', 'editor-skins', 'note-skins', 'mods', 'preferences']);

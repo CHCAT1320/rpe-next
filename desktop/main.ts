@@ -14,6 +14,26 @@ const origin = 'rpe://app';
 interface StorageRequest { method: string; args?: unknown[] }
 interface StorageFailure { name?: string | undefined; message?: string | undefined; code?: string | undefined; projectId?: string | undefined; expectedRevision?: string | null | undefined; actualRevision?: string | null | undefined }
 interface StorageResponse { ok: boolean; result?: unknown; error?: StorageFailure }
+/** A resource the smoke probe fetched, as reported by the renderer. */
+interface SmokeResource { path: string; status: number; bytes: number }
+/** The object the renderer-side smoke probe returns through `executeJavaScript`. */
+interface SmokeResult {
+  title: string;
+  secure: boolean;
+  libraryVisible: boolean;
+  directoryPicker: boolean;
+  webgl: boolean;
+  database: unknown;
+  resources: SmokeResource[];
+  entry: string;
+  forbidden: number;
+  hashPhases: string[] | null;
+  settings?: unknown;
+  media?: unknown;
+  mods?: unknown;
+  saving?: unknown;
+  native?: unknown;
+}
 
 const smokeSettings = process.argv.includes('--smoke-settings');
 const smokeMedia = process.argv.includes('--smoke-media');
@@ -61,11 +81,11 @@ else {
     // inlined here. It is read from the application root, not from the served site root: the Vite
     // build output contains no source tree, so `../dist/src/...` would not exist. `build-desktop.ts`
     // copies this one dependency-free module into the package for the same reason.
-    const { collaborationConnectSources } = await import(pathToFileURL(resolve(here, '..', 'src/core/collaboration-policy.ts')).href);
+    const { collaborationConnectSources } = (await import(pathToFileURL(resolve(here, '..', 'src/core/collaboration-policy.ts')).href)) as unknown as { collaborationConnectSources: (additionalOrigins?: string) => string };
     const { atomicJson } = await import(pathToFileURL(resolve(here, 'native-store.ts')).href) as typeof import('./native-store.ts');
     const configPath = resolve(app.getPath('userData'), 'native-storage.json');
     let config: { root?: string; version?: number; legacyMigrated?: boolean } | undefined;
-    try { config = JSON.parse(await readFile(configPath, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try { config = JSON.parse(await readFile(configPath, 'utf8')) as unknown as { root?: string; version?: number; legacyMigrated?: boolean }; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     let nativeRoot = config?.root ?? (smoke ? resolve(app.getPath('userData'), 'Library') : resolve(app.getPath('documents'), 'RePhiEdit Next', 'Library'));
     for (;;) {
       native = new NativeService(nativeRoot);
@@ -79,7 +99,7 @@ else {
         if (selected.canceled) { app.quit(); return; }
         const candidate = resolve(selected.filePaths[0]!);
         let marker: { format?: string; version?: number } | undefined;
-        try { marker = JSON.parse(await readFile(resolve(candidate, 'library.json'), 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        try { marker = JSON.parse(await readFile(resolve(candidate, 'library.json'), 'utf8')) as unknown as { format?: string; version?: number }; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         nativeRoot = marker ? candidate : resolve(candidate, 'RPENLibrary');
       }
     }
@@ -109,7 +129,7 @@ else {
           let next: NativeService | null = null;
           try {
             if (method === 'useRoot') {
-              const marker = JSON.parse(await readFile(resolve(destination, 'library.json'), 'utf8'));
+              const marker = JSON.parse(await readFile(resolve(destination, 'library.json'), 'utf8')) as unknown as { format?: string; version?: number };
               if (marker.format !== 'rpen-native-library' || marker.version !== 1) throw Error('请选择有效的谱面库文件夹');
             } else result = await native!.call<{ root: string }>('copyTo', destination);
             if (method !== 'backupFolder') {
@@ -178,8 +198,8 @@ else {
       event.preventDefault();
       mainWindow!.webContents.executeJavaScript('globalThis.rpenFlushPreferences?.()').then(() => {
         preferenceFlush = true; mainWindow!.close();
-      }).catch(error => {
-        const choice = dialog.showMessageBoxSync(mainWindow!, { type: 'warning', title: '设置尚未保存', message: error.message, buttons: ['继续编辑', '仍然退出'], defaultId: 0, cancelId: 0 });
+      }).catch((error: unknown) => {
+        const choice = dialog.showMessageBoxSync(mainWindow!, { type: 'warning', title: '设置尚未保存', message: (error as Error).message, buttons: ['继续编辑', '仍然退出'], defaultId: 0, cancelId: 0 });
         if (choice === 1) { preferenceFlush = true; mainWindow!.close(); }
       });
     });
@@ -204,7 +224,8 @@ else {
     mainWindow.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message); });
     if (smokeNative && process.env.RPE_NATIVE_TEST_PHASE !== 'restart') {
       await mainWindow.loadURL(`${origin}/__native-test-seed`);
-      await (await import(pathToFileURL(resolve(here, '..', 'tools', 'smoke-native.ts')).href)).prepareNative(mainWindow.webContents);
+      const smokeNativeModule = (await import(pathToFileURL(resolve(here, '..', 'tools', 'smoke-native.ts')).href)) as unknown as { prepareNative(webContents: unknown): Promise<unknown> };
+      await smokeNativeModule.prepareNative(mainWindow.webContents);
     }
     await mainWindow.loadURL(`${origin}/${process.argv.includes('--mods-off') ? '?mods=off' : ''}`);
     if (smoke) {
@@ -213,7 +234,7 @@ else {
       // carries just the bundle, so the probe is skipped there rather than failing a build for a
       // check it has no way to run.
       const canReadSources = existsSync(resolve(here, '..', 'src/platform/collaboration-media.ts'));
-      const result = await mainWindow.webContents.executeJavaScript(`(async () => {
+      const result = (await mainWindow.webContents.executeJavaScript(`(async () => {
         await document.fonts.ready;
         await new Promise(resolve => setTimeout(resolve, 1000));
         // The bundle name is content hashed, so read it back out of the served document.
@@ -235,17 +256,17 @@ else {
         const canvas = document.createElement('canvas');
         const database = await new Promise((resolve, reject) => { const request = indexedDB.open('desktop-smoke'); request.onsuccess = () => { request.result.close(); resolve(true); }; request.onerror = () => reject(request.error); });
         return { title: document.title, secure: isSecureContext, libraryVisible: Boolean(document.querySelector('#home') && !document.querySelector('#home').hidden), directoryPicker: typeof showDirectoryPicker === 'function', webgl: Boolean(canvas.getContext('webgl2')), database, resources, entry, forbidden: forbidden.status, hashPhases };
-      })()`);
+      })()`)) as unknown as SmokeResult;
       if (smokeSettings) {
         const { smokeSettingsRenderer } = await import(pathToFileURL(resolve(here, '..', 'tools', 'smoke-settings-renderer.ts')).href) as typeof import('../tools/smoke-settings-renderer.ts');
         result.settings = await mainWindow.webContents.executeJavaScript(`(${smokeSettingsRenderer.toString()})()`);
       }
       // The smoke helpers live in the checkout's `tools/`, which a `--dist` run does not serve, so
       // they are resolved from the application root rather than from the served site root.
-      if (smokeMedia) result.media = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-media.ts')).href)).smokeMediaTransfer(mainWindow.webContents);
-      if (smokeMods) result.mods = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-mods.ts')).href)).smokeMods(mainWindow.webContents);
-      if (smokeSaving) result.saving = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-saving.ts')).href)).smokeSaving(mainWindow.webContents);
-      if (smokeNative) result.native = await (await import(pathToFileURL(resolve(here, '..', 'tools/smoke-native.ts')).href)).smokeNative(mainWindow.webContents, native, {
+      if (smokeMedia) result.media = await ((await import(pathToFileURL(resolve(here, '..', 'tools/smoke-media.ts')).href)) as unknown as { smokeMediaTransfer(webContents: unknown): Promise<unknown> }).smokeMediaTransfer(mainWindow.webContents);
+      if (smokeMods) result.mods = await ((await import(pathToFileURL(resolve(here, '..', 'tools/smoke-mods.ts')).href)) as unknown as { smokeMods(webContents: unknown): Promise<unknown> }).smokeMods(mainWindow.webContents);
+      if (smokeSaving) result.saving = await ((await import(pathToFileURL(resolve(here, '..', 'tools/smoke-saving.ts')).href)) as unknown as { smokeSaving(webContents: unknown): Promise<unknown> }).smokeSaving(mainWindow.webContents);
+      if (smokeNative) result.native = await ((await import(pathToFileURL(resolve(here, '..', 'tools/smoke-native.ts')).href)) as unknown as { smokeNative(...args: unknown[]): Promise<unknown> }).smokeNative(mainWindow.webContents, native, {
         service: () => native!,
         selectFolder: async (path: string, action: () => Promise<unknown>) => {
           const mutableDialog = dialog as unknown as { showOpenDialog: typeof dialog.showOpenDialog };
@@ -263,5 +284,5 @@ else {
       const passed = result.secure && result.libraryVisible && result.webgl && result.database && result.entry.endsWith('.js') && result.resources.every((resource: { status: number; bytes: number }) => resource.status === 200 && resource.bytes > 0) && result.forbidden === 404 && !errors.length;
       await native!.close(); closing = true; app.exit(passed ? 0 : 1);
     } else { mainWindow.maximize(); mainWindow.show(); }
-  }).catch(error => { console.error(error); if (!smoke) dialog.showErrorBox('启动失败', error.message); app.exit(1); });
+  }).catch((error: unknown) => { console.error(error); if (!smoke) dialog.showErrorBox('启动失败', (error as Error).message); app.exit(1); });
 }

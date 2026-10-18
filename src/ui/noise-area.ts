@@ -661,7 +661,8 @@ export class NoiseAreaEditor {
   sampleView(): SampleView {
     const rect = this.overlay.getBoundingClientRect(); const renderer = this.context.previewVisible ? this.context.preview : this.context.realtimePreview;
     const viewport = previewViewport(rect.width, rect.height, renderer.aspectRatio ?? 1.5); const scale = viewport.scale / (renderer.viewDivisor ?? 1);
-    return { ...rect.toJSON(), viewport, scale, world: (point: Point) => ({ x: (point.x - rect.width / 2) / scale, y: (rect.height / 2 - point.y) / scale }), screen: (point: Point) => ({ x: rect.width / 2 + point.x * scale, y: rect.height / 2 - point.y * scale }) };
+    const bounds = rect.toJSON() as unknown as { width: number; height: number; left: number; top: number; [key: string]: unknown };
+    return { ...bounds, viewport, scale, world: (point: Point) => ({ x: (point.x - rect.width / 2) / scale, y: (rect.height / 2 - point.y) / scale }), screen: (point: Point) => ({ x: rect.width / 2 + point.x * scale, y: rect.height / 2 - point.y * scale }) };
   }
   sampleDown(event: PointerEvent): void {
     if (!this.sampleMode || event.button !== 0) return; event.preventDefault(); event.stopPropagation();

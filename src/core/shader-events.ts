@@ -165,7 +165,7 @@ export function shaderParameterTrack(event: ShaderParameterSource, name: string,
   const bag: Record<string, unknown> = vars === undefined || vars === null ? {} : vars as Record<string, unknown>;
   const value = bag[name] ?? fallback;
   if (Array.isArray(value) && value[0] && typeof value[0] === 'object') {
-    const track: ShaderParameterTrack = value;
+    const track = value as unknown as ShaderParameterTrack;
     return track;
   }
   return [{ startTime: event.startTime, endTime: event.endTime, start: structuredClone(value), end: structuredClone(value), easingType: 1 }];
@@ -182,7 +182,7 @@ export function alignShaderParameters(event: ChartEvent): ChartEvent {
   // which is exactly what the original `event.vars ?? {}` expression passed in.
   const entries: [string, unknown][] = Object.entries((event.vars ?? {}) as object);
   const vars: [string, unknown][] = entries.map(([name, value]) => [name,
-    Array.isArray(value) && value[0] && typeof value[0] === 'object' ? alignShaderTrack(value, event.startTime) : value,
+    Array.isArray(value) && value[0] && typeof value[0] === 'object' ? alignShaderTrack(value as unknown as ShaderParameterTrack, event.startTime as Beat) : value,
   ]);
   return { ...event, vars: Object.fromEntries(vars) };
 }
@@ -202,7 +202,7 @@ export function shaderParameters(source: string): ShaderParameterDefinition[] {
     .map(([, type, name, comment]) => {
       const dimensions = type.startsWith('vec') ? Number(type.at(-1)) : 1;
       const values = comment.match(/%([^%]+)%/)?.[1].split(',').map(Number);
-      const fallback: number[] = values?.length === dimensions && values.every(Number.isFinite) ? values : Array(dimensions).fill(0);
+      const fallback: number[] = values?.length === dimensions && values.every(Number.isFinite) ? values : Array<number>(dimensions).fill(0);
       return { name, type, dimensions, value: dimensions === 1 ? fallback[0] : fallback };
     });
 }

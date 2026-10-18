@@ -92,7 +92,7 @@ export function editorSkinContext(context: CanvasRenderingContext2D, requestedRo
         return gradient;
       };
       if (key === 'setLineDash') return (values: number[]) => target.setLineDash(values.length && config?.lineDash ? config.lineDash : values);
-      const value = Reflect.get(target, key, target);
+      const value = Reflect.get(target, key, target) as unknown;
       if (typeof value !== 'function') return value;
       const name = key as string;
       if (!bound.has(name)) bound.set(name, ['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage'].includes(name) ? (...args: never[]) => {
@@ -103,14 +103,16 @@ export function editorSkinContext(context: CanvasRenderingContext2D, requestedRo
       } : (value as (...values: never[]) => unknown).bind(target));
       return bound.get(name);
     },
-    set(target, key, value) {
+    set(target, key, value: unknown) {
       update();
       // The narrowing is captured up front: property keys on this proxy may arrive as symbols too.
       const property = typeof key === 'string' ? key : '';
       if (typeof value === 'string' && ['fillStyle', 'strokeStyle', 'shadowColor'].includes(property)) value = color(value);
       else if (config && property === 'font' && typeof value === 'string') {
-        if (config.fontScale) value = value.replace(/([\d.]+)px/, (match, size: string) => `${Number(size) * (config?.fontScale ?? 1)}px`);
-        if (config.resolvedFont) value = value.replace(/RPE(?:Game)?(?=[, ]|$)/g, `"${config.resolvedFont}"`);
+        let text = value;
+        if (config.fontScale) text = text.replace(/([\d.]+)px/, (match, size: string) => `${Number(size) * (config?.fontScale ?? 1)}px`);
+        if (config.resolvedFont) text = text.replace(/RPE(?:Game)?(?=[, ]|$)/g, `"${config.resolvedFont}"`);
+        value = text;
       }
       return Reflect.set(target, key, value, target);
     },

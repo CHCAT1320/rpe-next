@@ -79,7 +79,7 @@ export async function digestBytes(input: Uint8Array | ArrayBuffer, signal: Abort
           const abort = (): void => finish(signal.reason ?? new DOMException('操作已取消', 'AbortError'));
           const timer = setTimeout(() => { trace('hash-worker-timeout'); finish(new DOMException('素材校验超过 120 秒，请重试', 'TimeoutError')); }, 120000);
           worker!.onmessage = event => {
-            const data: { phase?: string; error?: string; hash?: string } | null = event.data;
+            const data = event.data as { phase?: string; error?: string; hash?: string } | null;
             if (data?.phase && ['ready', 'digest-start'].includes(data.phase)) { trace(`hash-worker-${data.phase}`); return; }
             if (data?.error) { finish(new Error(data.error)); return; }
             if (!/^[0-9a-f]{64}$/.test(data?.hash ?? '')) { finish(new Error('后台校验结果无效')); return; }

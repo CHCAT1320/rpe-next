@@ -18,8 +18,8 @@ test('6.6 MB 谱面双向限速且不回 Pong 时，数据及分片确认仍保�
   proxy.on('connection', frontend => {
     const backend = new WebSocket(`ws://127.0.0.1:${service.port}/collab`, { autoPong: false }); upstreams.push(backend);
     const upload: RawData[] = []; const download: RawData[] = [];
-    frontend.on('message', data => { if (JSON.parse(String(data)).type === '$rpeAck') backend.send(data, { binary: false }); else upload.push(data); });
-    backend.on('message', data => { if (JSON.parse(String(data)).type === '$rpeAck') frontend.send(data, { binary: false }); else download.push(data); });
+    frontend.on('message', data => { if ((JSON.parse(String(data)) as { type?: unknown }).type === '$rpeAck') backend.send(data, { binary: false }); else upload.push(data); });
+    backend.on('message', data => { if ((JSON.parse(String(data)) as { type?: unknown }).type === '$rpeAck') frontend.send(data, { binary: false }); else download.push(data); });
     const drain = (target: WebSocket, queue: RawData[]): void => { const next = queue.shift(); if (target.readyState === WebSocket.OPEN && next !== undefined) target.send(next, { binary: false }); };
     timers.push(setInterval(() => { drain(backend, upload); drain(frontend, download); }, 22));
     frontend.on('close', () => backend.close()); backend.on('close', () => frontend.close()); backend.on('error', () => {});

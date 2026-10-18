@@ -29,7 +29,7 @@ async function access<T>(mode: IDBTransactionMode, action: (store: IDBObjectStor
     transaction.onabort = transaction.onerror = () => { database.close(); reject(transaction.error ?? new Error('模组存储失败')); };
   });
 }
-export const readMods = (): Promise<StoredMod[]> => nativeStorage ? nativePackages<StoredMod>('mods', 'read') : access('readonly', store => store.getAll());
+export const readMods = (): Promise<StoredMod[]> => nativeStorage ? nativePackages<StoredMod>('mods', 'read') : access<StoredMod[]>('readonly', store => store.getAll() as IDBRequest<StoredMod[]>);
 export const storeMod = (record: ModPackage): Promise<unknown> => {
   const stored: StoredMod = { id: record.manifest.id, files: [...record.files], imported: Date.now() };
   return nativeStorage ? nativePackages('mods', 'write', stored.id, stored) : access('readwrite', store => store.put(stored));

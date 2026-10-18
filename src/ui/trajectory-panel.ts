@@ -291,7 +291,7 @@ export class TrajectoryPanel {
         this.startTime = parseBeat(String(values.startTime)); this.endTime = parseBeat(String(values.endTime));
         this.segments = Number(values.segments); this.replace = Boolean(values.replace);
         this.splitSettings = trajectorySplitSettings({ simplify: Boolean(values.simplify), tolerance: Number(values.tolerance) });
-        const options: FieldValues = { ...values, parameters: JSON.parse(String(values.parametersJson)) };
+        const options: FieldValues = { ...values, parameters: JSON.parse(String(values.parametersJson)) as unknown as FieldValue };
         for (const key of ['startTime', 'endTime', 'lineIndex', 'layerIndex', 'segments', 'replace', 'parametersJson', 'simplify', 'tolerance']) delete options[key];
         this.options = optionsFromFields(options);
         this.presetDraft = null; this.refresh();

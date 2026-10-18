@@ -83,7 +83,12 @@ export class ClipboardHistory extends EventTarget {
       const record = entry as Record<string, unknown>;
       if (typeof record.id !== 'string' || ids.has(record.id) || !Array.isArray(record.notes) || !Array.isArray(record.events) || !(record.notes.length + record.events.length)) return false;
       try {
-        for (const item of [...record.notes, ...record.events.map(item => item.event)]) { beatValue(item.startTime); beatValue(item.endTime); }
+        const notes: unknown[] = Array.isArray(record.notes) ? record.notes : [];
+        const events: unknown[] = Array.isArray(record.events) ? record.events : [];
+        for (const item of [...notes, ...events.map(entry => (entry as Record<string, unknown>).event)]) {
+          const event = item as Record<string, unknown>;
+          beatValue(event.startTime); beatValue(event.endTime);
+        }
       } catch { return false; }
       ids.add(record.id); return true;
     }).slice(0, this.limit).map(entry => ({ ...structuredClone(entry), pinned: Boolean(entry.pinned) }));

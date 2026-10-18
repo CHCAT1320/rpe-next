@@ -28,7 +28,8 @@ const sampleNumber = (value: number): number => Math.round(value * 10000) / 1000
 function eventAt(area: NoiseArea, target: NoiseTarget): NoiseEvent | undefined {
   const track = target.type ? area[target.type] : null;
   if (!Array.isArray(track)) return undefined;
-  const event: NoiseEvent | undefined = track[target.index];
+  const events: unknown[] = Array.isArray(track) ? track : [];
+  const event = events[target.index] as NoiseEvent | undefined;
   return event;
 }
 

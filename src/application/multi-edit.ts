@@ -206,7 +206,7 @@ function writeField(item: Note | ChartEvent, field: string, value: number): void
   else if (field === 'both') { item.start = value; item.end = value; }
   else if (['red', 'green', 'blue'].includes(field)) {
     const current = item.tint;
-    const tint: Color = Array.isArray(current) && current.length === 3 ? [...current] as Color : [255, 255, 255];
+    const tint: Color = Array.isArray(current) && current.length === 3 ? [...current as unknown[]] as Color : [255, 255, 255];
     tint[['red', 'green', 'blue'].indexOf(field)] = Math.max(0, Math.min(255, Math.trunc(value))); item.tint = tint;
   } else item[field === 'x' ? 'positionX' : field === 'easing' ? 'easingType' : field] = value;
 }

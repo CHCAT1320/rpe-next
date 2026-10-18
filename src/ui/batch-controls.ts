@@ -201,7 +201,7 @@ export class BatchControls {
     const logicalDeltaX = active.area === 'notes' ? deltaX / contentWidth * 1350 : 0;
     const result = controlSelection(snapshot, kind, { deltaBeat, deltaBeatByLine, deltaX: logicalDeltaX, dragX: deltaX / active.unit, anchorMode: this.anchorMode, snapX: this.timeline.snapX, gridCount: this.timeline.gridCount });
     active.result = result;
-    const view = Object.create(active.session);
+    const view = Object.create(active.session) as EditorSession;
     Object.defineProperty(view, 'chart', { value: result.chart });
     Object.assign(view, { lineIndex: result.lineIndex, selection: result.selection, eventSelection: result.eventSelection, multiLineSelection: result.multiLineSelection, multiEventSelection: result.multiEventSelection });
     this.timeline.bulkPreview = { ...result, session: view };

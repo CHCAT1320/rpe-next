@@ -22,8 +22,12 @@ const diagnosticPath = join(app.getPath('userData'), 'collaboration-diagnostics.
 const diagnostics = createDiagnostics(diagnosticPath);
 const diagnostic = (entry: Record<string, unknown>): void => diagnostics.write(entry);
 interface ManagerPreferences { port?: number; lan?: boolean; tunnelPath?: string }
+/** The dynamically imported server entry point, typed at the module boundary. */
+interface ServerModule {
+  startCollaborationServer(options: { port: number; host?: string; creationKey?: string; onDiagnostic?: (entry: Record<string, unknown>) => void; onStatus?: (value: { rooms: number; users: number }) => void }): Promise<CollaborationService>;
+}
 let preferences: ManagerPreferences = {};
-try { preferences = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
+try { preferences = JSON.parse(readFileSync(configPath, 'utf8')) as unknown as ManagerPreferences; } catch {}
 let window: BrowserWindow | null = null; let service: CollaborationService | null = null; let tunnel: ChildProcess | null = null; let tunnelPath = ''; let publicAddress = ''; let counts = { rooms: 0, users: 0 }; let message = '服务未启动';
 tunnelPath = typeof preferences.tunnelPath === 'string' ? preferences.tunnelPath : '';
 app.setName('RPE Next 协作服务器');
@@ -40,7 +44,7 @@ ipcMain.handle('server-action', async (event, action: string, values: Record<str
   try {
     if (action === 'start' && !service) {
       const port = Number(values.port); if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('端口须为 1024–65535');
-      const module = await import(pathToFileURL(join(here, 'server.ts')).href);
+      const module = await import(pathToFileURL(join(here, 'server.ts')).href) as unknown as ServerModule;
       service = await module.startCollaborationServer({ port, host: values.lan ? '0.0.0.0' : '127.0.0.1', creationKey: String(values.key ?? ''), onDiagnostic: diagnostic, onStatus: (value: { rooms: number; users: number }) => { counts = value; update(); } });
       diagnostic({ phase: 'service-start', framed: true, acknowledgementWindow: 16, maximumWindow: 128, compression: true, assetDelivery: true });
       preferences = { port, lan: Boolean(values.lan), tunnelPath }; writeFileSync(configPath, JSON.stringify(preferences));
@@ -102,10 +106,10 @@ app.whenReady().then(async () => {
   });
   await window.loadURL(`${origin}/manager.html`);
   if (smoke) {
-    const module = await import(pathToFileURL(join(here, 'server.ts')).href);
+    const module = await import(pathToFileURL(join(here, 'server.ts')).href) as unknown as ServerModule;
     service = await module.startCollaborationServer({ port: 0 });
     const health = await fetch(`http://127.0.0.1:${service!.port}/health`).then(response => response.json()) as { protocol?: number };
-    const ui = await window.webContents.executeJavaScript('({ title: document.title, bridge: typeof window.serverManager?.action, start: Boolean(document.querySelector("#start")), status: document.querySelector("#status")?.textContent })');
+    const ui = (await window.webContents.executeJavaScript('({ title: document.title, bridge: typeof window.serverManager?.action, start: Boolean(document.querySelector("#start")), status: document.querySelector("#status")?.textContent })')) as unknown as { title: string; bridge: string; start: boolean; status: string | null };
     await service!.close(); service = null;
     console.log(JSON.stringify({ health, ui, errors })); app.exit(health.protocol === 1 && ui.bridge === 'function' && ui.start && !errors.length ? 0 : 1);
   }

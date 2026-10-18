@@ -41,7 +41,8 @@ export function shareChartReferences<T>(before: unknown, after: T): T {
   if (Array.isArray(after)) {
     const source: unknown[] = Array.isArray(before) ? before : [];
     const identities = new Map<unknown, unknown>(source.filter(item => collabIdOf(item)).map(item => [collabIdOf(item), item]));
-    const result = after.map((item, index) => shareChartReferences(collabIdOf(item) ? identities.get(collabIdOf(item)) : source[index], item));
+    const items: unknown[] = after;
+    const result = items.map((item, index) => shareChartReferences(collabIdOf(item) ? identities.get(collabIdOf(item)) : source[index], item));
     // `source` and `result` hold the same element type as `after`; the cast only re-states that the
     // unchanged-array fast path returns the original array.
     const chosen: T = source.length === result.length && result.every((item, index) => item === source[index]) ? (source as T) : (result as T);
@@ -155,7 +156,7 @@ export function validateNewEventOverlaps(before: Chart, after: Chart): void {
  */
 export function chartChanges(before: unknown, after: unknown, path: ChangeSegment[] = [], result: ChartChange[] = []): ChartChange[] {
   if (before === after || equal(before, after)) return result;
-  if (Array.isArray(before) && Array.isArray(after) && [...before, ...after].every(item => plain(item) && collabIdOf(item))) {
+  if (Array.isArray(before) && Array.isArray(after) && [...(before as unknown[]), ...(after as unknown[])].every(item => plain(item) && collabIdOf(item))) {
     const old = new Map<unknown, unknown>(before.map(item => [collabIdOf(item), item])); const next = new Map<unknown, unknown>(after.map(item => [collabIdOf(item), item]));
     const commonBefore = before.filter(item => next.has(collabIdOf(item))).map(item => collabIdOf(item));
     const commonAfter = after.filter(item => old.has(collabIdOf(item))).map(item => collabIdOf(item));
