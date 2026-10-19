@@ -1,3 +1,4 @@
+import { evaluateNumericExpression } from './numeric-expression.ts';
 import type { Beat } from './types.ts';
 
 /**
@@ -42,7 +43,7 @@ export function parseBeat(text: string | number): Beat {
     return beat;
   }
   if (String(text).trim() === '') throw new Error('拍数不能为空');
-  return fromNumber(Number(text));
+  return fromNumber(evaluateNumericExpression(text));
 }
 
 export function formatBeat(beat: Beat): string { return `${beat[0]}:${beat[1]}/${beat[2]}`; }

@@ -57,8 +57,17 @@ const functions: Record<string, NamedFunction> = Object.freeze({
 
 const precedence: Record<string, number> = { '||': 1, '&&': 2, '==': 3, '!=': 3, '<': 4, '>': 4, '<=': 4, '>=': 4, '+': 5, '-': 5, '*': 6, '/': 6, '%': 6, '^': 7, '**': 7 };
 
+/** Optional overrides for the expression dialect, used by the numeric-value input. */
+export interface CompileExpressionOptions {
+  /** Functions callable from the expression; defaults to the batch panel's built-ins. */
+  functions?: Record<string, NamedFunction>;
+  /** `'left'` makes `^`/`**` associate left; the batch panel keeps the right-associative default. */
+  powerAssociativity?: 'left' | 'right';
+}
+
 /** Compiles one user-typed expression into a numeric function of the scope, or throws. */
-export function compileExpression(source: string): CompiledExpression {
+export function compileExpression(source: string, options: CompileExpressionOptions = {}): CompiledExpression {
+  const expressionFunctions = options.functions ?? functions;
   if (source.length > 4096) throw new Error('单个表达式不能超过 4096 字符');
   const tokens: string[] = []; let offset = 0;
   while (offset < source.length) {
@@ -80,10 +89,10 @@ export function compileExpression(source: string): CompiledExpression {
     if (/^(\d|\.)/.test(token)) return () => Number(token);
     if (!/^[A-Za-z_]/.test(token)) throw new Error(`无法解析 ${token}`);
     if (tokens[cursor] === '(') {
-      if (!Object.hasOwn(functions, token)) throw new Error(`不支持函数 ${token}`);
+      if (!Object.hasOwn(expressionFunctions, token)) throw new Error(`不支持函数 ${token}`);
       cursor++; const args: CompiledClosure[] = [];
       if (tokens[cursor] !== ')') { do { args.push(expression()); if (tokens[cursor] !== ',') break; cursor++; } while (true); }
-      requireToken(')'); return scope => functions[token](...args.map(arg => Number(arg(scope))));
+      requireToken(')'); return scope => expressionFunctions[token](...args.map(arg => Number(arg(scope))));
     }
     // A variable node: `scope` may also be a closure when this node is a function argument, in
     // which case every built-in resolves to a built-in and throws, exactly as before.
@@ -99,7 +108,7 @@ export function compileExpression(source: string): CompiledExpression {
     let left = atom();
     while (Object.hasOwn(precedence, tokens[cursor]) && precedence[tokens[cursor]] >= minimum) {
       const operator = tokens[cursor++]; const before = left;
-      const right = expression(precedence[operator] + (['^', '**'].includes(operator) ? 0 : 1));
+      const right = expression(precedence[operator] + (['^', '**'].includes(operator) && options.powerAssociativity !== 'left' ? 0 : 1));
       left = scope => {
         const first = Number(before(scope));
         if (operator === '&&') return Number(Boolean(first) && Boolean(right(scope)));

@@ -409,7 +409,7 @@ test('编辑背景预览给可见皮肤提供不透明场景，隐藏皮肤或�
   assert.ok(!context.calls.some(call => call.method === 'fillRect' && call.color === '#111'));
 });
 
-test('PEZ 更新所属 extra.json 并保留其他字段、原资源及其他项目', () => {
+test('PEZ 更新所属 extra.json 并保留其他字段，其他项目只在包含未使用文件时保留', () => {
   const chart = createChart(); chart.effects = [effect()];
   const encode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
   // `packageEntries` takes the archive map the importer builds (`Map<string, Uint8Array>`), which is
@@ -418,7 +418,8 @@ test('PEZ 更新所属 extra.json 并保留其他字段、原资源及其他项�
   const output = packageEntries(chart, assets, 'song/chart.json');
   const extra: unknown = JSON.parse(new TextDecoder().decode(output.get('song/EXTRA.JSON')));
   assert.deepEqual(extra, { extension: 42, effects: chart.effects });
-  assert.deepEqual(output.get('other/extra.json'), assets.get('other/extra.json'));
+  assert.equal(output.has('other/extra.json'), false);
+  assert.deepEqual(packageEntries(chart, assets, 'song/chart.json', { includeUnusedFiles: true }).get('other/extra.json'), assets.get('other/extra.json'));
   assert.deepEqual(JSON.parse(new TextDecoder().decode(assets.get('song/EXTRA.JSON'))).effects, []);
   // `chart.effects` is `unknown`; the empty list is the shape the assertion below reads back.
   chart.effects = [] as EffectDouble[];

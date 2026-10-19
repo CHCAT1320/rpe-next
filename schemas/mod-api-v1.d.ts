@@ -93,11 +93,8 @@ export interface HookPayloads {
   /** Runs before ordinary editor input and mod shortcuts. Set handled to consume. */
   'input:before': {event: Event; handled: boolean};
   'session:before-commit': CommitHook;
-  'session:after-commit': {session: unknown; label: string; chart: unknown};
-  'chart:parse': {text: string; chart: unknown | null};
-  'chart:parsed': {chart: unknown};
-  'chart:validate': {chart: unknown; handled: boolean};
   'chart:serialize': {chart: unknown; compact: boolean; text: string | null};
+  'chart:export-assets': {chart: unknown; chartName: string; assets: Map<string, Uint8Array>; required: Set<string>};
   'preview:before': {chart: unknown; seconds: number; lineIndex: number};
 }
 export interface Editor {

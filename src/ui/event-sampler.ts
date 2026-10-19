@@ -1,12 +1,13 @@
 import { SceneRuntime } from '../core/scene.ts';
-import { previewViewport } from '../core/editor-display.ts';
+import { previewViewport, previewPositionScale } from '../core/editor-display.ts';
 import { fitNoiseSampleView } from '../core/noise-sampling.ts';
+import { beatValue } from '../core/beat.ts';
 import { chartWithEventLists, eventListAt, eventKey, transformedEventLists } from '../application/event-commands.ts';
 import { prepareCanvas } from './timeline.ts';
-import type { EventEditSession } from '../application/event-commands.ts';
+import type { EventEditSession, EventListUpdates } from '../application/event-commands.ts';
 import type { EditorSession } from '../application/session.ts';
 import type { TempoMap } from '../core/tempo.ts';
-import type { AnyEventType, Chart, ChartEvent, EventValue, JudgeLine } from '../core/types.ts';
+import type { AnyEventType, Beat, Chart, ChartEvent, EventValue, JudgeLine } from '../core/types.ts';
 
 /** The numeric event tracks the sampler can drag. */
 type SampledType = 'moveXEvents' | 'moveYEvents' | 'rotateEvents';
@@ -30,6 +31,7 @@ export interface EventSamplerContext {
   seconds?: () => number;
   playing?: () => boolean;
   sampleAutoFit?: boolean;
+  pairedMovementSampling?: boolean;
 }
 
 /**
@@ -49,7 +51,7 @@ export interface SampleTarget extends ValueDraftTarget {
 }
 
 /** The target once the sampler has resolved the active line and confirmed a draggable track. */
-interface SampleMode extends SampleTarget { type: SampledType; lineIndex: number }
+interface SampleMode extends SampleTarget { type: SampledType; lineIndex: number; paired?: { type: SampledType; index: number } | null }
 
 /** The collaborators the sampler is wired to. */
 export interface EventSamplerOptions {
@@ -99,6 +101,7 @@ export class EventSampler {
   scene: SceneRuntime;
   canvas: HTMLCanvasElement;
   sampleBar: HTMLDivElement;
+  sampleHint: HTMLParagraphElement;
   seconds: number;
   sampleZoom: SampleZoom[] | null;
   displayCache: DisplayCache | null;
@@ -109,7 +112,7 @@ export class EventSampler {
     this.seconds = 0; this.sampleZoom = null; this.displayCache = null;
     this.canvas = document.createElement('canvas'); this.canvas.className = 'event-sampler'; this.canvas.hidden = true; host.append(this.canvas);
     this.sampleBar = document.createElement('div'); this.sampleBar.className = 'noise-sample-bar event-sample-bar'; this.sampleBar.hidden = true;
-    const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '拖动绿色控制点 · 可连续取样，完成统一应用 · Esc 全部取消'; this.sampleBar.append(hint);
+    const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '拖动绿色控制点 · 可连续取样，完成统一应用 · Esc 全部取消'; this.sampleHint = hint; this.sampleBar.append(hint);
     for (const [title, apply] of [['完成取样', true], ['取消', false]] as const) { const button = document.createElement('button'); button.type = 'button'; button.textContent = title; button.onclick = () => this.finish(apply); this.sampleBar.append(button); }
     host.append(this.sampleBar);
     this.canvas.addEventListener('pointerdown', event => this.down(event));
@@ -214,7 +217,14 @@ export class EventSampler {
     if (!line || !event || !Number.isFinite(numericField(event, target.field))) return false;
     this.pause();
     this.draftChart = source;
-    this.mode = { ...target, type: target.type as SampledType, lineIndex };
+    const mode: SampleMode = { ...target, type: target.type as SampledType, lineIndex };
+    this.mode = mode;
+    if (this.context.pairedMovementSampling !== false && ['moveXEvents', 'moveYEvents'].includes(target.type)) {
+      mode.paired = this.findPairedMovement(source, mode);
+    }
+    this.sampleHint.textContent = mode.paired
+      ? '拖动绿色控制点 · 配套 X/Y 事件同时取样 · 完成统一应用 · Esc 全部取消'
+      : '拖动绿色控制点 · 可连续取样，完成统一应用 · Esc 全部取消';
     const factor = line.bpmfactor ?? 1;
     this.seconds = this.context.tempo.seconds(target.field === 'end' ? event.endTime : event.startTime, factor);
     this.session.liveEventEdit = true;
@@ -271,14 +281,43 @@ export class EventSampler {
     }
   }
 
-  eventChart(value: number): Chart {
+  eventChart(value: number, pairedValue?: number): Chart {
     const mode = this.mode!; const lineIndex = mode.lineIndex;
     const temporary = { chart: this.draftChart!, lineIndex, eventLayer: this.session.eventLayer };
-    const events: ChartEvent[] = [...eventListAt(temporary, lineIndex, mode.type)];
-    const event: ChartEvent = { ...events[mode.index]!, [mode.field]: value };
-    if (event.inst) (event as unknown as Record<string, unknown>)[mode.field === 'start' ? 'end' : 'start'] = structuredClone(value);
-    events[mode.index] = event;
-    return chartWithEventLists(this.draftChart!, lineIndex, this.session.eventLayer, new Map([[mode.type, events]]));
+    const updates: EventListUpdates = new Map();
+    const update = (type: AnyEventType, index: number, nextValue: EventValue): void => {
+      const events: ChartEvent[] = [...eventListAt(temporary, lineIndex, type)];
+      const event: ChartEvent = { ...events[index]!, [mode.field]: nextValue };
+      if (event.inst) (event as unknown as Record<string, unknown>)[mode.field === 'start' ? 'end' : 'start'] = structuredClone(nextValue);
+      events[index] = event;
+      updates.set(type, events);
+    };
+    update(mode.type, mode.index, value);
+    if (mode.paired) {
+      const fallback = eventListAt(temporary, lineIndex, mode.paired.type)[mode.paired.index]?.[mode.field];
+      update(mode.paired.type, mode.paired.index, pairedValue ?? Number(fallback));
+    }
+    return chartWithEventLists(this.draftChart!, lineIndex, this.session.eventLayer, updates);
+  }
+
+  findPairedMovement(chart: Chart, mode: SampleMode): { type: SampledType; index: number } | null {
+    const companionType: SampledType = mode.type === 'moveXEvents' ? 'moveYEvents' : 'moveXEvents';
+    const source = { chart, lineIndex: mode.lineIndex, eventLayer: this.session.eventLayer };
+    const event = eventListAt(source, mode.lineIndex, mode.type)[mode.index];
+    if (!event || event.trajectory) return null;
+    const sameBeat = (left: Beat, right: Beat): boolean => {
+      beatValue(left); beatValue(right);
+      const [leftWhole, leftNumerator, leftDenominator] = left.map(BigInt) as [bigint, bigint, bigint];
+      const [rightWhole, rightNumerator, rightDenominator] = right.map(BigInt) as [bigint, bigint, bigint];
+      return (leftWhole * leftDenominator + leftNumerator) * rightDenominator
+        === (rightWhole * rightDenominator + rightNumerator) * leftDenominator;
+    };
+    const candidates = eventListAt(source, mode.lineIndex, companionType)
+      .map((candidate, index) => ({ candidate, index }))
+      .filter(({ candidate }) => !candidate.trajectory
+        && sameBeat(candidate.startTime, event.startTime)
+        && sameBeat(candidate.endTime, event.endTime));
+    return candidates.length === 1 ? { type: companionType, index: candidates[0]!.index } : null;
   }
 
   samplingChart(chart: Chart): Chart {
@@ -286,7 +325,12 @@ export class EventSampler {
     const mode = this.mode!;
     const event = eventListAt({ chart, lineIndex: mode.lineIndex, eventLayer: this.session.eventLayer }, mode.lineIndex, mode.type)[mode.index];
     const display: ChartEvent = { ...event!, start: numericField(event, mode.field), end: numericField(event, mode.field) };
-    const result = chartWithEventLists(chart, mode.lineIndex, this.session.eventLayer, new Map([[mode.type, [display]]]));
+    const updates: EventListUpdates = new Map([[mode.type, [display]]]);
+    if (mode.paired) {
+      const paired = eventListAt({ chart, lineIndex: mode.lineIndex, eventLayer: this.session.eventLayer }, mode.lineIndex, mode.paired.type)[mode.paired.index];
+      if (paired) updates.set(mode.paired.type, [{ ...paired, start: numericField(paired, mode.field), end: numericField(paired, mode.field) }]);
+    }
+    const result = chartWithEventLists(chart, mode.lineIndex, this.session.eventLayer, updates);
     this.displayCache = { source: chart, mode, chart: result };
     return result;
   }
@@ -294,7 +338,8 @@ export class EventSampler {
   handle(chart: Chart): { x: number; y: number; line: JudgeLine | undefined } {
     const mode = this.mode!; const line = chart.judgeLineList?.[mode.lineIndex];
     this.scene.compile(this.samplingChart(chart), this.context.tempo);
-    const state = this.scene.sampler(this.seconds)(mode.lineIndex) ?? { x: 0, y: 0, rotation: 0 };
+    const renderer = this.context.previewVisible ? this.context.preview : this.context.realtimePreview;
+    const state = this.scene.sampler(this.seconds, previewPositionScale(renderer.aspectRatio ?? 1.5))(mode.lineIndex) ?? { x: 0, y: 0, rotation: 0 };
     const local = mode.type === 'rotateEvents' ? { x: 0, y: -300 } : { x: 0, y: 0 };
     const angle = state.rotation * Math.PI / 180;
     return { x: state.x + local.x * Math.cos(angle) + local.y * Math.sin(angle), y: -state.y + local.x * Math.sin(angle) - local.y * Math.cos(angle), line };
@@ -303,7 +348,23 @@ export class EventSampler {
   applyPoint(point: { x: number; y: number }): void {
     const mode = this.mode!; const current = this.handle(this.draftChart!); const event = eventListAt({ chart: this.draftChart!, lineIndex: mode.lineIndex, eventLayer: this.session.eventLayer }, mode.lineIndex, mode.type)[mode.index];
     if (!event) return;
-    let value = numericField(event, mode.field);
+    if (mode.paired) {
+      const paired = eventListAt({ chart: this.draftChart!, lineIndex: mode.lineIndex, eventLayer: this.session.eventLayer }, mode.lineIndex, mode.paired.type)[mode.paired.index];
+      if (!paired) return;
+      let value = Number(event[mode.field]), pairedValue = Number(paired[mode.field]);
+      const probe = this.handle(this.eventChart(value + 1, pairedValue));
+      const pairedProbe = this.handle(this.eventChart(value, pairedValue + 1));
+      const horizontal = probe.x - current.x, vertical = probe.y - current.y;
+      const pairedHorizontal = pairedProbe.x - current.x, pairedVertical = pairedProbe.y - current.y;
+      const determinant = horizontal * pairedVertical - pairedHorizontal * vertical;
+      if (Math.abs(determinant) < 1e-10) return;
+      const errorX = point.x - current.x, errorY = point.y - current.y;
+      value += (errorX * pairedVertical - errorY * pairedHorizontal) / determinant;
+      pairedValue += (horizontal * errorY - vertical * errorX) / determinant;
+      if (!Number.isFinite(value) || !Number.isFinite(pairedValue)) return;
+      this.draftChart = this.eventChart(round(value), round(pairedValue)); this.invalidate(); return;
+    }
+    let value = Number(event[mode.field]);
     if (mode.type !== 'rotateEvents') {
       const probe = this.handle(this.eventChart(value + 1));
       const horizontal = probe.x - current.x; const vertical = probe.y - current.y;

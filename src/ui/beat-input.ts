@@ -8,6 +8,7 @@ import { beatValue, formatBeat, fromNumber, parseBeat } from '../core/beat.ts';
  * `input`, because the surrounding panels commit on `change` and a wheel gesture can fire often.
  */
 export function beatInputControl(input: HTMLInputElement, division: () => number, reportError: (error: unknown) => void): HTMLSpanElement {
+  input.dataset.numericExpression = 'beat';
   const wrapper = document.createElement('span'); wrapper.className = 'beat-input-wrap';
   const buttons = document.createElement('span'); buttons.className = 'beat-nudge';
   const nudge = (direction: number): void => {

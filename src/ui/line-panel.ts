@@ -1,6 +1,6 @@
 import { createLine } from '../core/chart.ts';
 import { groupLineIndices, groupNames, lineDisplayLabel, lineFeatureLabels, lineGroupIndex, lineGroupName, lineNameLabel } from '../core/line-groups.ts';
-import { deleteLine, duplicateLine, reorderLine, setLineParent } from '../application/line-commands.ts';
+import { deleteLine, duplicateLine, reorderLine, setLineParent, ensureLineCount, validateLineCount, MAX_BATCH_LINE_COUNT } from '../application/line-commands.ts';
 import { UI_BINDINGS } from '../core/game-ui.ts';
 import { assetUrl } from '../core/asset-url.ts';
 import { libraryImages } from '../core/asset-library.ts';
@@ -106,6 +106,45 @@ export class LinePanel {
     this.afterTexture();
   }
 
+  async addLinesDialog(): Promise<void> {
+    const { showDialog } = await import('./dialog.ts');
+    const session = this.getSession();
+    const content = showDialog('批量增加判定线', `输入增加后的判定线总数，最多 ${MAX_BATCH_LINE_COUNT} 条。已有判定线会保留，可一次撤销。`);
+    const input = document.createElement('input'); input.type = 'text'; input.inputMode = 'numeric'; input.pattern = '[0-9]+';
+    input.setAttribute('aria-label', '判定线目标总数'); input.value = String((session.chart.judgeLineList?.length ?? 0) + 1);
+    this.field(content, '目标总数', input);
+    const summary = document.createElement('p'); summary.className = 'hint'; summary.setAttribute('aria-live', 'polite'); content.append(summary);
+    const apply = document.querySelector('#modal-apply') as HTMLButtonElement;
+    const error = document.querySelector('#modal-error') as HTMLElement;
+    const read = (): { count: number; current: number } => {
+      if (session !== this.getSession()) throw new Error('谱面已切换，请关闭后重新打开此窗口');
+      if (!/^\d+$/.test(value(input))) throw new Error('请输入正整数');
+      const count = Number(value(input)); const current = session.chart.judgeLineList?.length ?? 0;
+      validateLineCount(count, current);
+      return { count, current };
+    };
+    const message = (failure: unknown): string => failure instanceof Error ? failure.message : String(failure);
+    const refresh = (): void => {
+      try {
+        const { count, current } = read(); error.textContent = '';
+        summary.textContent = count > current ? `当前 ${current} 条，将新增 ${count - current} 条。` : `当前已有 ${current} 条，无需增加；不会删除已有判定线。`;
+        apply.disabled = count <= current;
+      } catch (failure) { error.textContent = message(failure); summary.textContent = ''; apply.disabled = true; }
+    };
+    apply.hidden = false; apply.textContent = '增加';
+    apply.onclick = () => {
+      try {
+        const { count, current } = read();
+        if (count <= current) { refresh(); return; }
+        this.commit('批量增加判定线', ensureLineCount(session.chart, count), current);
+        (document.querySelector('#modal') as HTMLDialogElement).close();
+      } catch (failure) { error.textContent = message(failure); }
+    };
+    input.addEventListener('input', refresh);
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); if (!apply.disabled) apply.click(); } });
+    refresh(); input.focus(); input.select();
+  }
+
   render(): void {
     const session = this.getSession(); if (!session?.chart) return;
     this.clearTextureUrls();
@@ -115,9 +154,10 @@ export class LinePanel {
     this.host.append(title);
     const actions = document.createElement('div'); actions.className = 'line-panel-actions';
     const add = document.createElement('button'); add.type = 'button'; add.textContent = '＋ 新增'; add.onclick = () => { const index = lines.length; this.commit('新增判定线', { ...chart, judgeLineList: [...lines, createLine(`Line ${index + 1}`)] }, index); };
+    const batchAdd = document.createElement('button'); batchAdd.type = 'button'; batchAdd.textContent = '批量增加'; batchAdd.onclick = () => this.addLinesDialog();
     const duplicate = document.createElement('button'); duplicate.type = 'button'; duplicate.textContent = '复制'; duplicate.disabled = !session.line; duplicate.onclick = () => this.commit('复制判定线', duplicateLine(chart, session.lineIndex), lines.length);
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '删除'; remove.disabled = lines.length <= 1 || !session.line; remove.onclick = () => this.commit('删除判定线', deleteLine(chart, session.lineIndex), Math.max(0, session.lineIndex - 1));
-    actions.append(add, duplicate, remove); this.host.append(actions);
+    actions.append(add, batchAdd, duplicate, remove); this.host.append(actions);
     const list = document.createElement('div'); list.id = 'line-list'; list.setAttribute('role', 'list'); list.setAttribute('aria-label', '判定线列表');
     const scrollTop = this.scrollTop ?? 0;
     const hasNamedGroups = names.slice(1).some((unused, groupIndex) => groupLineIndices(chart, groupIndex + 1).length > 0);

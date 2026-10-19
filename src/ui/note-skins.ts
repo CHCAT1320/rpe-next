@@ -130,7 +130,7 @@ export class NoteSkins {
     this.detail.append(previewHeader,this.canvas,this.form,this.materials);body.append(this.gallery,this.detail);
     const footer=document.createElement('div');footer.className='note-skin-footer';this.message=text('p','选择皮肤即可查看，点击“应用此皮肤”后切换。','hint');this.message.setAttribute('role','status');
     this.applyButton=action('应用此皮肤',()=>this.apply(),'primary');this.applyButton.id='note-skin-apply';this.exportButton=action('导出 ZIP',()=>{if(this.draft)download(exportNoteSkin(this.draft),this.safeFilename()+'.zip');});
-    this.resetButton=action('恢复导入参数与素材',()=>this.reset());this.deleteButton=action('删除',()=>this.remove());
+    this.resetButton=action('恢复原始参数与素材',()=>this.reset());this.deleteButton=action('删除',()=>this.remove());
     const actions=document.createElement('div');actions.className='note-skin-toolbar';actions.append(this.resetButton,this.exportButton,this.deleteButton,this.applyButton);footer.append(this.message,actions);
     this.dialog.append(heading,toolbar,body,footer,this.zip,this.directory);document.body.append(this.dialog);
     this.dialog.addEventListener('cancel',event=>{if(event.target!==this.dialog)return;event.preventDefault();this.close();});
@@ -182,7 +182,7 @@ export class NoteSkins {
   field(host: HTMLElement,label: string,key: string,type: string,value: unknown,min?: number,max?: number,step?: number): HTMLInputElement | HTMLTextAreaElement {
     const row=document.createElement('label');row.className='field';row.append(text('span',label));const input=document.createElement(type==='textarea'?'textarea':'input');
     if(type!=='textarea'&&input instanceof HTMLInputElement)input.type=type;
-    const fieldName='note-skin-'+key.replace('.','-');input.dataset.noteSkinField=key;input.dataset.rpenField=fieldName;row.dataset.rpenField=fieldName;input.setAttribute('aria-label',label);
+    const fieldName='note-skin-'+key.replace('.','-');input.dataset.noteSkinField=key;input.dataset.noteSkinType=type;input.dataset.rpenField=fieldName;row.dataset.rpenField=fieldName;input.setAttribute('aria-label',label);
     if(type==='checkbox'&&input instanceof HTMLInputElement)input.checked=Boolean(value);else input.value=String(value??'');
     if(min!==undefined&&input instanceof HTMLInputElement)input.min=String(min);if(max!==undefined&&input instanceof HTMLInputElement)input.max=String(max);if(step!==undefined&&input instanceof HTMLInputElement)input.step=String(step);
     row.append(input);host.append(row);return input;
@@ -206,8 +206,11 @@ export class NoteSkins {
   }
   updateDraft(): void {
     if(!this.draft)return;const source=structuredClone(this.draft.info);let invalid=false;
-    for(const [key,control] of this.controls){control.setCustomValidity('');const value=control instanceof HTMLInputElement&&control.type==='checkbox'?control.checked:control instanceof HTMLInputElement&&control.type==='number'?Number(control.value):control.value;
-      if(control instanceof HTMLInputElement&&control.type==='number'&&(!control.value.trim()||!control.checkValidity())){control.setCustomValidity('请填写有效数值');invalid=true;}
+    for(const [key,control] of this.controls){control.setCustomValidity('');const type=control.dataset.noteSkinType??control.type;const value=type==='checkbox'&&control instanceof HTMLInputElement?control.checked:type==='number'?Number(control.value):control.value;
+      if(type==='number'&&control instanceof HTMLInputElement){
+        const validation=control.type==='number'?control:control.cloneNode() as HTMLInputElement;if(validation!==control){validation.type='number';validation.value=control.value;}
+        if(!control.value.trim()||!Number.isFinite(value)||!validation.checkValidity()){control.setCustomValidity('请填写有效数值');invalid=true;}
+      }
       const record=source as unknown as Record<string, unknown>;
       if(key.includes('.')){const [field,index]=key.split('.');(record[field] as unknown[])[Number(index)]=value;}else record[key]=value;
     }
@@ -282,10 +285,10 @@ export class NoteSkins {
     catch(error){this.error(error);}finally{this.applying=false;this.updateButtons();}
   }
   async reset(): Promise<void> {
-    if(!this.draft||!confirm('恢复这套皮肤最初导入时的参数和素材？应用后保存。'))return;
+    if(!this.draft||!confirm('恢复这套皮肤的原始参数和素材？应用后保存。'))return;
     try{const original=this.draft.originalFiles??this.draft.files;const restored={...parseSkin(original,this.selected),originalFiles:original,builtin:this.draft.builtin};
       await this.select(this.selected,true);this.draft=restored;this.modified=true;this.renderForm();this.renderMaterials();
-      const preview=new RpeSkin(()=>{});preview.setResourcePack(await ResourceNoteSkin.prepare(restored,preview.tintedSource.bind(preview)));this.previewSkin?.resourcePack?.dispose();this.previewSkin=preview;this.message.textContent='已恢复导入时的参数与素材，应用后保存。';this.valid=true;this.updateButtons();
+      const preview=new RpeSkin(()=>{});preview.setResourcePack(await ResourceNoteSkin.prepare(restored,preview.tintedSource.bind(preview)));this.previewSkin?.resourcePack?.dispose();this.previewSkin=preview;this.message.textContent='已恢复原始参数与素材，应用后保存。';this.valid=true;this.updateButtons();
     }catch(error){this.error(error);}
   }
   async remove(): Promise<void> {

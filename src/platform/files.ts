@@ -9,6 +9,8 @@ import { beatValue } from '../core/beat.ts';
 import { NOISE_TRACKS } from '../core/noise-areas.ts';
 import { integerChartAlpha } from '../core/alpha-values.ts';
 import { chartExportStem, safeExportStem, DownloadNames } from '../core/export-filename.ts';
+import { isBackupChartFile, isChartDocumentFile } from '../core/chart-backups.ts';
+import { collectExportAssetPaths } from './export-assets.ts';
 import type { ArchiveEntries, ZipDirectory } from './archive.ts';
 import type { Chart, ChartEvent, EventLayer, NoiseArea, TrajectorySplit } from '../core/types.ts';
 
@@ -32,6 +34,8 @@ export interface OpenedFiles {
  */
 export interface OpenFilesOptions {
   confirmLargeArchive?: (info: ZipDirectory) => boolean | Promise<boolean>;
+  /** Whether autosave and backup chart files are imported as well. */
+  includeBackupCharts?: boolean;
 }
 
 /** A chart's resolved song and background, as they should be looked up in the asset map. */
@@ -46,7 +50,7 @@ export interface ResourceReferences {
  * A single `.pez`/`.zip` is unpacked; otherwise each selected file becomes one entry keyed by its
  * own name, which is how a chart JSON plus its music and illustration are opened together.
  */
-export async function openFiles(fileList: ArrayLike<File> & Iterable<File>, { confirmLargeArchive }: OpenFilesOptions = {}): Promise<OpenedFiles | null> {
+export async function openFiles(fileList: ArrayLike<File> & Iterable<File>, { confirmLargeArchive, includeBackupCharts = false }: OpenFilesOptions = {}): Promise<OpenedFiles | null> {
   const files = [...fileList];
   if (!files.length) return null;
   let assets: ArchiveEntries = new Map();
@@ -54,17 +58,18 @@ export async function openFiles(fileList: ArrayLike<File> & Iterable<File>, { co
     const buffer = await files[0].arrayBuffer(), info = inspectZip(buffer);
     const large = info.declaredBytes > 1024 ** 3 || info.largestFile > 512 * 1024 ** 2 || info.count > 20000 || info.largestRatio > 500;
     if (large && !await confirmLargeArchive?.(info)) throw Object.assign(new Error('谱面包解压后的体积、文件数或压缩倍率过大，已停止导入；确认来源可信后可再次打开并确认。'), { name: 'ArchiveLimitError' });
-    assets = await readZip(buffer, { maxFiles: large ? info.count : 20000, maxBytes: large ? info.declaredBytes : 1024 ** 3, maxFileBytes: large ? info.largestFile : 512 * 1024 ** 2 });
+    assets = await readZip(buffer, { maxFiles: large ? info.count : 20000, maxBytes: large ? info.declaredBytes : 1024 ** 3, maxFileBytes: large ? info.largestFile : 512 * 1024 ** 2,
+      includeEntry: name => includeBackupCharts || !isBackupChartFile(name) });
   }
-  else for (const file of files) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));
+  else for (const file of files) if (includeBackupCharts || !isBackupChartFile(file.name)) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));
   const candidates: ChartCandidate[] = [];
   const errors: string[] = [];
   for (const [name, bytes] of assets) {
-    if (!/\.(json|pec)$/i.test(name)) continue;
+    if (!isChartDocumentFile(name)) continue;
     try { candidates.push({ name, chart: parseDocument(decodeLegacy(bytes)) }); }
     catch (error) { errors.push(`${name}: ${(error as Error).message}`); }
   }
-  if (!candidates.length) throw new Error(errors.join('\n') || '找不到 RPE JSON 谱面');
+  if (!candidates.length) throw new Error(errors.join('\n') || '找不到可导入的谱面；自动保存及备份谱面默认忽略，可在设置的“导入与导出”中开启包含这些文件');
   attachExternalEffects(candidates, assets);
   for (const candidate of candidates) if (candidate.chart.rpeNextLegacySource?.format === 'phigros-v3') {
     const references = resourceReferences(candidate.chart, assets, candidate.name);
@@ -340,6 +345,10 @@ export interface PackageOptions {
   removeGlobalEvents?: boolean;
   /** The folder name the game should install the chart into. */
   identifier?: string;
+  /** Whether autosave and backup chart files stay in the package. */
+  includeBackupCharts?: boolean;
+  /** Whether files the chart does not reference are kept. */
+  includeUnusedFiles?: boolean;
 }
 
 /**
@@ -350,10 +359,17 @@ export interface PackageOptions {
  */
 export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: string, options: PackageOptions = {}): ArchiveEntries {
   chart = orderedExportChart(chart);
-  const output: ArchiveEntries = new Map(assets);
+  const output: ArchiveEntries = new Map([...assets].filter(([name]) => options.includeBackupCharts || !isBackupChartFile(name)));
   let outputName = chartName;
+  if (!options.includeBackupCharts && isBackupChartFile(outputName)) {
+    const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    const stem = (directory ? directory + '/' : '') + 'chart';
+    outputName = stem + '.json';
+    let suffix = 1;
+    while ([...output.keys()].some(name => normalizePath(name) === normalizePath(outputName))) outputName = `${stem}-${suffix++}.json`;
+  }
   if (chart.rpeNextLegacySource) {
-    const stem = chartName.replace(/\.(json|pec)$/i, '');
+    const stem = outputName.replace(/\.(json|pec)(?:\.(?:bak|backup)(?:\.\d+)?)?$/i, '');
     outputName = stem + '.rpe.json';
     let suffix = 1;
     while ([...output.keys()].some(name => normalizePath(name) === normalizePath(outputName))) outputName = `${stem}.rpe-${suffix++}.json`;
@@ -388,6 +404,14 @@ export function packageEntries(chart: Chart, assets: ArchiveEntries, chartName: 
   }
   for (const name of output.keys()) if (name.toLowerCase() === 'info.txt') output.delete(name);
   output.set('info.txt', packageInfo(chart, assets, chartName, outputName, options.identifier));
+  if (!options.includeUnusedFiles) {
+    const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    const extra = (directory ? directory + '/' : '') + 'extra.json';
+    const extraPath = [...output.keys()].find(name => normalizePath(name) === normalizePath(extra));
+    const roots = [outputName, 'info.txt', ...matchingInfo(output, outputName).map(([name]) => name), ...(extraPath ? [extraPath] : [])];
+    const used = collectExportAssetPaths(chart, output, chartName, { resolve: assetPath, media: resourceReferences(chart, assets, chartName), roots, mainFile: outputName, includeBackupCharts: options.includeBackupCharts });
+    for (const name of output.keys()) if (!used.has(name)) output.delete(name);
+  }
   return output;
 }
 
@@ -427,6 +451,10 @@ export interface ChartExportOptions {
   removeGlobalEvents?: boolean;
   /** The folder name the game should install the chart into. */
   identifier?: string;
+  /** Whether autosave and backup chart files stay in the package. */
+  includeBackupCharts?: boolean;
+  /** Whether files the chart does not reference are kept. */
+  includeUnusedFiles?: boolean;
 }
 
 export function createChartExport(chart: Chart, assets: ArchiveEntries, chartName: string, options: Partial<ChartExportOptions> = {}): ChartExportResult {

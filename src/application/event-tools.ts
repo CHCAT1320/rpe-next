@@ -1,8 +1,8 @@
 import { beatValue, fromNumber } from '../core/beat.ts';
 import { easing, bezier } from '../core/easing.ts';
-import { EVENT_TYPES } from '../core/chart.ts';
+import { EVENT_TYPES, assertChart } from '../core/chart.ts';
 import { snapTime } from '../core/edit-grid.ts';
-import { eventList, eventKey, selectedEvents, commitEventLists } from './event-commands.ts';
+import { eventList, eventListAt, eventKey, selectedEvents, selectedEventEntries, chartWithEventLists, commitEventLists } from './event-commands.ts';
 import type { EventEditSession } from './event-commands.ts';
 import type { ChartEvent, Color, EventValue, AnyEventType } from '../core/types.ts';
 
@@ -128,4 +128,24 @@ export function stickSelectedEvents(session: EventEditSession): { changed: numbe
   }
   if (changed) commitEventLists(session, '粘合选中事件', updates);
   return { changed, skipped };
+}
+
+export function stickSelectedEventToNext(session: EventEditSession): boolean {
+  const entries = selectedEventEntries(session);
+  const [selected] = entries;
+  if (!selected || entries.length !== 1 || selected.type === 'paintEvents') return false;
+  const events = eventListAt(session, selected.lineIndex, selected.type);
+  const order = events.map((event, index) => ({ event, index }))
+    .sort((left, right) => beatValue(left.event.startTime) - beatValue(right.event.startTime) || left.index - right.index);
+  const position = order.findIndex(entry => entry.index === selected.index);
+  const next = order[position + 1]?.event;
+  if (!next) return false;
+  const end = structuredClone(next.start);
+  const updated = [...events];
+  updated[selected.index] = { ...selected.event, ...(selected.event.inst ? { start: end } : {}), end };
+  const chart = chartWithEventLists(session.chart, selected.lineIndex, session.eventLayer, new Map([[selected.type, updated]]));
+  assertChart(chart);
+  const beforeSelection = session.selectionState();
+  session.commit('向后粘合事件', chart, beforeSelection);
+  return true;
 }

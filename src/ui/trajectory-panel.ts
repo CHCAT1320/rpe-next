@@ -3,7 +3,7 @@ import { localPreferences } from '../platform/local-preferences.ts';
 import { createTrajectoryEvent, trajectoryChart, splitTrajectoryChart } from '../application/trajectory-commands.ts';
 import { parseBeat, formatBeat } from '../core/beat.ts';
 import { SceneRuntime } from '../core/scene.ts';
-import { previewViewport } from '../core/editor-display.ts';
+import { previewViewport, previewPositionScale } from '../core/editor-display.ts';
 import { download } from '../platform/files.ts';
 import { prepareCanvas } from './timeline.ts';
 import { editorSkinContext } from './editor-skin-canvas.ts';
@@ -221,6 +221,10 @@ export class TrajectoryPanel {
   replace!: boolean;
   points!: CurvePoint[] | null;
   worldPoints!: LineState[] | null;
+  /** Position-scaled samples for the overlay; cached until the source or aspect ratio changes. */
+  displayWorldSource: LineState[] | null = null;
+  displayWorldPoints: LineState[] = [];
+  worldPointRatio: number | null = null;
   previewChart!: Chart | null;
   baseChart!: Chart | null;
   event!: ChartEvent | null;
@@ -522,14 +526,16 @@ export class TrajectoryPanel {
     if (!this.overlay.hidden) {
       const { context, width, height } = prepareCanvas(this.overlay);
       const viewport = previewViewport(width, height, renderer.aspectRatio ?? 1.5); const scale = viewport.scale / (renderer.viewDivisor ?? 1);
+      const ratio = renderer.aspectRatio ?? 1.5;
+      if (this.displayWorldSource !== this.worldPoints || this.worldPointRatio !== ratio) {
+        this.displayWorldSource = this.worldPoints; this.worldPointRatio = ratio;
+        this.displayWorldPoints = this.worldPoints!.map((point, index) => this.scene!.sampler(this.beginSeconds + (this.endSeconds - this.beginSeconds) * index / (this.worldPoints!.length - 1), previewPositionScale(ratio))(this.lineIndex)!);
+      }
       context.save(); context.beginPath(); context.rect(viewport.left, viewport.top, viewport.width, viewport.height); context.clip();
       context.strokeStyle = '#62e6ba'; context.lineWidth = 2; context.globalAlpha = 0.8; context.beginPath();
       const screen = (point: LineState): [number, number] => [width / 2 + point.x * scale, height / 2 - point.y * scale];
-      // `overlay.hidden` is false only while `worldPoints` is set, which is the state the original
-      // drew in; it dereferenced the samples unguarded.
-      const worldPoints = this.worldPoints!;
-      worldPoints.forEach((point, index) => index ? context.lineTo(...screen(point)) : context.moveTo(...screen(point))); context.stroke();
-      const marker = worldPoints[Math.min(worldPoints.length - 1, Math.floor(progress * (worldPoints.length - 1)))];
+      this.displayWorldPoints.forEach((point, index) => index ? context.lineTo(...screen(point)) : context.moveTo(...screen(point))); context.stroke();
+      const marker = this.displayWorldPoints[Math.min(this.displayWorldPoints.length - 1, Math.floor(progress * (this.displayWorldPoints.length - 1)))];
       context.fillStyle = '#9cffcc'; context.beginPath(); context.arc(...screen(marker), 6, 0, Math.PI * 2); context.fill();
       context.font = '13px RPE, sans-serif'; context.fillText('轨迹预览 · L' + this.lineIndex, 18 + viewport.left, 24 + viewport.top); context.restore();
     }

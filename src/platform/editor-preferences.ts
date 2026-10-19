@@ -5,10 +5,10 @@
 import { validFpsLimit } from '../core/frame-timing.ts';
 import { localPreferences } from './local-preferences.ts';
 
-const ranges: Record<string, [minimum: number, maximum: number]> = { scale: [20, 2000], division: [1, 100], gridCount: [2, 100], volume: [0, 1], hitVolume: [0, 1], realtimeAlpha: [0, 1], ratioWidth: [1, 100], ratioHeight: [1, 100], barWidth: [0.5, 10], barAlpha: [0.1, 2], judgementOffset: [42, 240], eventValueSize: [8, 28], eventValueThreshold: [10, 180], eventCurveThreshold: [8, 180], eventOpacity: [0.05, 1], eventBarWidth: [0.35, 1], multiLineWidth: [30, 2400], multiLineEventWidth: [30, 2400], scrollSpeed: [0.1, 100], autoSaveSeconds: [1, 3600], autoSaveLimit: [1, 100], dragSensitivity: [0.1, 8] };
+const ranges: Record<string, [minimum: number, maximum: number]> = { scale: [20, 2000], division: [1, 100], gridCount: [2, 100], noteSize: [10, 500], volume: [0, 1], hitVolume: [0, 1], realtimeAlpha: [0, 1], ratioWidth: [1, 100], ratioHeight: [1, 100], barWidth: [0.5, 10], barAlpha: [0.1, 2], judgementOffset: [42, 240], eventValueSize: [8, 28], eventValueThreshold: [10, 180], eventCurveThreshold: [8, 180], eventOpacity: [0.05, 1], eventBarWidth: [0.35, 1], multiLineWidth: [30, 2400], multiLineEventWidth: [30, 2400], scrollSpeed: [0.1, 100], autoSaveSeconds: [1, 3600], autoSaveLimit: [1, 100], dragSensitivity: [0.1, 8] };
 Object.assign(ranges, { cameraX: [-1000000, 1000000], viewDivisor: [0.1, 100], backgroundBlur: [0, 30], cutDensity: [0.1, 128] });
 Object.assign(ranges, { analysisAlpha: [0.02, 1], analysisWidth: [0.2, 1], lineScale: [0.1, 10] });
-const flags = ['snapX', 'realtime', 'hitEnabled', 'allLines', 'preservePitch', 'autoSave', 'autoplayView', 'highlight', 'drawEventCurves', 'seamlessEvents', 'seamlessNoiseAreas', 'notesOnly', 'showGameUI', 'lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'pickPreviewNoiseAreas', 'tipsEnabled', 'successNotifications', 'clipboardHistory', 'lineSwitcher', 'analysisEnabled', 'noteSourceHover', 'sampleAutoFit', 'wheelStopAtAudioStart', 'forceSimpleNoise'] as const;
+const flags = ['snapX', 'realtime', 'hitEnabled', 'allLines', 'preservePitch', 'autoSave', 'autoplayView', 'highlight', 'drawEventCurves', 'seamlessEvents', 'seamlessNoiseAreas', 'notesOnly', 'showGameUI', 'lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'pickPreviewNoiseAreas', 'tipsEnabled', 'successNotifications', 'clipboardHistory', 'lineSwitcher', 'analysisEnabled', 'noteSourceHover', 'sampleAutoFit', 'pairedMovementSampling', 'wheelStopAtAudioStart'] as const;
 const toolbarModes = ['compact', 'icons', 'wide'] as const;
 /** The waveform/spectrum choice is a string, so it is validated against its own list. */
 const analysisModes = ['waveform', 'spectrum'] as const;
@@ -68,7 +68,7 @@ export function normalizeEditorPreferences(value: unknown): EditorPreferences {
     if (Number.isFinite(entry)) result[key] = Math.max(minimum, Math.min(maximum, entry as number));
   }
   if (result.division) result.division = Math.round(result.division as number);
-  for (const key of flags) if (typeof source[key] === 'boolean') result[key] = source[key];
+  for (const key of [...flags, 'forceSimpleNoise', 'includeBackupCharts']) if (typeof source[key] === 'boolean') result[key] = source[key];
   if (toolbarModes.includes(source.toolbarMode as ToolbarMode)) result.toolbarMode = source.toolbarMode as ToolbarMode;
   if (analysisModes.includes(source.analysisMode as AnalysisMode)) result.analysisMode = source.analysisMode as AnalysisMode;
   return result;

@@ -7,6 +7,11 @@ import type { ChartExportOptions } from '../platform/files.ts';
 import type { Chart } from '../core/types.ts';
 import type { ArchiveEntries } from '../platform/archive.ts';
 
+/** Options shared with the caller's current import/export preferences. */
+export interface ExportDialogOptions {
+  includeBackupCharts?: boolean;
+}
+
 /**
  * The four fixed option values the `<select>` below can hold are the only strings `format.value` ever
  * carries, so the pair split out of it is always one of the four `ChartExportOptions` combinations.
@@ -15,15 +20,17 @@ import type { ArchiveEntries } from '../platform/archive.ts';
  * `identifier` is the PEZ package's `info.txt` path hint; it stays optional so a chart with no
  * library project can still be exported.
  */
-
-export function showExportDialog(chart: Chart, assets: ArchiveEntries, chartName: string, onExport: (name: string, format: 'json' | 'pez') => void, identifier?: string): void {
-  const host = showDialog('导出谱面', 'Next 格式保留整体曲线轨迹；原 RPE 格式将轨迹转换为普通事件。JSON 只包含谱面，PEZ 同时打包已载入的音乐、图片及其他资源。');
+export function showExportDialog(chart: Chart, assets: ArchiveEntries, chartName: string, onExport: (name: string, format: 'json' | 'pez') => void, identifier?: string, { includeBackupCharts = false }: ExportDialogOptions = {}): void {
+  const host = showDialog('导出谱面', 'Next 格式保留整体曲线轨迹；原 RPE 格式将轨迹转换为普通事件。JSON 只包含谱面，PEZ 默认只打包当前谱面及其使用的资源。');
   const field = <T extends HTMLElement>(title: string, control: T): T => { const label = document.createElement('label'); label.className = 'field'; label.append(title, control); control.setAttribute('aria-label', title); host.append(label); return control; };
   const format = document.createElement('select');
   for (const [value, title] of [['next:json', 'RPE Next · JSON'], ['next:pez', 'RPE Next · PEZ'], ['rpe:json', '原 RPE · JSON'], ['rpe:pez', '原 RPE · PEZ']]) format.append(new Option(title, value));
   format.value = 'next:pez'; field('导出格式', format);
   const compact = document.createElement('input'); compact.type = 'checkbox'; compact.checked = true;
   field('压缩 JSON（仅去掉多余空格和换行，保留全部属性）', compact);
+  const unused = document.createElement('input'); unused.type = 'checkbox'; unused.checked = false;
+  field('包含未使用的文件和素材', unused); const unusedLabel = unused.closest('label');
+  const unusedHint = document.createElement('p'); unusedHint.className = 'hint'; unusedHint.textContent = '默认排除其他谱面、未使用的素材、皮肤和贴图。自动保存及备份文件另遵循通用设置。'; host.append(unusedHint);
   // `Chart` types `blockAreaList` through its open-ended index signature, so it reads as `unknown`
   // here. `Array.isArray` narrows it to a list, and `diagnoseNoiseAreas` is not annotated yet, so its
   // parameter is inferred as `never[]`; the bridge names the argument type it declares for itself,
@@ -57,7 +64,7 @@ export function showExportDialog(chart: Chart, assets: ArchiveEntries, chartName
   const toleranceLabel = document.createElement('label'); toleranceLabel.className = 'field'; toleranceLabel.append('拆分容忍度', tolerance);
   const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '相对原始等分碎事件的每轴最大误差：X/Y 为坐标单位，旋转为度。越小越精确；关闭优化则保留各轨迹设定的全部等分段。';
   settings.append(simplifyLabel, toleranceLabel, hint); host.append(settings);
-  const sync = (): void => { settings.hidden = format.value.startsWith('next:'); tolerance.disabled = !simplify.checked; removeLabel.hidden = !blockAreaList.length || format.value.startsWith('next:'); removeGlobalLabel.hidden = !hasGlobalEvents || format.value.startsWith('next:'); };
+  const sync = (): void => { if (unusedLabel) unusedLabel.hidden = format.value.endsWith(':json'); unusedHint.hidden = format.value.endsWith(':json'); settings.hidden = format.value.startsWith('next:'); tolerance.disabled = !simplify.checked; removeLabel.hidden = !blockAreaList.length || format.value.startsWith('next:'); removeGlobalLabel.hidden = !hasGlobalEvents || format.value.startsWith('next:'); };
   format.onchange = () => { suggestName(); sync(); }; simplify.onchange = sync; sync();
   // The same `#modal-apply` element `dialog.ts` types as a button; `showDialog` has just revealed it.
   const apply = document.querySelector('#modal-apply') as HTMLButtonElement; apply.hidden = false; apply.textContent = '导出';
@@ -69,7 +76,7 @@ export function showExportDialog(chart: Chart, assets: ArchiveEntries, chartName
       if (noiseIssues.length && !acknowledgement.checked) throw new Error('请先阅读并勾选确认噪域检查提示');
       if (compatibility === 'rpe' && blockAreaList.length && !removeNoise.checked) throw new Error('原 RPE 无法表示噪域，请改用 Next 格式，或勾选移除噪域');
       if (compatibility === 'rpe' && hasGlobalEvents && !removeGlobal.checked) throw new Error('原 RPE 无法表示全局事件，请改用 Next 格式，或勾选移除全局事件');
-      const options: ChartExportOptions = { compatibility, format: container, compact: compact.checked, name: name.value, identifier, removeNoiseAreas: compatibility === 'rpe' && removeNoise.checked, removeGlobalEvents: compatibility === 'rpe' && removeGlobal.checked, split: { simplify: simplify.checked, tolerance: Number(tolerance.value) } };
+      const options: ChartExportOptions = { includeUnusedFiles: unused.checked, includeBackupCharts, compatibility, format: container, compact: compact.checked, name: name.value, identifier, removeNoiseAreas: compatibility === 'rpe' && removeNoise.checked, removeGlobalEvents: compatibility === 'rpe' && removeGlobal.checked, split: { simplify: simplify.checked, tolerance: Number(tolerance.value) } };
       const result = createChartExport(chart, assets, chartName, options);
       const filename = download(result.blob, result.name); (document.querySelector('#modal') as HTMLDialogElement).close(); onExport(filename, container);
     } catch (error) {

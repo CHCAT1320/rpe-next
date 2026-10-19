@@ -32,8 +32,11 @@ import { ProjectImages } from '../platform/images.ts';
 import { HitSounds } from '../platform/hitsounds.ts';
 import { renderEventInspector } from './event-inspector.ts';
 import { cancelValueDrag, handleValueDragKey } from './draggable-value.ts';
-import { DEFAULT_EDITOR_PREFERENCES } from '../core/default-settings.ts';
-import { eventKey, eventList, deleteEvents, transformEvents, selectEvent, selectAllEvents } from '../application/event-commands.ts';
+import { DEFAULT_EDITOR_PREFERENCES, DEFAULT_SETTINGS } from '../core/default-settings.ts';
+import { eventKey, eventList, selectedEventEntries, deleteEvents, transformEvents, selectEvent, selectAllEvents, toggleSingleEventLock } from '../application/event-commands.ts';
+import { stickSelectedEventToNext } from '../application/event-tools.ts';
+import { appendLineShortcutDigit } from '../core/line-switch.ts';
+import { installNumericExpressionInputs } from './numeric-expression-input.ts';
 import { BATCH_ACTIONS, applyBatchAction, nudgeSelection, captureSelection } from '../application/batch-edit.ts';
 import { copyObjects, cutObjects, pasteObjects, deleteObjects } from '../application/clipboard.ts';
 import { ClipboardHistory } from '../application/clipboard-history.ts';
@@ -354,11 +357,13 @@ for (const type of ['keydown', 'keyup', 'wheel', 'pointerdown', 'pointerup', 'mo
  * boolean: `judgement-color` is a `<input type="color">` whose default is a hex string.
  */
 const displayFields: [string, keyof EditorPreferences, string | number | boolean][] = [
-
+  ['include-backup-charts', 'includeBackupCharts', false],
   ['text-selection-drag', 'textSelectionDrag', false],
   ['event-cut-density', 'cutDensity', 4],
   ['event-drag-sensitivity', 'dragSensitivity', 1],
   ['sample-auto-fit', 'sampleAutoFit', true],
+  ['paired-movement-sampling', 'pairedMovementSampling', true],
+  ['note-size', 'noteSize', 200],
   ['wheel-limit-audio-start', 'wheelStopAtAudioStart', true],
   ['draw-event-curves', 'drawEventCurves', true],
   ['pick-preview-noise-areas', 'pickPreviewNoiseAreas', true],
@@ -369,7 +374,7 @@ const displayFields: [string, keyof EditorPreferences, string | number | boolean
   ['default-line-thickness', 'lineScale', 1.5],
   ['line-switcher-enabled', 'lineSwitcher', true],
   ['clipboard-history-enabled', 'clipboardHistory', true],
-  ['bar-width', 'barWidth', 3], ['bar-alpha', 'barAlpha', 1], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', 0.82], ['seamless-events', 'seamlessEvents', true],
+  ['bar-width', 'barWidth', DEFAULT_SETTINGS.barWidth], ['bar-alpha', 'barAlpha', DEFAULT_SETTINGS.barAlpha], ['event-value-size', 'eventValueSize', 13], ['event-value-threshold', 'eventValueThreshold', 30], ['event-curve-threshold', 'eventCurveThreshold', 24], ['event-opacity', 'eventOpacity', 0.25], ['event-bar-width', 'eventBarWidth', DEFAULT_EDITOR_PREFERENCES.eventBarWidth], ['seamless-events', 'seamlessEvents', true],
   ['background-blur', 'backgroundBlur', 10.5], ['scroll-speed', 'scrollSpeed', 5], ['tips-enabled', 'tipsEnabled', true], ['success-notifications', 'successNotifications', true],
   ['line-numbers', 'lineNumbers', true], ['line-arrows', 'lineArrows', true], ['line-tint', 'lineTint', true], ['merge-line-numbers', 'mergeLineNumbers', true], ['pick-preview-lines', 'pickPreviewLines', true],
   ['note-source-hover', 'noteSourceHover', true],
@@ -377,6 +382,7 @@ const displayFields: [string, keyof EditorPreferences, string | number | boolean
   ['autosave-enabled', 'autoSave', true], ['autosave-seconds', 'autoSaveSeconds', 60], ['autosave-limit', 'autoSaveLimit', 10],
 ];
 const settingsDialog = createSettingsPanel();
+installNumericExpressionInputs();
 let session: EditorSession = new EditorSession();
 let assets: Map<string, Uint8Array> = new Map();
 let assetFolders: Set<string> = new Set();
@@ -394,6 +400,7 @@ let libraryProject: StoredProject | null = null;
 let persistenceRequested = false;
 const manualSaves = new ManualSaveQueue(storeProject);
 let editorPreferences: EditorPreferences = { ...DEFAULT_EDITOR_PREFERENCES, ...readEditorPreferences() };
+const fileOptions = (): { includeBackupCharts: boolean } => ({ includeBackupCharts: editorPreferences.includeBackupCharts === true });
 let atHome = true;
 let hasDocument = false;
 let previewReturnTime = 0;
@@ -459,7 +466,7 @@ for (const renderer of [preview, realtimePreview]) {
   renderer.noisePreview.hiddenLayers = noiseEditor.hiddenLayers;
   renderer.noisePreview.simpleLayers = noiseEditor.simpleLayers;
 }
-const eventSampler = new EventSampler(element<HTMLElement>('.stage'), () => ({ session, tempo, preview, realtimePreview, previewVisible: preview.visible, timeline, seconds: chartSeconds, playing: () => audio.playing, sampleAutoFit: element<HTMLInputElement>('#sample-auto-fit').checked }), { invalidate, pause: () => playback.pause(), notify });
+const eventSampler = new EventSampler(element<HTMLElement>('.stage'), () => ({ session, tempo, preview, realtimePreview, previewVisible: preview.visible, timeline, seconds: chartSeconds, playing: () => audio.playing, sampleAutoFit: element<HTMLInputElement>('#sample-auto-fit').checked, pairedMovementSampling: element<HTMLInputElement>('#paired-movement-sampling').checked }), { invalidate, pause: () => playback.pause(), notify });
 const audioAnalysis = new AudioAnalysis(element<HTMLCanvasElement>('#audio-analysis-overlay'), () => timeline, () => audio, () => persistEditor());
 /** The pending note-source hover timer; `null` when no reveal is scheduled. */
 let noteHoverTimer: number | ReturnType<typeof globalThis.setTimeout> | null = null;
@@ -693,7 +700,7 @@ function reportError(failure: unknown) {
   const message = storageFailure(failure); status(message); notify(message, 'error', 7000);
   const host = showDialog(error.name === 'ProjectConflictError' ? '保存冲突，已保留当前编辑' : '操作未完成', message);
   if (error.name === 'ProjectConflictError' && libraryProject?.id === error.projectId && hasDocument) {
-    for (const [label, run] of [['导出当前谱面 PEZ', () => showExportDialog(session.chart, assets, chartName, (_name, format) => { if (format === 'pez') noteExternalBackup(); }, libraryProject?.identifier)],
+    for (const [label, run] of [['导出当前谱面 PEZ', () => showExportDialog(session.chart, assets, chartName, (_name, format) => { if (format === 'pez') noteExternalBackup(); }, libraryProject?.identifier, fileOptions())],
       ['另存为新项目', async () => { libraryProject = null; session.history.savedDocument = null as unknown as Chart; await save(); }]] as [string, () => unknown][]) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
       button.onclick = async () => { element<HTMLDialogElement>('#modal').close(); try { await run(); } catch (failure) { reportError(failure); } }; host.append(button);
@@ -887,7 +894,7 @@ const home = new ProjectHome(async id => {
     } else if (renamed) session.commit('更新项目名称', { ...session.chart, META: { ...session.chart.META, name: project.chart.META.name } });
   }
 });
-const storagePanel = new StoragePanel(settingsDialog, { reportError, notify, canSwitchLibrary: () => {
+const storagePanel = new StoragePanel(settingsDialog, { reportError, notify, fileOptions, canSwitchLibrary: () => {
   if (hasDocument && (session.history.dirty || assetDirty)) { notify('请先保存或放弃当前谱面的修改，再切换谱面库', 'warning'); return false; }
   return true;
 } });
@@ -1518,7 +1525,7 @@ element<HTMLInputElement>('#file-input').addEventListener('change', async event 
   try {
     // `.files` is null only when the picker was cancelled, in which case `openFiles` reports
     // nothing to load anyway; `?? []` therefore leaves the outcome identical.
-    const loaded = await openFiles(input.files ?? [], { confirmLargeArchive: info => new Promise<boolean>(resolve => {
+    const loaded = await openFiles(input.files ?? [], { ...fileOptions(), confirmLargeArchive: info => new Promise<boolean>(resolve => {
       const host = showDialog('确认导入大谱面包', `目录声明解压后 ${(info.declaredBytes / 1024 ** 2).toFixed(1)} MiB，共 ${info.count} 个文件。大体积或异常压缩倍率可能耗尽内存；只继续导入来源可信的谱面。`);
       const modal = host.closest('dialog') as HTMLDialogElement, apply = element<HTMLButtonElement>('#modal-apply'); let decided = false;
       modal.addEventListener('close', () => { if (!decided) resolve(false); }, { once: true });
@@ -1535,7 +1542,7 @@ element<HTMLInputElement>('#file-input').addEventListener('change', async event 
   finally { input.value = ''; }
 });
 listen('#save', () => save());
-listen('#export', () => { noiseEditor.flush(); showExportDialog(session.chart, assets, chartName, (name, format) => { status(`已发起下载：${name}`); if (format === 'pez') { noteExternalBackup(); storagePanel.refresh().catch(() => {}); } }, libraryProject?.identifier ?? libraryProject?.info?.Path); });
+listen('#export', () => { noiseEditor.flush(); showExportDialog(session.chart, assets, chartName, (name, format) => { status(`已发起下载：${name}`); if (format === 'pez') { noteExternalBackup(); storagePanel.refresh().catch(() => {}); } }, libraryProject?.identifier ?? libraryProject?.info?.Path, fileOptions()); });
 listen('#view-toggle', () => togglePreview());
 listen('#close-preview', () => togglePreview(false, true));
 listen('#background', () => element<HTMLInputElement>('#background-input').click());
@@ -2017,6 +2024,7 @@ listen('#curve-cancel', closeCurvePanel);
 listen('#help', () => showDialog('Re:PhiEdit Next · 迁移预览版', HELP_TEXT));
 
 let playbackSpaceHeld = false;
+let lineSwitchDigits = 0;
 window.addEventListener('keydown', event => {
   if (mods?.runtime.locks.size) return;
   if (atHome || !hasDocument || !shortcutMatches(event, preferences.hotkeys.ShowLineInfo) || dialogOpen() || usesNativeTextShortcut(event)) return;
@@ -2039,6 +2047,22 @@ window.addEventListener('keyup', event => {
   event.preventDefault(); event.stopImmediatePropagation(); playbackSpaceHeld = false;
 }, true);
 window.addEventListener('blur', () => { playbackSpaceHeld = false; });
+function lineSwitchModifierMatches(event: KeyboardEvent): boolean {
+  const binding = String(preferences.hotkeys.SwitchLine ?? 'LEFTCTRL').toUpperCase();
+  const parts = binding.split(/[&+]/).filter(Boolean).map(part => part.replace(/^(LEFT|RIGHT)/, ''));
+  if (!parts.length || parts.some(part => !['CTRL', 'SHIFT', 'ALT'].includes(part))) return false;
+  const required = new Set(parts);
+  return Boolean(event.ctrlKey) === required.has('CTRL') && Boolean(event.shiftKey) === required.has('SHIFT') && Boolean(event.altKey) === required.has('ALT') && !event.metaKey;
+}
+window.addEventListener('keydown', event => {
+  if (mods?.runtime.locks.size || atHome || !hasDocument || preview.visible || dialogOpen() || usesNativeTextShortcut(event) || event.isComposing || !/^\d$/.test(event.key) || !lineSwitchModifierMatches(event)) return;
+  if (shortcutMatches(event, preferences.hotkeys.Paste) || shortcutMatches(event, preferences.hotkeys.PasteMirror)) return;
+  lineSwitchDigits = appendLineShortcutDigit(lineSwitchDigits, session.chart.judgeLineList?.length ?? 0, Number(event.key));
+  event.preventDefault(); event.stopImmediatePropagation();
+  selectOverviewLine(lineSwitchDigits);
+}, true);
+window.addEventListener('keyup', event => { if (!lineSwitchModifierMatches(event)) lineSwitchDigits = 0; }, true);
+window.addEventListener('blur', () => { lineSwitchDigits = 0; });
 window.addEventListener('keydown', async event => {
   // `keyboard.ts` types its parameter as a structural `ShortcutTarget` and probes every member before
   // using it (see `closest`); `isPlaybackSpace` in that same module casts `event.target` the same way.
@@ -2074,7 +2098,8 @@ window.addEventListener('keydown', async event => {
   if (!action) return;
   let handled = true;
   try {
-    if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD', 'ToggleMultiLine', 'SwitchMultiLineMode'].includes(action)) { event.preventDefault(); return; }
+    if (event.repeat && ['NumberMirror', 'NumberFill', 'Pause', 'AddHold', 'AddEvent', 'AddTap', 'StartView', 'EndView', 'JumpView', 'ReplayView', 'StartView_HOLD', 'JumpView_HOLD', 'ToggleMultiLine', 'SwitchMultiLineMode', 'SwitchLock', 'StickNext', 'TimeAttach'].includes(action)) { event.preventDefault(); return; }
+    if (action === 'TimeAttach') seekBeat(Math.round(currentBeat() * timeline.division) / timeline.division);
     // `action` is narrowed to a string by the guard above, and the `Page*` test guarantees the
     // lookup below hits; the explicit key type is what lets the index be read without a cast.
     const pageKey = action as 'PageLeft' | 'PageRight' | 'PageUp' | 'PageDown';
@@ -2118,6 +2143,12 @@ window.addEventListener('keydown', async event => {
     }
     else if (action === 'SwitchMultiLineMode' && session.multiLineActive) session.setMultiLineMode(session.multiLineMode === 'events' ? 'notes' : 'events');
     else if (action === 'CurveBegin' || action === 'CurveEnd') captureCurve(action === 'CurveEnd');
+    else if (action === 'SwitchLock') {
+      if (!noiseEditor.active && !globalEvents.active && session.focus === 'events') toggleSingleEventLock(session);
+    }
+    else if (action === 'StickNext') {
+      if (!noiseEditor.active && !globalEvents.active && session.focus === 'events' && selectedEventEntries(session).length === 1) stickSelectedEventToNext(session);
+    }
     else if (preview.visible && ['AddTap', 'AddDrag', 'AddFlick', 'AddHold', 'AddEvent'].includes(action)) handled = false;
     else if (area === 'events' && ['AddTap', 'AddEvent'].includes(action)) handled = timeline.eventInteraction.place(undefined, undefined, undefined, action === 'AddTap');
     else if (['AddTap', 'AddDrag', 'AddFlick', 'AddHold'].includes(action)) {
@@ -2300,12 +2331,12 @@ function applyPreferences(next: MigratedPreferences) {
   element<HTMLInputElement>('#volume').value = String(audio.volume);
   hitSounds.setVolume(Number(editorPreferences.hitVolume ?? next.settings.hitVolume));
   element<HTMLInputElement>('#hit-volume').value = String(hitSounds.volume);
-  preview.noteSize = realtimePreview.noteSize = next.settings.noteSize;
+  preview.noteSize = realtimePreview.noteSize = Number(editorPreferences.noteSize ?? next.settings.noteSize);
   // `lineScale` is a range-backed preference, so it is always a number here; `Number` is the same
   // narrowing the surrounding lines use and is the identity for the only value this can hold.
   preview.lineScale = realtimePreview.lineScale = Number(editorPreferences.lineScale ?? next.settings.lineScale);
   preview.backgroundAlpha = realtimePreview.backgroundAlpha = next.settings.backgroundAlpha;
-  timeline.noteScale = next.settings.noteSize / 175;
+  timeline.noteScale = Number(editorPreferences.noteSize ?? next.settings.noteSize) / 175;
   timeline.gridCount = Number(editorPreferences.gridCount ?? next.settings.gridCount);
   timeline.scale = Number(editorPreferences.scale ?? 500);
   timeline.division = Number(editorPreferences.division ?? 4);
@@ -2337,6 +2368,7 @@ function applyPreferences(next: MigratedPreferences) {
 function applyMigratedPreferences(next: MigratedPreferences) {
   editorPreferences = { ...editorPreferences, volume: next.settings.volume, hitVolume: next.settings.hitVolume, gridCount: next.settings.gridCount, realtimeAlpha: next.settings.realtimeAlpha,
     fpsLimit: next.settings.fpsLimit,
+    noteSize: next.settings.noteSize,
     lineScale: next.settings.lineScale,
     ratioWidth: next.settings.ratioWidth, ratioHeight: next.settings.ratioHeight, barWidth: next.settings.barWidth, barAlpha: next.settings.barAlpha,
     autoSave: next.settings.autoSave, autoSaveSeconds: next.settings.autoSaveSeconds, autoSaveLimit: next.settings.autoSaveLimit, autoplayView: next.settings.autoplayView, highlight: next.settings.highlight, showGameUI: next.settings.showGameUI };
@@ -2356,7 +2388,7 @@ listen('#migrate', async () => {
         const directory = await pickerWindow.showDirectoryPicker!({ mode: 'read' });
         status('正在扫描旧 RPE 目录…');
         const entries = await directoryEntries(directory);
-        migrationDialog(await scanMigration(entries, directory.name), applyMigratedPreferences);
+        migrationDialog(await scanMigration(entries, directory.name, fileOptions()), applyMigratedPreferences);
       } catch (failure) { if (!(failure instanceof Error) || failure.name !== 'AbortError') reportError(failure); }
     };
     content.append(select);
@@ -2372,7 +2404,7 @@ element<HTMLInputElement>('#directory-input').addEventListener('change', async e
     status('正在扫描旧 RPE 目录…');
     const entries = uploadedEntries(files);
     const name = files[0].webkitRelativePath.split('/')[0];
-    migrationDialog(await scanMigration(entries, name), applyMigratedPreferences);
+    migrationDialog(await scanMigration(entries, name, fileOptions()), applyMigratedPreferences);
   } catch (failure) { reportError(failure); }
   finally { input.value = ''; }
 });
@@ -2436,6 +2468,8 @@ function applyDisplaySettings() {
   const ratioHeight = Number(editorPreferences.ratioHeight ?? preferences.settings.ratioHeight);
   setRatioOptions(element<HTMLInputElement>('#preview-ratio'), ratioWidth, ratioHeight);
   preview.aspectRatio = realtimePreview.aspectRatio = ratioWidth / ratioHeight;
+  preview.noteSize = realtimePreview.noteSize = Number(element<HTMLInputElement>('#note-size').value);
+  timeline.noteScale = preview.noteSize / 175;
   applyViewControls({ ...editorPreferences, showGameUI: editorPreferences.showGameUI ?? preferences.settings.showGameUI }, timeline, [preview, realtimePreview]);
   const displayKeys: ('lineNumbers' | 'lineArrows' | 'lineTint' | 'mergeLineNumbers' | 'pickPreviewLines' | 'pickPreviewNoiseAreas')[] = ['lineNumbers', 'lineArrows', 'lineTint', 'mergeLineNumbers', 'pickPreviewLines', 'pickPreviewNoiseAreas'];
   for (const renderer of [preview, realtimePreview]) for (const key of displayKeys) renderer[key] = Boolean(editorPreferences[key] ?? true);
@@ -2531,5 +2565,6 @@ const modEditor: ModEditor = {
   },
 };
 mods=new ModManager(modEditor,{notify,invalidate});
+
 
 

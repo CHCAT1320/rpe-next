@@ -142,6 +142,7 @@ export function activate(api) {
 | `chart:parsed` | `{chart}`；内置解析完成后改写结果；自定义 `chart:parse` 短路时不触发 |
 | `chart:validate` | `{chart,handled:false}`；自行检查后设 `handled=true` 跳过内置 assertChart 检查 |
 | `chart:serialize` | `{chart,compact,text:null}`；可替换输入；`text!==null` 直接返回字符串并跳过内置校验和整形 |
+| `chart:export-assets` | `{chart,chartName,assets,required}`；PEZ 默认排除未使用文件，在依赖遍历前触发。`chart` 已经过兼容转换，`assets` 为待导出文件 Map，`required` 是需保留的包内路径 Set。模组可用 `required.add(path)` 声明自定义结构或序列化器使用的资源，其 JSON、着色器等依赖会继续追踪；勾选导出未使用文件时不需要筛选，也不触发此钩子。自动保存文件仍遵循通用设置 |
 | `preview:before` | `{chart,seconds,lineIndex}`；在预览/背景预览绘制前替换渲染数据、谱面秒数和当前线，不修改存档 |
 
 事件取样及属性拖动可以使用临时谱面和循环预览时间，因此预览钩子、`onPreview` 和渲染包装函数应使用回调传入的 `chart/seconds`；它们不一定等于已提交谱面和实际播放头。`onFrame` 的 `chartSeconds/musicSeconds` 仍表示实际播放时间。以上行为沿用 API 1。

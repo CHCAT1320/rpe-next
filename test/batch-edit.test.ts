@@ -298,7 +298,7 @@ test('文件导入和迁移不再以声明的 256 MiB 大小拒绝项目', async
   const project: MigrationProject = { id: 'batch-size-test', chart, path: 'Charts/test/chart.json', directory: 'Charts/test/', info: {}, entry: { path: 'Charts/test/chart.json', getFile: async () => asFile(file) } };
   // `materializeProject` needs the plan's `entries`; the remaining plan fields are not read on this
   // path, so the literal is typed as the plan shape and completed with the members it requires.
-  const plan: MigrationPlan = { sourceName: 'test', projects: [], failures: [], skipped: [], preferences: migratePreferences(), entries: [{ path: project.path, getFile: async () => asFile(file) }] };
+  const plan: MigrationPlan = { sourceName: 'test', includeBackupCharts: false, projects: [], failures: [], skipped: [], ignored: [], preferences: migratePreferences(), entries: [{ path: project.path, getFile: async () => asFile(file) }] };
   const result = await materializeProject(plan, project);
   assert.equal(result.assets.length, 1); assert.equal(result.bytes, file.size);
 });

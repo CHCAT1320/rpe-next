@@ -91,7 +91,7 @@ export function showHotkeySettings(preferences: MigratedPreferences, save: (next
       const input = document.createElement('input'); input.id = `hotkey-${action}`; input.type = 'text'; input.spellcheck = false; input.value = draft[action] ? formatShortcut(draft[action]) : ''; input.placeholder = '未绑定'; input.setAttribute('aria-describedby', `hotkey-message-${action}`);
       const record = document.createElement('button'); record.textContent = '录入'; record.setAttribute('aria-label', `录入${label}快捷键`);
       const clear = document.createElement('button'); clear.textContent = '清除'; clear.title = `禁用：${label}`;
-      const reset = document.createElement('button'); reset.textContent = '还原'; reset.title = `默认：${formatShortcut(DEFAULT_HOTKEYS[action as keyof DefaultHotkeys])}`;
+      const reset = document.createElement('button'); reset.textContent = '还原'; reset.title = `默认：${formatShortcut(DEFAULT_HOTKEYS[action as keyof DefaultHotkeys] ?? '')}`;
       const message = document.createElement('small'); message.className = 'hotkey-message'; message.id = `hotkey-message-${action}`;
       root.append(description, input, record, clear, reset, message); section.append(root);
       rows.set(action, { root, input, record, reset, message });
@@ -103,7 +103,7 @@ export function showHotkeySettings(preferences: MigratedPreferences, save: (next
         feedback.textContent = `正在录入「${label}」，请按下组合键；Esc 也可录入，点击“取消录入”取消。`;
       };
       clear.onclick = () => { stopRecording(); draft[action] = ''; input.value = ''; refresh(); };
-      reset.onclick = () => { stopRecording(); draft[action] = DEFAULT_HOTKEYS[action as keyof DefaultHotkeys]; input.value = formatShortcut(draft[action] ?? ''); refresh(); };
+      reset.onclick = () => { stopRecording(); draft[action] = DEFAULT_HOTKEYS[action as keyof DefaultHotkeys] ?? ''; input.value = formatShortcut(draft[action] ?? ''); refresh(); };
     }
   }
   const fixed = document.createElement('p'); fixed.className = 'hint'; fixed.textContent = '鼠标操作：Ctrl+滚轮切线，Shift / 中键框选，右键菜单。联机聊天使用 /；事件放置中的数字选择优先。原版未迁移的热键会随配置保留，但不作为已实现操作列出。'; content.append(fixed);

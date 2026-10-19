@@ -1,12 +1,7 @@
-// Built-in assets are served from `assets/` next to the entry document. `import.meta.env.BASE_URL`
-// is the base Vite was configured with — '/' for local development and the desktop build, and the
-// GitHub Pages subpath for the deployed site — so the editor keeps working when it is not hosted
-// at the domain root.
-//
-// The optional chaining keeps this module importable from plain Node (the unit tests import it
-// directly), where `import.meta.env` does not exist and the domain root is the correct fallback.
-const base = import.meta.env?.BASE_URL ?? '/';
-
-export function assetUrl(path: string): string {
-  return `${base}assets/${path}`;
+// Built-in assets live in the repository-root `assets/` directory. Resolve them relative to this
+// module rather than the page: the same URL then works from Node's file system (unit tests), Vite
+// development, the bundled build under any `base` (including the GitHub Pages subpath) and the
+// `rpe://app` desktop protocol. `moduleUrl` is injectable for tests that need a fixed origin.
+export function assetUrl(path: string, moduleUrl: string = import.meta.url): string {
+  return new URL(`../../assets/${path}`, moduleUrl).href;
 }

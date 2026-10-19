@@ -73,6 +73,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 canvas:focus, canvas:focus-visible { outline: none; }
 input, select { padding: 5px; min-width: 0; }
 input[type=range] { accent-color: #eee; padding: 0; }
+input.numeric-expression-error { outline: 1px solid var(--rpen-error, #e46e6e); outline-offset: -1px; }
 input[type=checkbox] { accent-color: var(--accent); width: 17px !important; height: 17px; }
 header { min-height: 48px; display: flex; align-items: center; gap: 14px; padding: 6px 12px; background: #202020; flex: none; border-bottom: 1px solid #444; }
 .brand { display: flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 19px; }
@@ -432,6 +433,7 @@ html.value-dragging, html.value-dragging * { cursor: none !important; user-selec
 .settings-body { max-height: 65vh; overflow: auto; padding-right: 12px; }
 .settings-body h3 { color: #e5c878; border-bottom: 1px solid #555; padding-bottom: 10px; }
 .settings-body .field { grid-template-columns: 1fr 200px; }
+.settings-range-value { position: absolute; z-index: 5; transform: translate(-50%, -100%); min-width: 30px; padding: 3px 6px; border: 1px solid var(--rpen-border, #777); border-radius: 2px; background: var(--rpen-elevated, #202020); color: var(--rpen-text, #f0f0f0); box-shadow: 0 2px 6px #0005; font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; user-select: none; }
 .project-card h2 { margin: 8px 0; font-size: 18px; overflow-wrap: anywhere; }
 .project-card p { color: #aaa; font-size: 12px; }
 .project-card .project-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
@@ -469,8 +471,14 @@ html.value-dragging, html.value-dragging * { cursor: none !important; user-selec
 .editor.noise-mode .noise-toolbar-close { display: inline-block; color: #97ebbb; }
 .editor.noise-mode label:has(#snap-x), .editor.noise-mode label:has(#camera-x), .editor.noise-mode #mirror { display: none; }
 .noise-export-warning { max-height: 200px; overflow-y: auto; color: #e9be84; font-size: 13px; }
-.editor.noise-mode .tools, .editor.noise-mode .timeline-head > *, .editor.noise-mode #audio-analysis-overlay, .editor.noise-mode #multi-line-labels, .editor.noise-mode #multi-line-scroll { display: none !important; }
-.editor.noise-mode .timeline-head::before { content: '噪域编辑 · Q / R 两次放置 · Shift / 中键框选 · 左键划线多选'; color: #b9d6c3; padding-left: 12px; grid-column: 1 / -1; }
+.editor.noise-mode .tools, .editor.noise-mode .timeline-head > :not(.noise-mode-head), .editor.noise-mode #audio-analysis-overlay, .editor.noise-mode #multi-line-labels, .editor.noise-mode #multi-line-scroll { display: none !important; }
+.editor.noise-mode .timeline-head::before { content: none !important; }
+.editor.noise-mode .noise-mode-head { display: grid !important; grid-column: 1 / -1 !important; grid-template-columns: minmax(0, 1fr) 30px repeat(6, minmax(0, 1fr)) 10px; align-items: center; gap: 0 !important; width: 100%; height: 40px; min-width: 0; padding: 0 !important; border: 0 !important; box-sizing: border-box !important; color: var(--rpen-text, #f0f0f0); }
+.editor.noise-mode .noise-mode-primary { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0 12px; overflow: hidden; border-right: 1px solid var(--rpen-border, #777); white-space: nowrap; }
+.editor.noise-mode .noise-mode-primary > strong { flex: none; color: inherit; font-size: 13px; font-weight: 600; }
+.editor.noise-mode .noise-mode-count, .editor.noise-mode .noise-mode-owner { min-width: 0; overflow: hidden; color: inherit; font-size: 11px; text-overflow: ellipsis; }
+.editor.noise-mode .noise-mode-spacer { min-width: 0; }
+.editor.noise-mode .noise-mode-track { display: block; min-width: 0; overflow: hidden; padding: 0 2px; color: inherit; font-size: 11px; text-align: center !important; text-overflow: ellipsis; white-space: nowrap; }
 .editor.noise-mode .canvases { inset: 0; grid-template-columns: minmax(0, 1fr); }
 .editor.noise-mode #notes, .editor.noise-mode #events, .editor.noise-mode .timeline-strip { display: none !important; }
 #noise-editor-canvas { width: 100%; height: 100%; min-width: 0; min-height: 0; grid-column: 1 / -1; grid-row: 1; touch-action: none; }
@@ -576,7 +584,7 @@ footer > button, footer #performance, footer > span:last-child { flex-shrink: 0;
   .timeline-head > span:not(.multi-line-head-controls) { overflow-x: auto; white-space: nowrap; }
   .timeline-head > span:not(.multi-line-head-controls) > * { flex-shrink: 0; }
   .timeline-head > .multi-line-head-controls { position: static; grid-column: 1 / -1; justify-content: flex-end; min-height: 32px; padding: 3px 8px; gap: 2px; border-top: 1px solid #484848; }
-  .editor.noise-mode .timeline-head::before { padding: 8px 12px; }
+  .editor.noise-mode .noise-mode-head { min-height: 40px; }
 }
 @container (max-width: 360px) {
   .inspector-tabs { gap: 2px; padding: 6px; }

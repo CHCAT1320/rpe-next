@@ -59,6 +59,8 @@ export interface ReadZipLimits {
   maxFiles?: number;
   maxBytes?: number;
   maxFileBytes?: number;
+  /** Whether an entry is read at all; skipped entries are neither inflated nor checksummed. */
+  includeEntry?: (name: string) => boolean;
 }
 
 /** Reads the central directory without inflating any entry. */
@@ -110,11 +112,12 @@ export function inspectZip(buffer: ArrayBuffer | Uint8Array): ZipDirectory {
 }
 
 /** Reads a ZIP archive into a map of entry name to uncompressed bytes. */
-export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity }: ReadZipLimits = {}): Promise<ArchiveEntries> {
+export async function readZip(buffer: ArrayBuffer | Uint8Array, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity, includeEntry = () => true }: ReadZipLimits = {}): Promise<ArchiveEntries> {
   const bytes = new Uint8Array(buffer as ArrayBuffer), directory = inspectZip(buffer), files: ArchiveEntries = new Map();
   if (directory.count > maxFiles) throw new Error('ZIP 文件数量超限');
   if (directory.declaredBytes > maxBytes || directory.largestFile > maxFileBytes) throw new Error('ZIP 解压后大小超限');
   for (const { name, method, checksum, size, compressedSize, dataOffset } of directory.entries) {
+    if (!includeEntry(name)) continue;
     let contents = method === 0 ? bytes.slice(dataOffset, dataOffset + compressedSize) : bytes.subarray(dataOffset, dataOffset + compressedSize);
     if (method === 8) {
       const reader = new Blob([contents as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();

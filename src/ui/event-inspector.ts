@@ -12,6 +12,8 @@ import { renderShaderInspector } from './shader-inspector.ts';
 import { canCutEvent } from '../application/event-tools.ts';
 import { runEventTool } from './event-tools.ts';
 import { editorSkinContext } from './editor-skin-canvas.ts';
+import { evaluateEventNumber } from '../core/numeric-expression.ts';
+import { numericExpressionSource, setNumericExpressionResolver } from './numeric-expression-input.ts';
 import type { EventSampler } from './event-sampler.ts';
 import type { Notify } from './event-tools.ts';
 import type { EventSelectionEntry } from '../application/event-commands.ts';
@@ -38,6 +40,9 @@ interface EventPatch {
 
 /** The event transform {@link applyEventTransform} hands to the batch helpers. */
 type EventFieldTransform = (event: ChartEvent) => ChartEvent;
+
+/** A fixed value, or a function that derives it from the event being transformed. */
+type EventValueSource = EventValue | ((current: ChartEvent) => EventValue);
 
 /** Whether the easing gallery is open; shared across renders of the inspector. */
 const galleryState = { open: false };
@@ -81,9 +86,11 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     if (key === 'linkgroup') return Math.max(0, Math.round(Number(value)));
     return value;
   };
-  const writeValue = (key: string, title: string, value: EventValue): void => {
-    const next = constrainNumber(key, value);
-    applyEventTransform(session, `修改事件${title}`, current => ({ ...current, [key]: next, ...(current.inst && (key === 'start' || key === 'end') ? { start: next, end: structuredClone(next) } : {}) }));
+  const writeValue = (key: string, title: string, value: EventValueSource): void => {
+    applyEventTransform(session, `修改事件${title}`, current => {
+      const next = constrainNumber(key, typeof value === 'function' ? value(current) : value);
+      return { ...current, [key]: next, ...(current.inst && (key === 'start' || key === 'end') ? { start: next, end: structuredClone(next) } : {}) };
+    });
   };
   const applyField = (input: HTMLInputElement, key: string, title: string, kind: EventFieldKind, quiet = false): void => {
     const update = (): void => {
@@ -94,6 +101,14 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
       if (values.length !== 3 || values.some(number => !Number.isFinite(number))) throw new Error('颜色必须是 R,G,B 三个有限数字');
       value = values as Color;
     } else if (kind === 'number') {
+      const source = numericExpressionSource(input);
+      if (String(source).trim().endsWith('v')) {
+        const values = new Map(inspectorEntries(session).map(entry => [entry.event, evaluateEventNumber(source, {
+          type: entry.type, field: key, event: entry.event, tempo,
+          factor: session.chart.judgeLineList[entry.lineIndex ?? session.lineIndex].bpmfactor ?? 1,
+        })]));
+        writeValue(key, title, current => values.get(current)!); return;
+      }
       value = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(value)) return;
     } else value = input.value;
@@ -191,6 +206,13 @@ export function renderEventInspector(session: EditorSession, tempo: TempoMap, cu
     input.oninput = event => { if (!(event as InputEvent).isComposing && (kind !== 'number' || input.value.trim())) applyField(input, key, title, kind, true); };
     input.onchange = () => applyField(input, key, title, kind);
     if (kind === 'number') {
+      if (eventType === 'moveYEvents' && ['start', 'end'].includes(key)) {
+        setNumericExpressionResolver(input, source => {
+          const entry = inspectorEntries(session)[0];
+          return evaluateEventNumber(source, { type: entry.type, field: key, event: entry.event, tempo, factor: session.chart.judgeLineList[entry.lineIndex ?? session.lineIndex].bpmfactor ?? 1 });
+        });
+        input.title = '支持表达式；nv 表示以速度 n 计算位移（每秒 120 × n），由另一端数值及事件时长推算';
+      }
       const step = key === 'easingLeft' || key === 'easingRight' ? 0.05 : key === 'linkgroup' ? 1 : session.eventWheelSteps?.[eventType] ?? EVENT_WHEEL_STEPS[eventType] ?? 1;
       input.step = String(step); numericWheel(input, step);
       if (entries.length === 1) attachValueDrag(label, input, key, title, step);

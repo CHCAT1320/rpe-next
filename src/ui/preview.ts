@@ -1,7 +1,8 @@
 import { SceneRuntime } from '../core/scene.ts';
 import { prepareCanvas, NOTE_COLORS } from './timeline.ts';
 import { DEFAULT_LINE_WIDTH, DEFAULT_LINE_HEIGHT, HIT_DURATION, hitFrame } from '../core/visual-constants.ts';
-import { previewViewport, simultaneousNotes, hitParticles } from '../core/editor-display.ts';
+import { previewViewport, previewPositionScale, previewNotePosition, simultaneousNotes, hitParticles } from '../core/editor-display.ts';
+import type { PositionScale } from '../core/editor-display.ts';
 import { renderPasses } from '../core/game-ui.ts';
 import { drawGameUi } from './game-ui.ts';
 import { recentHits } from '../core/hit-effects.ts';
@@ -345,9 +346,10 @@ export class Preview {
     const skinScene = (noiseLayers(chart) as NoiseLayer[]).some(layer => this.noisePreview.usesSkin(layer));
     if (this.applyShaders || skinScene) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
     this.drawBackground(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor });
-    const states = this.scene.sample(seconds);
+    const positionScale = previewPositionScale(this.aspectRatio ?? 1.5);
+    const states = this.scene.sample(seconds, positionScale);
     this.viewScale = scale; this.viewport = viewport; this.selectedLine = selectedLine;
-    this.drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states: states as LineState[] });
+    this.drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states: states as LineState[], positionScale });
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
     const localEffects = shaderEffects.filter(effect => !effect.global);
     const globalEffects = shaderEffects.filter(effect => effect.global);
@@ -393,13 +395,13 @@ export class Preview {
   }
 
   // Independent world pass, allowing optional modules to project it before screen effects and UI.
-  drawScene(context: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, selectedLine: number, { width, height, viewport, scale, divisor, states, center, cullNotes = false }: { width: number; height: number; viewport: PreviewViewport; scale: number; divisor: number; states: LineState[]; center?: { x: number; y: number }; cullNotes?: boolean }): void {
+  drawScene(context: CanvasRenderingContext2D, chart: Chart, tempo: TempoMap, seconds: number, selectedLine: number, { width, height, viewport, scale, divisor, states, center, cullNotes = false, positionScale = previewPositionScale(this.aspectRatio ?? 1.5) }: { width: number; height: number; viewport: PreviewViewport; scale: number; divisor: number; states: LineState[]; center?: { x: number; y: number }; cullNotes?: boolean; positionScale?: PositionScale }): void {
     void tempo;
     const originX = width / 2 - (center?.x ?? 0) * scale, originY = height / 2 + (center?.y ?? 0) * scale;
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.guides = lineGuides(this.forceLineOpacity ? states.map(state => ({ ...(state ?? {}), alpha: 255 })) as GuideState[] : states as GuideState[], chart.judgeLineList, order, width, height, scale);
     if (center) for (const guide of this.guides) { guide.x -= center.x * scale; guide.y += center.y * scale; }
-    const visibleNotes = new Map<number, HitEntry[]>(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index] as ScreenState, 1600 * divisor + Math.hypot((states[index]?.x ?? 0) - (center?.x ?? 0), (states[index]?.y ?? 0) - (center?.y ?? 0))) ?? []]));
+    const visibleNotes = new Map<number, HitEntry[]>(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index] as ScreenState, (1600 * divisor + Math.hypot((states[index]?.x ?? 0) - (center?.x ?? 0), (states[index]?.y ?? 0) - (center?.y ?? 0))) / positionScale.y) ?? []]));
     const noteAspects = new Map<number, number>();
     this.noteHitAreas = [];
     for (const pass of this.passes ?? []) for (const index of pass.kind === 'line' ? [pass.index ?? 0] : order) {
@@ -425,7 +427,7 @@ export class Preview {
       } else for (const entry of visibleNotes.get(index) ?? []) {
         const note = entry.note;
         if ((note.type === 2) !== (pass.kind === 'hold')) continue;
-        const position = runtime.noteState(entry, state, seconds);
+        const position = previewNotePosition(runtime.noteState(entry, state, seconds), runtime.line, positionScale);
         if (position.alpha <= 0 || position.size === 0) continue;
         const highlight = this.highlight !== false && this.simultaneous?.has(note) === true;
         const textureScale = this.skin?.noteScale?.(highlight) ?? 1;
@@ -487,10 +489,10 @@ export class Preview {
         for (const hit of recentHits(runtime, seconds, this.effectsSince, this.skin?.hitLifetime ?? Math.max(HIT_DURATION, 2 / 3))) {
           const { entry, time, seed } = hit;
           const hitTint = (entry.note.tintHitEffects ?? [255, 236, 160]) as RgbColor;
-          if (!hitStates.has(time)) hitStates.set(time, this.scene.sampler(time));
+          if (!hitStates.has(time)) hitStates.set(time, this.scene.sampler(time, positionScale));
           const hitState = hitStates.get(time)?.(index);
           if (!hitState) continue;
-          const position = runtime.noteState(entry, hitState, time);
+          const position = previewNotePosition(runtime.noteState(entry, hitState, time), runtime.line, positionScale);
           const angle = hitState.rotation * Math.PI / 180;
           const horizontal = originX + (hitState.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
           const vertical = originY + (-hitState.y + position.x * Math.sin(angle) - position.y * Math.cos(angle)) * scale;

@@ -440,7 +440,7 @@
     { "selector": "@multi-line-controls button", "set": { "min-width": "26px", "height": "26px", "min-height": "26px", "padding": "0 5px", "font-size": "12px", "color": "var(--rpen-ink-label)", "background": "transparent", "border": "1px solid var(--rpen-ink-field-border)", "border-radius": "5px" } },
     { "selector": "@multi-line-controls button.active", "set": { "color": "var(--rpen-ink-accent-text)", "background": "color-mix(in srgb, var(--rpen-ink-accent) 17%, transparent)", "border-color": "color-mix(in srgb, var(--rpen-ink-accent) 45%, transparent)", "box-shadow": "none" } },
     { "selector": ".editor.multi-notes .timeline-head > span:first-child,.editor.multi-events .timeline-head > span:nth-child(2)", "set": { "padding-right": "270px" } },
-    { "selector": ".editor.noise-mode .timeline-head::before", "set": { "content": "\"噪域编辑\"", "color": "#9cc3aa", "font-weight": "400", "font-size": "13px", "padding-left": "14px", "display": "flex", "align-items": "center" } },
+    { "selector": ".editor.noise-mode .noise-mode-head", "set": { "gap": "0", "padding": "0", "border": "0", "color": "var(--rpen-ink-text-7)", "font-weight": "400" } },
     { "selector": ".editor.global-events-mode .timeline-head::before", "set": { "content": "\"全局事件\"", "color": "var(--rpen-text)", "font-weight": "400", "font-size": "13px", "padding-left": "14px", "display": "flex", "align-items": "center" } },
     { "selector": "@stage", "set": { "background": "var(--rpen-ink-gutter)" } },
     { "selector": "#notes", "set": { "border-right": "1px solid var(--rpen-ink-line)", "background": "#ffffff05" } },

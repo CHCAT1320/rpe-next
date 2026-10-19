@@ -1,6 +1,7 @@
 import { parseDocument } from '../core/formats.ts';
 import { migratePreferences } from '../core/preferences.ts';
 import { decodeLegacy, parseInfo } from './legacy-text.ts';
+import { isBackupChartFile, isChartDocumentFile } from '../core/chart-backups.ts';
 import type { ArchiveEntries } from './archive.ts';
 import type { Chart } from '../core/types.ts';
 export { decodeLegacy, parseInfo } from './legacy-text.ts';
@@ -36,6 +37,15 @@ export interface MigrationPlan {
   skipped: string[];
   preferences: ReturnType<typeof migratePreferences>;
   entries: MigrationEntry[];
+  /** Whether autosave and backup chart files were scanned. */
+  includeBackupCharts: boolean;
+  /** Backup chart paths that were skipped because the option is off. */
+  ignored: string[];
+}
+
+/** Options for {@link scanMigration}. */
+export interface ScanMigrationOptions {
+  includeBackupCharts?: boolean;
 }
 
 /** A project ready to be written into the chart library. */
@@ -124,9 +134,11 @@ function parseLegacySettings(text: string): Record<string, string | number> {
  * file sitting directly under `Resources` that no `info.txt` claimed. Failures are collected per
  * project rather than thrown, so one broken chart does not abort a whole migration.
  */
-export async function scanMigration(entries: MigrationEntry[], sourceName: string): Promise<MigrationPlan> {
-  const lookup = new Map(entries.map(entry => [entry.path.toLowerCase(), entry]));
+export async function scanMigration(entries: MigrationEntry[], sourceName: string, { includeBackupCharts = false }: ScanMigrationOptions = {}): Promise<MigrationPlan> {
   if (!entries.some(entry => /^resources\//i.test(entry.path))) throw new Error('请选择包含 Resources 的 RPE 主文件夹（通常是 PhiEditer），不是源码或 build 目录');
+  const ignored = includeBackupCharts ? [] : entries.filter(entry => isBackupChartFile(entry.path)).map(entry => entry.path);
+  entries = entries.filter(entry => includeBackupCharts || !isBackupChartFile(entry.path));
+  const lookup = new Map(entries.map(entry => [entry.path.toLowerCase(), entry]));
   let settings = await textEntry(lookup.get('settings.json'));
   if (!settings) {
     const old = await textEntry(lookup.get('settings.txt'));
@@ -142,16 +154,17 @@ export async function scanMigration(entries: MigrationEntry[], sourceName: strin
     const info = parseInfo(await textEntry(infoEntry));
     const directory = infoEntry.path.slice(0, infoEntry.path.lastIndexOf('/') + 1);
     const path = directory + (info.Chart ?? '');
+    if (!includeBackupCharts && isBackupChartFile(path)) continue;
     const entry = lookup.get(path.toLowerCase());
     if (!entry) { failures.push({ path, message: 'info.txt 引用的谱面不存在' }); continue; }
     selectedPaths.add(entry.path);
     projects.push({ path: entry.path, directory, info, entry });
   }
   for (const entry of entries) {
-    if (!/^resources\/[^/]+\/[^/]+\.(json|pec)$/i.test(entry.path) || /\/(autosave_|extra|config|expression|custom_background|stickers|prefab_mapper)/i.test(entry.path)) continue;
+    if (!/^resources\/[^/]+\/[^/]+$/i.test(entry.path) || !isChartDocumentFile(entry.path) || /\/(extra|config|expression|custom_background|stickers|prefab_mapper)/i.test(entry.path)) continue;
     if (selectedPaths.has(entry.path)) continue;
     const directory = entry.path.slice(0, entry.path.lastIndexOf('/') + 1);
-    if (infos.some(info => info.path.toLowerCase() === (directory + 'info.txt').toLowerCase())) continue;
+    if (!isBackupChartFile(entry.path) && infos.some(info => info.path.toLowerCase() === (directory + 'info.txt').toLowerCase())) continue;
     projects.push({ path: entry.path, directory, info: {}, entry });
   }
   for (const project of projects) {
@@ -180,7 +193,7 @@ export async function scanMigration(entries: MigrationEntry[], sourceName: strin
       project.id = await migrationProjectId(sourceName, project.path);
     } catch (error) { project.error = (error as Error).message; failures.push({ path: project.path, message: (error as Error).message }); }
   }
-  return { sourceName, projects: projects.filter(project => !project.auxiliary), failures, skipped, preferences, entries };
+  return { sourceName, projects: projects.filter(project => !project.auxiliary), failures, skipped, preferences, entries, includeBackupCharts, ignored };
 }
 
 /**
@@ -214,9 +227,10 @@ function referencedEntry(references: Map<string, MigrationEntry>, name: string, 
 export async function materializeProject(plan: MigrationPlan, project: MigrationProject): Promise<MaterializedProject> {
   if (project.error) throw new Error(project.error);
   const assets: ArchiveEntries = new Map();
-  const references = new Map(plan.entries.filter(entry => /^resources\//i.test(entry.path)).map(entry => [entry.path, entry]));
+  const entries = plan.entries.filter(entry => plan.includeBackupCharts || !isBackupChartFile(entry.path));
+  const references = new Map(entries.filter(entry => /^resources\//i.test(entry.path)).map(entry => [entry.path, entry]));
   let bytes = 0;
-  for (const entry of plan.entries.filter(entry => entry.path.toLowerCase().startsWith(project.directory.toLowerCase()))) {
+  for (const entry of entries.filter(entry => entry.path.toLowerCase().startsWith(project.directory.toLowerCase()))) {
     const file = await entry.getFile();
     bytes += file.size;
     assets.set(entry.path.slice(project.directory.length), new Uint8Array(await file.arrayBuffer()));

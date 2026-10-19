@@ -31,6 +31,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
 } as const) satisfies MigratedSettings;
 
 export const DEFAULT_EDITOR_PREFERENCES = Object.freeze({
+  includeBackupCharts: false,
+  pairedMovementSampling: true,
   scale: 600,
   division: 4,
   snapX: true,
@@ -45,7 +47,7 @@ export const DEFAULT_EDITOR_PREFERENCES = Object.freeze({
   analysisWidth: 0.62,
   notesOnly: false,
   eventOpacity: 0.45,
-  eventBarWidth: 0.73,
+  eventBarWidth: 0.67,
   dragSensitivity: 1,
   tipsEnabled: false,
 } as const) satisfies EditorPreferences;

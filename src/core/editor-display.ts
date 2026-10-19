@@ -2,7 +2,7 @@ import { beatValue } from './beat.ts';
 import { easing } from './easing.ts';
 import { trajectoryEventValue } from './curve-trajectory.ts';
 import type { TempoMap } from './tempo.ts';
-import type { Chart, ChartEvent, Note } from './types.ts';
+import type { Chart, ChartEvent, JudgeLine, Note } from './types.ts';
 
 /**
  * An event paired with its position in the source array.
@@ -37,6 +37,19 @@ export interface PreviewViewport {
   top: number;
 }
 
+/** Per-axis multipliers that adapt chart positions to the visible frame. */
+export interface PositionScale {
+  x: number;
+  y: number;
+}
+
+/** A note-local position, as consumed by {@link previewNotePosition}. */
+export interface PreviewNotePosition {
+  x: number;
+  y: number;
+  tail: number;
+}
+
 /** One hit particle, in pixels relative to the hit, expanded by a decaying factor. */
 export interface HitParticle {
   x: number;
@@ -57,6 +70,19 @@ export function previewViewport(width: number, height: number, ratio = 1.5): Pre
   const scale = Math.min(width / logicalWidth, height / logicalHeight);
   return { scale, width: logicalWidth * scale, height: logicalHeight * scale,
     left: (width - logicalWidth * scale) / 2, top: (height - logicalHeight * scale) / 2 };
+}
+
+// Positions adapt to the visible frame; sprite dimensions and rotation stay uniform.
+export function previewPositionScale(ratio = 1.5): PositionScale {
+  return { x: Math.min(1, ratio / 1.5), y: Math.min(1, 1.5 / ratio) };
+}
+
+export function previewNotePosition<T extends PreviewNotePosition>(position: T, line: JudgeLine, positionScale: PositionScale): T {
+  // RPE leaves note-local distances unscaled on parented lines.
+  const father: unknown = line.father;
+  const parent = Number(father === '' ? -1 : father ?? -1);
+  if (Number.isInteger(parent) && parent >= 0 || positionScale.x === 1 && positionScale.y === 1) return position;
+  return { ...position, x: position.x * positionScale.x, y: position.y * positionScale.y, tail: position.tail * positionScale.y };
 }
 
 export function eventChains(events: readonly ChartEvent[]): EventChain[] {

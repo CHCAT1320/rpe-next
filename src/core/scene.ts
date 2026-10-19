@@ -214,6 +214,12 @@ export interface NoteState {
  */
 export type SceneSampler = (index: number) => LineState | undefined;
 
+/** Per-axis multipliers applied to local movement before parent rotation is resolved. */
+export interface ScenePositionScale {
+  x: number;
+  y: number;
+}
+
 /** Every judge line of one document compiled once, so a frame reuses the same runtime objects. */
 export class SceneRuntime {
   cache: WeakMap<JudgeLine, LineRuntime>;
@@ -241,7 +247,7 @@ export class SceneRuntime {
     this.order = this.lines.map((line, index) => index).sort((left, right) => Number(this.lines[left].line.zOrder ?? 0) - Number(this.lines[right].line.zOrder ?? 0) || left - right);
   }
 
-  sampler(seconds: number): SceneSampler {
+  sampler(seconds: number, positionScale: ScenePositionScale = { x: 1, y: 1 }): SceneSampler {
     const states: (LineState | undefined)[] = [];
     const done = new Set<number>();
     const resolving = new Set<number>();
@@ -249,7 +255,12 @@ export class SceneRuntime {
       if (done.has(index)) return true;
       if (resolving.has(index)) return false;
       resolving.add(index);
-      states[index] = this.lines[index].state(seconds);
+      const state = this.lines[index].state(seconds);
+      // Adapt local movement before resolving the parent's rotation. Callers that
+      // analyse or export chart coordinates keep the unadapted default space.
+      state.x *= positionScale.x;
+      state.y *= positionScale.y;
+      states[index] = state;
       const line = this.lines[index].line;
       const father: unknown = line.father;
       const parent = father === null || father === undefined || father === '' ? -1 : (Number.isInteger(father) ? Number(father) : Number(father));
@@ -269,8 +280,8 @@ export class SceneRuntime {
     return (index: number): LineState | undefined => { if (!this.lines[index]) return undefined; resolve(index); return states[index]; };
   }
 
-  sample(seconds: number): (LineState | undefined)[] {
-    const sample = this.sampler(seconds);
+  sample(seconds: number, positionScale?: ScenePositionScale): (LineState | undefined)[] {
+    const sample = this.sampler(seconds, positionScale);
     return this.lines.map((runtime, index) => sample(index));
   }
 }

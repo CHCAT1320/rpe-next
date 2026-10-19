@@ -11,11 +11,14 @@ import { DEFAULT_SETTINGS } from './default-settings.ts';
 export interface DefaultHotkeys {
   AddTap: string; AddDrag: string; AddFlick: string; AddHold: string; AddEvent: string; Pause: string; Save: string;
   Undo: string; Redo: string; SelectAll: string; Copy: string; Shear: string; Paste: string; PasteMirror: string;
+  SwitchLock: string; TimeAttach: string; StickNext: string;
   ClipboardHistory: string; NumberMirror: string; NumberFill: string;
   KeepTimePaste: string; KeepTimePasteMirror: string;
   Delete: string; QuickDelete: string; LastBeat: string; NextBeat: string; Esc: string;
   StartView: string; EndView: string; JumpView: string; ReplayView: string; StartView_HOLD: string; JumpView_HOLD: string;
   SwitchUI: string; ResetCamera: string; CurveBegin: string; CurveEnd: string;
+  /** Optional: when absent the line-number shortcut uses `LEFTCTRL`. */
+  SwitchLine?: string;
   ToggleMultiLine: string; SwitchMultiLineMode: string;
   ShowLineInfo: string; PageLeft: string; PageRight: string; PageUp: string; PageDown: string;
 }
@@ -120,6 +123,7 @@ export const DEFAULT_HOTKEYS: DefaultHotkeys = {
   AddTap: 'Q', AddDrag: 'W', AddFlick: 'E', AddHold: 'R', AddEvent: 'R', Pause: 'SPACE', Save: 'LEFTCTRL&S',
   Undo: 'LEFTCTRL&Z', Redo: 'LEFTCTRL&Y', SelectAll: 'LEFTCTRL&A', Copy: 'LEFTCTRL&C',
   Shear: 'LEFTCTRL&X', Paste: 'LEFTCTRL&V', PasteMirror: 'LEFTCTRL&B',
+  SwitchLock: 'F', TimeAttach: 'LEFTCTRL&H', StickNext: 'G',
   ClipboardHistory: 'LEFTCTRL&V', NumberMirror: 'A', NumberFill: 'S',
   KeepTimePaste: 'LEFTCTRL&LEFTSHIFT&V', KeepTimePasteMirror: 'LEFTCTRL&LEFTSHIFT&B',
   Delete: 'DELETE', QuickDelete: 'D', LastBeat: 'LEFTARROW', NextBeat: 'RIGHTARROW', Esc: 'ESCAPE',

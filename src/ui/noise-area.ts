@@ -12,6 +12,9 @@ import { noiseLayers, noiseLayerId } from '../core/noise-skin.ts';
 import { drawEventCurve, drawEventCurveBatch } from './event-curve.ts';
 import type { CurveBatchEntry } from './event-curve.ts';
 import { eventDisplayIndex, selectedEventGroups } from './event-display-index.ts';
+import { evaluateEventNumber } from '../core/numeric-expression.ts';
+import { numericExpressionSource, setNumericExpressionResolver } from './numeric-expression-input.ts';
+import type { TempoMap } from '../core/tempo.ts';
 import type { Chart, Beat, ChartEvent, NoiseLayer } from '../core/types.ts';
 import type { IntervalIndex } from '../core/interval-index.ts';
 
@@ -158,7 +161,7 @@ const round = (value: number): number => Math.round(value * 10000) / 10000;
 const durationText = (value: unknown): string => String(Math.round(Math.max(0, Number(value) || 0) * 1000) / 1000);
 const readyFlashValue = (value: unknown): number => typeof value === 'boolean' ? (value ? 0.5 : 0) : Number.isFinite(value) ? Math.max(0, value as number) : 0.5;
 const colors = ['#e5ab66', '#82b8df', '#b1b0e4', '#e9a4b0', '#86c3aa', '#d0bd7b'];
-const HEADER_HEIGHT = 54;
+const HEADER_HEIGHT = 0;
 const AREA_BAR_WIDTH = 60;
 
 /** The options a `field` control is built with. */
@@ -244,6 +247,11 @@ export class NoiseAreaEditor {
   formCommitting = false;
   drawingLayout: { width: number; height: number; split: number; eventLeft: number; eventWidth: number } | null = null;
   listTitle: HTMLDivElement | null = null;
+  modeHeader: HTMLSpanElement;
+  modePrimary: HTMLSpanElement;
+  modeCount: HTMLElement;
+  modeOwner: HTMLSpanElement;
+  modeTracks: HTMLSpanElement[];
 
   constructor(host: HTMLElement, canvas: HTMLCanvasElement, getContext: () => NoiseEditorContext, options: NoiseEditorOptions) {
     Object.assign(this, options); this.host = host; this.canvas = canvas; this.getContext = getContext;
@@ -252,6 +260,16 @@ export class NoiseAreaEditor {
     this.distributions = new WeakMap(); this.hiddenLayers = new Set(); this.simpleLayers = new Set();
     this.areaList = new NoiseAreaList(index => this.select(index));
     this.layerPanel = new NoiseLayerPanel(this);
+    this.modeHeader = document.createElement('span'); this.modeHeader.className = 'noise-mode-head'; this.modeHeader.hidden = true;
+    this.modePrimary = document.createElement('span'); this.modePrimary.className = 'noise-mode-primary';
+    const modeTitle = document.createElement('strong'); modeTitle.textContent = '噪域编辑';
+    this.modeCount = document.createElement('small'); this.modeCount.className = 'noise-mode-count'; this.modeOwner = document.createElement('span'); this.modeOwner.className = 'noise-mode-owner';
+    this.modePrimary.append(modeTitle, this.modeCount, this.modeOwner);
+    const spacer = document.createElement('span'); spacer.className = 'noise-mode-spacer';
+    this.modeTracks = NOISE_TRACKS.map(([, label]) => { const item = document.createElement('span'); item.className = 'noise-mode-track'; item.textContent = label; return item; });
+    const trailing = document.createElement('span'); trailing.className = 'noise-mode-spacer';
+    this.modeHeader.append(this.modePrimary, spacer, ...this.modeTracks, trailing);
+    (document.querySelector('.timeline-head') as HTMLElement).append(this.modeHeader);
     this.overlay = document.createElement('canvas'); this.overlay.className = 'noise-sampler'; this.overlay.hidden = true; (canvas.closest('.stage') as HTMLElement).append(this.overlay);
     this.sampleBar = document.createElement('div'); this.sampleBar.className = 'noise-sample-bar'; this.sampleBar.hidden = true;
     this.sampleBar.append(hint('拖动绿色控制点 · 可连续取样，完成统一应用 · Esc 全部取消'), button('完成取样', '保留全部取样结果并返回时间轴', () => this.endSample(true)), button('取消', '放弃全部取样修改', () => this.endSample(false))); (canvas.closest('.stage') as HTMLElement).append(this.sampleBar);
@@ -276,6 +294,13 @@ export class NoiseAreaEditor {
   reset(): void { this.cancelGesture(); this.endSample(false); this.active = false; this.selected = -1; this.selection.clear(); this.event = null; this.pending = null; this.hiddenLayers.clear(); this.simpleLayers.clear(); this.areaList.reset(); this.syncChrome(); }
   syncChrome(): void {
     (document.querySelector('.editor') as HTMLElement).classList.toggle('noise-mode', this.active);
+    this.modeHeader.hidden = !this.active;
+    this.modeCount.textContent = `噪域数量 ${this.areas().length}`;
+    this.modeOwner.textContent = this.area() ? `#${this.selected} ${this.area()!.Name || '未命名噪域'}` : '未指定噪域';
+    if (this.active && !this.canvas.hidden) {
+      const layout = this.layout();
+      if (layout.width > 0) this.modeHeader.style.gridTemplateColumns = `${layout.split}px 30px repeat(${NOISE_TRACKS.length}, ${layout.eventWidth}px) 10px`;
+    }
     this.canvas.hidden = !this.active || this.context.previewVisible || Boolean(this.sampleMode);
     (document.querySelector('#noise-tab') as HTMLElement).hidden = !this.active;
     this.overlay.hidden = !this.sampleMode; this.sampleBar.hidden = !this.sampleMode;
@@ -402,7 +427,30 @@ export class NoiseAreaEditor {
     } else if (action === 'SelectAll') {
       this.selection = new Set(this.cursor?.side === 'events' && this.area() ? NOISE_TRACKS.flatMap(([type]) => (((this.area() as NoiseArea)[type] as NoiseEvent[] | undefined) ?? []).map((entry, index) => type + ':' + index)) : this.areas().map((area, index) => 'area:' + index)); this.render();
     } else if (['AddTap', 'AddHold', 'AddEvent'].includes(action)) this.place(action === 'AddTap');
-    else if (['SwitchUI', 'ToggleMultiLine', 'SwitchMultiLineMode', 'NumberMirror', 'NumberFill', 'AddDrag', 'AddFlick', 'CurveBegin', 'CurveEnd'].includes(action) || action.startsWith('Page')) return true;
+    else if (action === 'NumberMirror') {
+      const target = this.event;
+      if (this.selection.size === 1 && target && ['moveXEvents', 'moveYEvents', 'rotateEvents'].includes(target.type)) {
+        this.edit(area => {
+          const event = (area[target.type] as NoiseEvent[] | undefined)?.[target.index]; if (!event) return area;
+          event.start = -event.start; event.end = -event.end;
+          return area;
+        });
+      }
+    } else if (action === 'PageUp' || action === 'PageDown') {
+      const delta = (action === 'PageUp' ? 1 : -1) / Math.max(1, this.context.timeline.division);
+      const selected = [...this.selection].filter(key => !key.startsWith('area:'));
+      if (selected.length) this.edit(area => {
+        for (const key of selected) {
+          const [type, rawIndex] = key.split(':'); const index = Number(rawIndex);
+          const event = (area as unknown as Record<string, NoiseEvent[] | undefined>)[type]?.[index];
+          if (!event) continue;
+          event.startTime = fromNumber(beatValue(event.startTime) + delta);
+          event.endTime = fromNumber(beatValue(event.endTime) + delta);
+        }
+        return area;
+      });
+    } else if (['SwitchLock', 'StickNext'].includes(action)) return true;
+    else if (['SwitchUI', 'ToggleMultiLine', 'SwitchMultiLineMode', 'NumberFill', 'AddDrag', 'AddFlick', 'CurveBegin', 'CurveEnd'].includes(action) || action === 'PageLeft' || action === 'PageRight') return true;
     else return false;
     this.invalidate(); return true;
   }
@@ -573,9 +621,13 @@ export class NoiseAreaEditor {
     const control = input as HTMLInputElement;
     if (choices) input.replaceChildren(...choices.map(([value, name]) => new Option(name, String(value))));
     else control.type = kind === 'beat' ? 'text' : kind;
+    if (!choices && ['duration', 'beat'].includes(kind)) control.dataset.numericExpression = kind === 'beat' ? 'beat' : 'number';
     if (kind === 'checkbox') control.checked = Boolean(value); else input.value = kind === 'beat' ? formatBeat(value as Beat) : kind === 'duration' ? durationText(value) : kind === 'number' && !choices ? String(round(value as number)) : String(value);
     control.step = kind === 'number' ? 'any' : String(step);
-    const read = (): never => (kind === 'checkbox' ? control.checked : kind === 'beat' ? parseBeat(input.value) : kind === 'text' ? input.value : (input.value.trim() ? Number(input.value) : NaN)) as never;
+    const movementExpression = sample?.type === 'moveYEvents' && ['start', 'end'].includes(sample.field);
+    const evaluateMovement = (source: string): number => evaluateEventNumber(source, { type: sample!.type, field: sample!.field, event: (this.area() as unknown as Record<string, NoiseEvent[]>)[sample!.type]![sample!.index]!, tempo: this.context.tempo as unknown as TempoMap });
+    if (movementExpression) { setNumericExpressionResolver(control, evaluateMovement); control.title = '支持表达式；nv 由另一端数值与时长计算速度为 n 时的位移'; }
+    const read = (): never => (kind === 'checkbox' ? control.checked : kind === 'beat' ? parseBeat(input.value) : kind === 'text' ? input.value : movementExpression && String(numericExpressionSource(control)).trim().endsWith('v') ? evaluateMovement(numericExpressionSource(control)) : (input.value.trim() ? Number(input.value) : NaN)) as never;
     // Named so the change handler can re-run it; calling `control.oninput()` would need a synthetic
     // event argument that the assigned handler ignores anyway.
     const applyInput = (): void => { try { const valid = this.edit(area => apply(area, read()), false); input.setCustomValidity(valid ? '' : '数值无效或事件重叠'); } catch (error) { input.setCustomValidity((error as Error).message); } };
@@ -807,11 +859,8 @@ export class NoiseAreaEditor {
     if (this.drag?.kind === 'rectangle') { const start = this.drag.start; const current = this.cursor as NonNullable<NoiseAreaEditor['cursor']>; context.save(); context.lineWidth = 1; context.fillStyle = '#ffcc4430'; context.strokeStyle = '#ffdd77'; const top = this.y(start.rawBeat); const deltaY = this.y(current.rawBeat) - top; context.fillRect(start.x, top, current.x - start.x, deltaY); context.strokeRect(start.x, top, current.x - start.x, deltaY); context.restore(); }
     if (this.drag?.kind === 'stroke' && this.drag.moved) { context.save(); context.lineWidth = 1; context.strokeStyle = '#80ffff'; context.beginPath(); (this.drag.points as Point[]).forEach((point, index) => index ? context.lineTo(point.x, this.y((point as Point & { rawBeat: number }).rawBeat)) : context.moveTo(point.x, this.y((point as Point & { rawBeat: number }).rawBeat))); context.stroke(); context.restore(); }
     this.drawOwner(context, layout);
-    context.fillStyle = '#303030'; context.fillRect(0, 0, width, HEADER_HEIGHT); context.fillStyle = '#f5f5f5'; context.font = '12px RPE, sans-serif'; context.textAlign = 'left'; context.fillText('噪域数量: ' + this.areas().length, 12, 19, layout.split - 16);
     const owner = this.area() ? `#${this.selected} ${this.area()!.Name || '未命名噪域'}` : '未指定噪域';
     this.canvas.setAttribute('aria-description', `噪域数量: ${this.areas().length}；当前右侧内部事件：${owner}`);
-    context.fillText(owner, layout.eventLeft + 4, 19, width - layout.eventLeft - 8);
-    context.textAlign = 'center'; for (const [column, [, label]] of NOISE_TRACKS.entries()) context.fillText(label, layout.eventLeft + (column + 0.5) * layout.eventWidth, 43, Math.max(1, layout.eventWidth - 3));
     context.strokeStyle = timeline.judgementColor ?? '#ffffff'; context.lineWidth = 2; context.beginPath(); context.moveTo(0, this.y(timeline.origin)); context.lineTo(width, this.y(timeline.origin)); context.stroke();
   }
   eventGroups(events: NoiseEvent[]): EventChain[] {
