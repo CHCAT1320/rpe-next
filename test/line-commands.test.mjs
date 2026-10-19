@@ -1,8 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createChart, createLine, createNote } from '../src/core/chart.mjs';
-import { reorderLine, deleteLine, duplicateLine, setLineParent } from '../src/application/line-commands.mjs';
+import { reorderLine, deleteLine, duplicateLine, setLineParent, ensureLineCount, MAX_BATCH_LINE_COUNT } from '../src/application/line-commands.mjs';
 import { History } from '../src/application/history.mjs';
+import { EditorSession } from '../src/application/session.mjs';
+
+test('批量增加补足目标总数，保留原线和父线，作为一步撤销重做', () => {
+  const chart = createChart(); chart.judgeLineList.push(createLine('child')); chart.judgeLineList[1].father = 0;
+  const session = new EditorSession(chart); const next = ensureLineCount(chart, 6);
+  assert.equal(next.judgeLineList.length, 6);
+  assert.equal(next.judgeLineList[0], chart.judgeLineList[0]); assert.equal(next.judgeLineList[1], chart.judgeLineList[1]);
+  assert.deepEqual(next.judgeLineList.slice(2).map(line => line.Name), ['Line 3', 'Line 4', 'Line 5', 'Line 6']);
+  assert.notEqual(next.judgeLineList[2].eventLayers, next.judgeLineList[3].eventLayers);
+  assert.equal(next.judgeLineList[2].eventLayers[0].alphaEvents[0].start, 255);
+  session.commit('批量增加判定线', next);
+  assert.equal(session.history.undoStack.length, 1);
+  session.travel('undo'); assert.equal(session.chart, chart);
+  session.travel('redo'); assert.equal(session.chart, next);
+});
+
+test('目标不大于已有总数时不删除或增加历史，非法或过大的输入被拒绝', () => {
+  const chart = createChart(); chart.judgeLineList.push(createLine());
+  assert.equal(ensureLineCount(chart, 1), chart); assert.equal(ensureLineCount(chart, 2), chart);
+  for (const count of [0, -1, 1.5, NaN, Infinity, '3', MAX_BATCH_LINE_COUNT + 1, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => ensureLineCount(chart, count));
+  assert.equal(chart.judgeLineList.length, 2);
+});
 
 test('重排与删除同步父线引用，撤销恢复完整原图', () => {
   const chart = createChart();

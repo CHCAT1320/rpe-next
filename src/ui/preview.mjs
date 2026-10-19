@@ -1,7 +1,7 @@
 import { SceneRuntime } from '../core/scene.mjs';
 import { prepareCanvas, NOTE_COLORS } from './timeline.mjs';
 import { DEFAULT_LINE_WIDTH, DEFAULT_LINE_HEIGHT, HIT_DURATION, hitFrame } from '../core/visual-constants.mjs';
-import { previewViewport, simultaneousNotes, hitParticles } from '../core/editor-display.mjs';
+import { previewViewport, previewPositionScale, previewNotePosition, simultaneousNotes, hitParticles } from '../core/editor-display.mjs';
 import { renderPasses } from '../core/game-ui.mjs';
 import { drawGameUi } from './game-ui.mjs';
 import { recentHits } from '../core/hit-effects.mjs';
@@ -60,10 +60,11 @@ export class Preview {
     // Screen-sampling skins preserve scene alpha, so supply the same opaque base as shaders.
     if (this.applyShaders || skinScene) { context.fillStyle = '#111'; context.fillRect(viewport.left, viewport.top, viewport.width, viewport.height); }
     this.drawBackground(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor });
-    const states = this.scene.sample(seconds);
+    const positionScale = previewPositionScale(this.aspectRatio ?? 1.5);
+    const states = this.scene.sample(seconds, positionScale);
     this.viewScale=scale;
     this.viewport = viewport; this.selectedLine = selectedLine;
-    this.drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states });
+    this.drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states, positionScale });
     const shaderEffects = this.applyShaders ? this.shaderRuntime.active(seconds) : [];
     const localEffects = shaderEffects.filter(effect => !effect.global);
     const globalEffects = shaderEffects.filter(effect => effect.global);
@@ -103,12 +104,12 @@ export class Preview {
   }
 
   // Independent world pass, allowing optional modules to project it before screen effects and UI.
-  drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states, center, cullNotes = false }) {
+  drawScene(context, chart, tempo, seconds, selectedLine, { width, height, viewport, scale, divisor, states, center, cullNotes = false, positionScale = previewPositionScale(this.aspectRatio ?? 1.5) }) {
     const originX = width / 2 - (center?.x ?? 0) * scale, originY = height / 2 + (center?.y ?? 0) * scale;
     const order = this.allLines ? this.scene.order : [selectedLine];
     this.guides = lineGuides(this.forceLineOpacity ? states.map(state => ({ ...state, alpha: 255 })) : states, chart.judgeLineList, order, width, height, scale);
     if (center) for (const guide of this.guides) { guide.x -= center.x * scale; guide.y += center.y * scale; }
-    const visibleNotes = new Map(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index], 1600 * divisor + Math.hypot((states[index]?.x ?? 0) - (center?.x ?? 0), (states[index]?.y ?? 0) - (center?.y ?? 0))) ?? []]));
+    const visibleNotes = new Map(order.map(index => [index, this.scene.lines[index]?.visibleNotes(seconds, states[index], (1600 * divisor + Math.hypot((states[index]?.x ?? 0) - (center?.x ?? 0), (states[index]?.y ?? 0) - (center?.y ?? 0))) / positionScale.y) ?? []]));
     const noteAspects = new Map();
     this.noteHitAreas = [];
     for (const pass of this.passes) for (const index of pass.kind === 'line' ? [pass.index] : order) {
@@ -133,7 +134,7 @@ export class Preview {
       else for (const entry of visibleNotes.get(index)) {
         const note = entry.note;
         if ((note.type === 2) !== (pass.kind === 'hold')) continue;
-        const position = runtime.noteState(entry, state, seconds);
+        const position = previewNotePosition(runtime.noteState(entry, state, seconds), runtime.line, positionScale);
         if (position.alpha <= 0 || position.size === 0) continue;
         const highlight = this.highlight !== false && this.simultaneous.has(note);
         const textureScale = this.skin?.noteScale?.(highlight) ?? 1;
@@ -193,9 +194,9 @@ export class Preview {
         if (!runtime) continue;
         for (const hit of recentHits(runtime, seconds, this.effectsSince, this.skin?.hitLifetime ?? Math.max(HIT_DURATION, 2 / 3))) {
           const { entry, time, seed } = hit;
-          if (!hitStates.has(time)) hitStates.set(time, this.scene.sampler(time));
+          if (!hitStates.has(time)) hitStates.set(time, this.scene.sampler(time, positionScale));
           const state = hitStates.get(time)(index);
-          const position = runtime.noteState(entry, state, time);
+          const position = previewNotePosition(runtime.noteState(entry, state, time), runtime.line, positionScale);
           const angle = state.rotation * Math.PI / 180;
           const horizontal = originX + (state.x + position.x * Math.cos(angle) + position.y * Math.sin(angle)) * scale;
           const vertical = originY + (-state.y + position.x * Math.sin(angle) - position.y * Math.cos(angle)) * scale;

@@ -62,11 +62,12 @@ export function inspectZip(buffer) {
   return { entries, count, declaredBytes, largestFile, largestRatio, compressedBytes: bytes.length };
 }
 
-export async function readZip(buffer, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity } = {}) {
+export async function readZip(buffer, { maxFiles = Infinity, maxBytes = Infinity, maxFileBytes = Infinity, includeEntry = () => true } = {}) {
   const bytes = new Uint8Array(buffer), directory = inspectZip(buffer), files = new Map();
   if (directory.count > maxFiles) throw new Error('ZIP 文件数量超限');
   if (directory.declaredBytes > maxBytes || directory.largestFile > maxFileBytes) throw new Error('ZIP 解压后大小超限');
   for (const { name, method, checksum, size, compressedSize, dataOffset } of directory.entries) {
+    if (!includeEntry(name)) continue;
     let contents = method === 0 ? bytes.slice(dataOffset, dataOffset + compressedSize) : bytes.subarray(dataOffset, dataOffset + compressedSize);
     if (method === 8) {
       const reader = new Blob([contents]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();

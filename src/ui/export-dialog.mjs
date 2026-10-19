@@ -4,14 +4,17 @@ import { chartExportStem } from '../core/export-filename.mjs';
 import { DEFAULT_TRAJECTORY_SPLIT } from '../core/trajectory-simplify.mjs';
 import { diagnoseNoiseAreas } from '../core/noise-areas.mjs';
 
-export function showExportDialog(chart, assets, chartName, onExport, identifier) {
-  const host = showDialog('导出谱面', 'Next 格式保留整体曲线轨迹；原 RPE 格式将轨迹转换为普通事件。JSON 只包含谱面，PEZ 同时打包已载入的音乐、图片及其他资源。');
+export function showExportDialog(chart, assets, chartName, onExport, identifier, { includeBackupCharts = false } = {}) {
+  const host = showDialog('导出谱面', 'Next 格式保留整体曲线轨迹；原 RPE 格式将轨迹转换为普通事件。JSON 只包含谱面，PEZ 默认只打包当前谱面及其使用的资源。');
   const field = (title, control) => { const label = document.createElement('label'); label.className = 'field'; label.append(title, control); control.setAttribute('aria-label', title); host.append(label); return control; };
   const format = document.createElement('select');
   for (const [value, title] of [['next:json', 'RPE Next · JSON'], ['next:pez', 'RPE Next · PEZ'], ['rpe:json', '原 RPE · JSON'], ['rpe:pez', '原 RPE · PEZ']]) format.append(new Option(title, value));
   format.value = 'next:pez'; field('导出格式', format);
   const compact = document.createElement('input'); compact.type = 'checkbox'; compact.checked = true;
   field('压缩 JSON（仅去掉多余空格和换行，保留全部属性）', compact);
+  const unused = document.createElement('input'); unused.type = 'checkbox'; unused.checked = false;
+  field('包含未使用的文件和素材', unused); const unusedLabel = unused.closest('label');
+  const unusedHint = document.createElement('p'); unusedHint.className = 'hint'; unusedHint.textContent = '默认排除其他谱面、未使用的素材、皮肤和贴图。自动保存及备份文件另遵循通用设置。'; host.append(unusedHint);
   const noiseIssues = diagnoseNoiseAreas(chart.blockAreaList);
   const noiseWarning = document.createElement('div'); noiseWarning.className = 'noise-export-warning'; host.append(noiseWarning);
   const acknowledgement = document.createElement('input'); acknowledgement.type = 'checkbox';
@@ -39,7 +42,7 @@ export function showExportDialog(chart, assets, chartName, onExport, identifier)
   const toleranceLabel = document.createElement('label'); toleranceLabel.className = 'field'; toleranceLabel.append('拆分容忍度', tolerance);
   const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = '相对原始等分碎事件的每轴最大误差：X/Y 为坐标单位，旋转为度。越小越精确；关闭优化则保留各轨迹设定的全部等分段。';
   settings.append(simplifyLabel, toleranceLabel, hint); host.append(settings);
-  const sync = () => { settings.hidden = format.value.startsWith('next:'); tolerance.disabled = !simplify.checked; removeLabel.hidden = !chart.blockAreaList?.length || format.value.startsWith('next:'); removeGlobalLabel.hidden = !hasGlobalEvents || format.value.startsWith('next:'); };
+  const sync = () => { unusedLabel.hidden = unusedHint.hidden = format.value.endsWith(':json'); settings.hidden = format.value.startsWith('next:'); tolerance.disabled = !simplify.checked; removeLabel.hidden = !chart.blockAreaList?.length || format.value.startsWith('next:'); removeGlobalLabel.hidden = !hasGlobalEvents || format.value.startsWith('next:'); };
   format.onchange = () => { suggestName(); sync(); }; simplify.onchange = sync; sync();
   const apply = document.querySelector('#modal-apply'); apply.hidden = false; apply.textContent = '导出';
   apply.onclick = () => {
@@ -48,7 +51,7 @@ export function showExportDialog(chart, assets, chartName, onExport, identifier)
       if (noiseIssues.length && !acknowledgement.checked) throw new Error('请先阅读并勾选确认噪域检查提示');
       if (compatibility === 'rpe' && chart.blockAreaList?.length && !removeNoise.checked) throw new Error('原 RPE 无法表示噪域，请改用 Next 格式，或勾选移除噪域');
       if (compatibility === 'rpe' && hasGlobalEvents && !removeGlobal.checked) throw Error('原 RPE 无法表示全局事件，请改用 Next 格式，或勾选移除全局事件');
-      const result = createChartExport(chart, assets, chartName, { compatibility, format: container, compact: compact.checked, name: name.value, identifier, removeNoiseAreas: compatibility === 'rpe' && removeNoise.checked, removeGlobalEvents: compatibility === 'rpe' && removeGlobal.checked, split: { simplify: simplify.checked, tolerance: Number(tolerance.value) } });
+      const result = createChartExport(chart, assets, chartName, { includeUnusedFiles: unused.checked, includeBackupCharts, compatibility, format: container, compact: compact.checked, name: name.value, identifier, removeNoiseAreas: compatibility === 'rpe' && removeNoise.checked, removeGlobalEvents: compatibility === 'rpe' && removeGlobal.checked, split: { simplify: simplify.checked, tolerance: Number(tolerance.value) } });
       const filename = download(result.blob, result.name); document.querySelector('#modal').close(); onExport(filename, container);
     } catch (error) { document.querySelector('#modal-error').textContent = error.message; }
   };

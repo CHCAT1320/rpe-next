@@ -2,6 +2,7 @@ import { parseDocument } from '../core/formats.mjs';
 import { migratePreferences } from '../core/preferences.mjs';
 import { decodeLegacy, parseInfo } from './legacy-text.mjs';
 import { assetBytes } from './files.mjs';
+import { isBackupChartFile, isChartDocumentFile } from '../core/chart-backups.mjs';
 export { decodeLegacy, parseInfo } from './legacy-text.mjs';
 
 async function migrationProjectId(sourceName, path) {
@@ -43,9 +44,11 @@ export function uploadedEntries(files) {
 
 async function textEntry(entry) { return entry ? decodeLegacy(await (await entry.getFile()).arrayBuffer()) : ''; }
 
-export async function scanMigration(entries, sourceName) {
-  const lookup = new Map(entries.map(entry => [entry.path.toLowerCase(), entry]));
+export async function scanMigration(entries, sourceName, { includeBackupCharts = false } = {}) {
   if (!entries.some(entry => /^resources\//i.test(entry.path))) throw new Error('请选择包含 Resources 的 RPE 主文件夹（通常是 PhiEditer），不是源码或 build 目录');
+  const ignored = includeBackupCharts ? [] : entries.filter(entry => isBackupChartFile(entry.path)).map(entry => entry.path);
+  entries = entries.filter(entry => includeBackupCharts || !isBackupChartFile(entry.path));
+  const lookup = new Map(entries.map(entry => [entry.path.toLowerCase(), entry]));
   let settings = await textEntry(lookup.get('settings.json'));
   if (!settings) {
     const old = await textEntry(lookup.get('settings.txt'));
@@ -66,16 +69,17 @@ export async function scanMigration(entries, sourceName) {
     const info = parseInfo(await textEntry(infoEntry));
     const directory = infoEntry.path.slice(0, infoEntry.path.lastIndexOf('/') + 1);
     const path = directory + (info.Chart ?? '');
+    if (!includeBackupCharts && isBackupChartFile(path)) continue;
     const entry = lookup.get(path.toLowerCase());
     if (!entry) { failures.push({ path, message: 'info.txt 引用的谱面不存在' }); continue; }
     selectedPaths.add(entry.path);
     projects.push({ path: entry.path, directory, info, entry });
   }
   for (const entry of entries) {
-    if (!/^resources\/[^/]+\/[^/]+\.(json|pec)$/i.test(entry.path) || /\/(autosave_|extra|config|expression|custom_background|stickers|prefab_mapper)/i.test(entry.path)) continue;
+    if (!/^resources\/[^/]+\/[^/]+$/i.test(entry.path) || !isChartDocumentFile(entry.path) || /\/(extra|config|expression|custom_background|stickers|prefab_mapper)/i.test(entry.path)) continue;
     if (selectedPaths.has(entry.path)) continue;
     const directory = entry.path.slice(0, entry.path.lastIndexOf('/') + 1);
-    if (infos.some(info => info.path.toLowerCase() === (directory + 'info.txt').toLowerCase())) continue;
+    if (!isBackupChartFile(entry.path) && infos.some(info => info.path.toLowerCase() === (directory + 'info.txt').toLowerCase())) continue;
     projects.push({ path: entry.path, directory, info: {}, entry });
   }
   for (const project of projects) {
@@ -104,15 +108,16 @@ export async function scanMigration(entries, sourceName) {
       project.id = await migrationProjectId(sourceName, project.path);
     } catch (error) { project.error = error.message; failures.push({ path: project.path, message: error.message }); }
   }
-  return { sourceName, projects: projects.filter(project => !project.auxiliary), failures, skipped, preferences, entries };
+  return { sourceName, projects: projects.filter(project => !project.auxiliary), failures, skipped, preferences, entries, includeBackupCharts, ignored };
 }
 
 export async function materializeProject(plan, project) {
   if (project.error) throw new Error(project.error);
   const assets = new Map();
-  const references = new Map(plan.entries.filter(entry => /^resources\//i.test(entry.path)).map(entry => [entry.path, entry]));
+  const entries = plan.entries.filter(entry => plan.includeBackupCharts || !isBackupChartFile(entry.path));
+  const references = new Map(entries.filter(entry => /^resources\//i.test(entry.path)).map(entry => [entry.path, entry]));
   let bytes = 0;
-  for (const entry of plan.entries.filter(entry => entry.path.toLowerCase().startsWith(project.directory.toLowerCase()))) {
+  for (const entry of entries.filter(entry => entry.path.toLowerCase().startsWith(project.directory.toLowerCase()))) {
     const file = await entry.getFile();
     bytes += file.size;
     assets.set(entry.path.slice(project.directory.length), new Uint8Array(await file.arrayBuffer()));

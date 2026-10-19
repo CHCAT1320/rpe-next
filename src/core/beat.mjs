@@ -1,3 +1,5 @@
+import { evaluateNumericExpression } from './numeric-expression.mjs';
+
 export function beatValue(beat, path = 'beat') {
   if (!Array.isArray(beat) || beat.length !== 3 || !beat.every(Number.isSafeInteger) || beat[2] <= 0) {
     throw new Error(`${path}: 拍数必须为 [整数, 分子, 正分母]`);
@@ -26,7 +28,7 @@ export function parseBeat(text) {
     return beat;
   }
   if (String(text).trim() === '') throw new Error('拍数不能为空');
-  return fromNumber(Number(text));
+  return fromNumber(evaluateNumericExpression(text));
 }
 
 export function formatBeat(beat) { return `${beat[0]}:${beat[1]}/${beat[2]}`; }

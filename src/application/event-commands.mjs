@@ -123,6 +123,14 @@ export function transformEvents(session, label, transform) {
   session.commit(label, chart, beforeSelection);
 }
 
+export function toggleSingleEventLock(session) {
+  const entries = selectedEventEntries(session);
+  if (entries.length !== 1 || entries[0].type === 'paintEvents') return false;
+  const locked = !Boolean(entries[0].event.inst);
+  transformEvents(session, '切换事件钩定', event => ({ ...event, inst: locked ? 1 : 0, ...(locked ? { end: structuredClone(event.start) } : {}) }));
+  return true;
+}
+
 export function insertEvent(session, type, event) {
   insertEventAt(session, session.lineIndex, type, event);
 }

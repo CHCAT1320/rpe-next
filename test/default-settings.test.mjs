@@ -11,9 +11,14 @@ test('fresh browser and desktop preferences use the calibrated shared defaults',
   assert.equal(DEFAULT_SETTINGS.fpsLimit, 120); assert.equal(DEFAULT_SETTINGS.autoSaveSeconds, 240);
   assert.equal(DEFAULT_SETTINGS.historyLimit, 30); assert.equal(DEFAULT_SETTINGS.realtimeAlpha, 0.05);
   assert.equal(DEFAULT_EDITOR_PREFERENCES.scale, 600);
-  assert.equal(DEFAULT_EDITOR_PREFERENCES.eventOpacity, 0.45); assert.equal(DEFAULT_EDITOR_PREFERENCES.eventBarWidth, 0.73);
+  assert.equal(DEFAULT_SETTINGS.barWidth, 3); assert.equal(DEFAULT_SETTINGS.barAlpha, 0.6);
+  assert.equal(DEFAULT_EDITOR_PREFERENCES.eventOpacity, 0.45); assert.equal(DEFAULT_EDITOR_PREFERENCES.eventBarWidth, 0.67);
   assert.equal(DEFAULT_EDITOR_PREFERENCES.tipsEnabled, false);
+  assert.equal(DEFAULT_EDITOR_PREFERENCES.pairedMovementSampling, true);
   assert.deepEqual(normalizeEditorPreferences(DEFAULT_EDITOR_PREFERENCES), DEFAULT_EDITOR_PREFERENCES);
+  assert.equal(normalizeEditorPreferences({ noteSize: 520 }).noteSize, 500);
+  assert.equal(normalizeEditorPreferences({ noteSize: 5 }).noteSize, 10);
+  assert.deepEqual(normalizeEditorPreferences({ pairedMovementSampling: false }), { pairedMovementSampling: false });
   assert.equal(DEFAULT_APPEARANCE.editorSkin, 'inkline');
   assert.ok(!Object.keys(DEFAULT_SETTINGS).some(key => Object.hasOwn(DEFAULT_EDITOR_PREFERENCES, key)));
 });

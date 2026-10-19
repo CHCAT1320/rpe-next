@@ -9,8 +9,10 @@ import { beatValue } from '../core/beat.mjs';
 import { NOISE_TRACKS } from '../core/noise-areas.mjs';
 import { integerChartAlpha } from '../core/alpha-values.mjs';
 import { chartExportStem, safeExportStem, DownloadNames } from '../core/export-filename.mjs';
+import { isBackupChartFile, isChartDocumentFile } from '../core/chart-backups.mjs';
+import { collectExportAssetPaths } from './export-assets.mjs';
 
-export async function openFiles(fileList, { confirmLargeArchive } = {}) {
+export async function openFiles(fileList, { confirmLargeArchive, includeBackupCharts = false } = {}) {
   const files = [...fileList];
   if (!files.length) return null;
   let assets = new Map();
@@ -18,17 +20,18 @@ export async function openFiles(fileList, { confirmLargeArchive } = {}) {
     const buffer = await files[0].arrayBuffer(), info = inspectZip(buffer);
     const large = info.declaredBytes > 1024 ** 3 || info.largestFile > 512 * 1024 ** 2 || info.count > 20000 || info.largestRatio > 500;
     if (large && !await confirmLargeArchive?.(info)) throw Object.assign(new Error('谱面包解压后的体积、文件数或压缩倍率过大，已停止导入；确认来源可信后可再次打开并确认。'), { name: 'ArchiveLimitError' });
-    assets = await readZip(buffer, { maxFiles: large ? info.count : 20000, maxBytes: large ? info.declaredBytes : 1024 ** 3, maxFileBytes: large ? info.largestFile : 512 * 1024 ** 2 });
+    assets = await readZip(buffer, { maxFiles: large ? info.count : 20000, maxBytes: large ? info.declaredBytes : 1024 ** 3, maxFileBytes: large ? info.largestFile : 512 * 1024 ** 2,
+      includeEntry: name => includeBackupCharts || !isBackupChartFile(name) });
   }
-  else for (const file of files) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));
+  else for (const file of files) if (includeBackupCharts || !isBackupChartFile(file.name)) assets.set(file.name, new Uint8Array(await file.arrayBuffer()));
   const candidates = [];
   const errors = [];
   for (const [name, bytes] of assets) {
-    if (!/\.(json|pec)$/i.test(name)) continue;
+    if (!isChartDocumentFile(name)) continue;
     try { candidates.push({ name, chart: parseDocument(decodeLegacy(bytes)) }); }
     catch (error) { errors.push(`${name}: ${error.message}`); }
   }
-  if (!candidates.length) throw new Error(errors.join('\n') || '找不到 RPE JSON 谱面');
+  if (!candidates.length) throw new Error(errors.join('\n') || '找不到可导入的谱面；自动保存及备份谱面默认忽略，可在设置的“导入与导出”中开启包含这些文件');
   attachExternalEffects(candidates, assets);
   for (const candidate of candidates) if (candidate.chart.rpeNextLegacySource?.format === 'phigros-v3') {
     const references = resourceReferences(candidate.chart, assets, candidate.name);
@@ -218,10 +221,17 @@ function packageInfo(chart, assets, chartName, outputName, identifier) {
 
 export function packageEntries(chart, assets, chartName, options = {}) {
   chart = orderedExportChart(chart);
-  const output = new Map(assets);
+  const output = new Map([...assets].filter(([name]) => options.includeBackupCharts || !isBackupChartFile(name)));
   let outputName = chartName;
+  if (!options.includeBackupCharts && isBackupChartFile(outputName)) {
+    const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    const stem = (directory ? directory + '/' : '') + 'chart';
+    outputName = stem + '.json';
+    let suffix = 1;
+    while ([...output.keys()].some(name => normalizePath(name) === normalizePath(outputName))) outputName = `${stem}-${suffix++}.json`;
+  }
   if (chart.rpeNextLegacySource) {
-    const stem = chartName.replace(/\.(json|pec)$/i, '');
+    const stem = outputName.replace(/\.(json|pec)(?:\.(?:bak|backup)(?:\.\d+)?)?$/i, '');
     outputName = stem + '.rpe.json';
     let suffix = 1;
     while ([...output.keys()].some(name => normalizePath(name) === normalizePath(outputName))) outputName = `${stem}.rpe-${suffix++}.json`;
@@ -250,6 +260,14 @@ export function packageEntries(chart, assets, chartName, options = {}) {
   }
   for (const name of output.keys()) if (name.toLowerCase() === 'info.txt') output.delete(name);
   output.set('info.txt', packageInfo(chart, assets, chartName, outputName, options.identifier));
+  if (!options.includeUnusedFiles) {
+    const directory = outputName.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    const extra = (directory ? directory + '/' : '') + 'extra.json';
+    const extraPath = [...output.keys()].find(name => normalizePath(name) === normalizePath(extra));
+    const roots = [outputName, 'info.txt', ...matchingInfo(output, outputName).map(([name]) => name), ...(extraPath ? [extraPath] : [])];
+    const used = collectExportAssetPaths(chart, output, chartName, { resolve: assetPath, media: resourceReferences(chart, assets, chartName), roots, mainFile: outputName, includeBackupCharts: options.includeBackupCharts });
+    for (const name of output.keys()) if (!used.has(name)) output.delete(name);
+  }
   return output;
 }
 

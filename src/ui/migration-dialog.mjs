@@ -27,6 +27,7 @@ function resolveConflicts(content, conflicts) {
 
 export function migrationDialog(plan, applyPreferences) {
   const content = showDialog('迁移原 RPE 文件夹', `发现 ${plan.projects.length} 个谱面项目；${plan.failures.length} 项待处理。选择要复制到本浏览器谱面库的项目。原文件夹只读。音乐、封面及谱面文件夹内附属文件一同保存。`);
+  if (plan.ignored?.length) { const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = `已忽略 ${plan.ignored.length} 个自动保存及备份文件，可在设置的“导入与导出”中开启包含这些文件。`; content.append(hint); }
   const configLabel = document.createElement('label');
   const configCheck = document.createElement('input'); configCheck.type = 'checkbox'; configCheck.checked = true;
   configLabel.append(configCheck, '迁移热键及设置'); content.append(configLabel);

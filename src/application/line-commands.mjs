@@ -1,4 +1,19 @@
 import { remapShaderLines } from '../core/shader-events.mjs';
+import { createLine } from '../core/chart.mjs';
+
+export const MAX_BATCH_LINE_COUNT = 10000;
+
+export function validateLineCount(count, current = 0) {
+  if (!Number.isSafeInteger(count) || count <= 0) throw new Error('判定线总数必须为正整数');
+  if (count > current && count > MAX_BATCH_LINE_COUNT) throw new Error(`批量增加的目标总数不能超过 ${MAX_BATCH_LINE_COUNT} 条`);
+}
+
+export function ensureLineCount(chart, count) {
+  const lines = chart.judgeLineList ?? [];
+  validateLineCount(count, lines.length);
+  if (count <= lines.length) return chart;
+  return { ...chart, judgeLineList: [...lines, ...Array.from({ length: count - lines.length }, (_, index) => createLine(`Line ${lines.length + index + 1}`))] };
+}
 
 function requireLine(chart, index) {
   if (!Number.isInteger(index) || !chart.judgeLineList?.[index]) throw new Error('判定线索引无效');

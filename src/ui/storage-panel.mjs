@@ -14,8 +14,9 @@ export function noteLibrarySave() { try { if (!localPreferences.getItem(FIRST_SA
 const bytes = value => Number.isFinite(value) ? `${(value / 1024 ** 2).toFixed(1)} MiB` : '未知';
 
 export class StoragePanel {
-  constructor(settings, { reportError, notify, canSwitchLibrary = () => true }) {
+  constructor(settings, { reportError, notify, canSwitchLibrary = () => true, fileOptions = () => ({}) }) {
     this.reportError = reportError; this.notify = notify;
+    this.fileOptions = fileOptions;
     this.host = document.createElement('section'); this.host.id = 'storage-settings';
     const title = document.createElement('h3'); title.textContent = '本地存储与外部备份';
     this.status = document.createElement('p'); this.status.id = 'storage-status'; this.status.setAttribute('role', 'status');
@@ -108,7 +109,7 @@ export class StoragePanel {
     }
   }
   async exportAll() {
-    const result = await exportLibrary({ progress: (index, count, name) => { this.status.textContent = `正在打包外部备份 ${index}/${count}${name ? '：' + name : ''}`; } });
+    const result = await exportLibrary({ ...this.fileOptions(), progress: (index, count, name) => { this.status.textContent = `正在打包外部备份 ${index}/${count}${name ? '：' + name : ''}`; } });
     download(result.blob, `rpe-next-library-${new Date().toISOString().slice(0, 10)}.zip`);
     noteExternalBackup(); this.notify(`已发起 ${result.count} 个项目的备份下载；请确认下载完成。恢复时解压 ZIP，分别打开其中的 PEZ。`, 'success', 7000); await this.refresh();
   }

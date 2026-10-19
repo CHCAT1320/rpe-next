@@ -9,7 +9,8 @@ const functions = Object.freeze({
 });
 const precedence = { '||': 1, '&&': 2, '==': 3, '!=': 3, '<': 4, '>': 4, '<=': 4, '>=': 4, '+': 5, '-': 5, '*': 6, '/': 6, '%': 6, '^': 7, '**': 7 };
 
-export function compileExpression(source) {
+export function compileExpression(source, options = {}) {
+  const expressionFunctions = options.functions ?? functions;
   if (source.length > 4096) throw new Error('单个表达式不能超过 4096 字符');
   const tokens = []; let offset = 0;
   while (offset < source.length) {
@@ -31,10 +32,10 @@ export function compileExpression(source) {
     if (/^(\d|\.)/.test(token)) return () => Number(token);
     if (!/^[A-Za-z_]/.test(token)) throw new Error(`无法解析 ${token}`);
     if (tokens[cursor] === '(') {
-      if (!Object.hasOwn(functions, token)) throw new Error(`不支持函数 ${token}`);
+      if (!Object.hasOwn(expressionFunctions, token)) throw new Error(`不支持函数 ${token}`);
       cursor++; const args = [];
       if (tokens[cursor] !== ')') { do { args.push(expression()); if (tokens[cursor] !== ',') break; cursor++; } while (true); }
-      requireToken(')'); return scope => functions[token](...args.map(arg => arg(scope)));
+      requireToken(')'); return scope => expressionFunctions[token](...args.map(arg => arg(scope)));
     }
     return scope => {
       if (token === 'pi') return Math.PI;
@@ -48,7 +49,7 @@ export function compileExpression(source) {
     let left = atom();
     while (Object.hasOwn(precedence, tokens[cursor]) && precedence[tokens[cursor]] >= minimum) {
       const operator = tokens[cursor++]; const before = left;
-      const right = expression(precedence[operator] + (['^', '**'].includes(operator) ? 0 : 1));
+      const right = expression(precedence[operator] + (['^', '**'].includes(operator) && options.powerAssociativity !== 'left' ? 0 : 1));
       left = scope => {
         const first = before(scope);
         if (operator === '&&') return Number(Boolean(first) && Boolean(right(scope)));

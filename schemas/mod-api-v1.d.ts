@@ -98,6 +98,8 @@ export interface HookPayloads {
   'chart:parsed': {chart: any};
   'chart:validate': {chart: any; handled: boolean};
   'chart:serialize': {chart: any; compact: boolean; text: string | null};
+  /** Add project asset paths required by custom chart data before PEZ pruning. */
+  'chart:export-assets': {chart: any; chartName: string; assets: Map<string, Uint8Array>; required: Set<string>};
   'preview:before': {chart: any; seconds: number; lineIndex: number};
 }
 export interface Editor {

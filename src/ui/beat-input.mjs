@@ -1,6 +1,7 @@
 import { beatValue, formatBeat, fromNumber, parseBeat } from '../core/beat.mjs';
 
 export function beatInputControl(input, division, reportError) {
+  input.dataset.numericExpression = 'beat';
   const wrapper = document.createElement('span'); wrapper.className = 'beat-input-wrap';
   const buttons = document.createElement('span'); buttons.className = 'beat-nudge';
   const nudge = direction => {

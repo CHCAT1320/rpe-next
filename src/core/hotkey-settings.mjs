@@ -6,6 +6,7 @@ export const HOTKEY_GROUPS = [
   ['放置与曲线', { AddTap: '放置 Tap / 钩定事件', AddDrag: '放置 Drag', AddFlick: '放置 Flick', AddHold: '放置 Hold', AddEvent: '放置事件', NumberMirror: 'NumberMirror 数值镜像', NumberFill: 'NumberFill 数值填充', CurveBegin: '曲线音符起点', CurveEnd: '曲线音符终点' }],
   ['剪贴板', { Copy: '复制', Shear: '剪切', Paste: '粘贴', PasteMirror: '镜像粘贴', KeepTimePaste: '等时粘贴', KeepTimePasteMirror: '等时镜像粘贴', ClipboardHistory: '剪贴板历史' }],
   ['播放与视图', { Pause: '播放 / 暂停', StartView: '开始预览', EndView: '结束预览', JumpView: '结束预览并保留时间', ReplayView: '从头预览', StartView_HOLD: '按住预览，松开返回', JumpView_HOLD: '按住预览，松开保留时间', LastBeat: '后退一横线', NextBeat: '前进一横线', SwitchUI: '切换音符 / 事件视图', ResetCamera: '重置视野', ShowLineInfo: '显示 / 隐藏当前线信息' }],
+  ['事件编辑', { SwitchLock: '切换单选事件钩定', StickNext: '将事件尾值粘合到下一事件首值', TimeAttach: '时间吸附到最近横线' }],
   ['选中物件与多线', { PageLeft: '选中物件左移', PageRight: '选中物件右移', PageUp: '选中物件时间后移', PageDown: '选中物件时间前移', ToggleMultiLine: '开启 / 关闭多线', SwitchMultiLineMode: '切换多线音符 / 事件' }],
 ];
 export const HOTKEY_LABELS = Object.assign({}, ...HOTKEY_GROUPS.map(([, entries]) => entries));

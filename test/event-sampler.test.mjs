@@ -6,16 +6,17 @@ import { createChart, createLine, createEvent } from '../src/core/chart.mjs';
 import { TempoMap } from '../src/core/tempo.mjs';
 import { SceneRuntime } from '../src/core/scene.mjs';
 
-function fixture(chart = createChart(), autoFit = true) {
+function fixture(chart = createChart(), autoFit = true, pairedMovementSampling = false) {
   const sampler = Object.create(EventSampler.prototype);
   const session = new EditorSession(chart); session.eventLayer = 0;
   const preview = { viewDivisor: 1.7, aspectRatio: 1.5 };
   const realtimePreview = { viewDivisor: 1.3, aspectRatio: 1.5 };
-  const context = { session, tempo: new TempoMap(chart.BPMList), preview, realtimePreview, previewVisible: false, sampleAutoFit: autoFit, seconds: () => 0 };
+  const context = { session, tempo: new TempoMap(chart.BPMList), preview, realtimePreview, previewVisible: false, sampleAutoFit: autoFit, pairedMovementSampling, seconds: () => 0 };
   const classes = new Set();
   sampler.host = { closest: () => ({ classList: { toggle: (name, value) => value ? classes.add(name) : classes.delete(name) } }) };
   sampler.canvas = { getBoundingClientRect: () => ({ left: 20, top: 100, width: 900, height: 600 }), setPointerCapture() {}, releasePointerCapture() {} };
   sampler.sampleBar = { getBoundingClientRect: () => ({ bottom: 170 }) };
+  sampler.sampleHint = { textContent: '' };
   sampler.getContext = () => context; sampler.invalidate = () => {}; sampler.pause = () => {}; sampler.scene = new SceneRuntime();
   return { sampler, session, context, classes };
 }
@@ -35,6 +36,77 @@ test('移动取样按父线旋转后的轴反算，并保持预览与控制点�
   assert.ok(Math.abs(state.y + handle.y) < 1e-8);
 });
 
+test('配套 X/Y 事件在同区间时支持二维拖动、实时预览、一次提交和撤销', () => {
+  const chart = createChart();
+  const layer = chart.judgeLineList[0].eventLayers[0];
+  layer.moveXEvents = [createEvent(20, 20, 2, 4)];
+  layer.moveYEvents = [createEvent(-30, -30, 2, 4)];
+  const { sampler, session } = fixture(chart, true, true);
+  assert.equal(sampler.begin({ type: 'moveXEvents', index: 0, field: 'start', lineIndex: 0 }), true);
+  assert.deepEqual(sampler.mode.paired, { type: 'moveYEvents', index: 0 });
+  const initial = sampler.handle(sampler.draftChart);
+  sampler.applyPoint({ x: initial.x + 70, y: initial.y - 90 });
+  const draft = sampler.draftChart.judgeLineList[0].eventLayers[0];
+  assert.ok(Math.abs(draft.moveXEvents[0].start - 90) < 1e-3);
+  assert.ok(Math.abs(draft.moveYEvents[0].start - 60) < 1e-3);
+  assert.equal(draft.moveXEvents[0].end, 20);
+  assert.equal(draft.moveYEvents[0].end, -30);
+  const handle = sampler.handle(sampler.draftChart);
+  assert.ok(Math.abs(handle.x - initial.x - 70) < 1e-3);
+  assert.ok(Math.abs(handle.y - initial.y + 90) < 1e-3);
+  sampler.finish(true);
+  const applied = session.chart.judgeLineList[0].eventLayers[0];
+  assert.equal(applied.moveXEvents[0].start, draft.moveXEvents[0].start);
+  assert.equal(applied.moveYEvents[0].start, draft.moveYEvents[0].start);
+  assert.equal(session.history.undoStack.length, 1);
+  session.travel('undo');
+  assert.equal(session.chart.judgeLineList[0].eventLayers[0].moveXEvents[0].start, 20);
+  assert.equal(session.chart.judgeLineList[0].eventLayers[0].moveYEvents[0].start, -30);
+});
+
+test('配套取样取消不提交；区间不一致、配对不唯一或不同事件层时退回单轴', () => {
+  const makeChart = () => {
+    const chart = createChart(); const line = chart.judgeLineList[0];
+    line.eventLayers[0].moveXEvents = [createEvent(10, 20, 2, 4)];
+    line.eventLayers[0].moveYEvents = [createEvent(30, 40, 2, 5)];
+    return chart;
+  };
+  {
+    const chart = makeChart(); const { sampler } = fixture(chart, true, true);
+    sampler.begin({ type: 'moveXEvents', index: 0, field: 'start', lineIndex: 0 });
+    assert.equal(sampler.mode.paired, null);
+    sampler.finish(false);
+  }
+  {
+    const chart = makeChart(); const line = chart.judgeLineList[0];
+    line.eventLayers[0].moveYEvents = [createEvent(30, 40, 2, 4), createEvent(50, 60, 2, 4)];
+    const { sampler } = fixture(chart, true, true);
+    sampler.begin({ type: 'moveXEvents', index: 0, field: 'start', lineIndex: 0 });
+    assert.equal(sampler.mode.paired, null);
+    sampler.finish(false);
+  }
+  {
+    const chart = makeChart(); const line = chart.judgeLineList[0];
+    line.eventLayers[0].moveYEvents = [];
+    line.eventLayers.push({ ...line.eventLayers[0], moveYEvents: [createEvent(30, 40, 2, 4)] });
+    const { sampler } = fixture(chart, true, true);
+    sampler.begin({ type: 'moveXEvents', index: 0, field: 'start', lineIndex: 0 });
+    assert.equal(sampler.mode.paired, null);
+    sampler.finish(false);
+  }
+  {
+    const chart = createChart(); const line = chart.judgeLineList[0];
+    line.eventLayers[0].moveXEvents = [createEvent(10, 20, 2, 4)];
+    line.eventLayers[0].moveYEvents = [createEvent(30, 40, 2, 4)];
+    const { sampler, session } = fixture(chart, true, true);
+    sampler.begin({ type: 'moveXEvents', index: 0, field: 'start', lineIndex: 0 });
+    const initial = sampler.handle(sampler.draftChart);
+    sampler.applyPoint({ x: initial.x + 40, y: initial.y + 80 });
+    sampler.finish(false);
+    assert.equal(session.chart, chart);
+  }
+});
+
 test('尾值取样不被同拍开始的后续事件覆盖，取消不修改谱面', () => {
   const chart = createChart();
   chart.judgeLineList[0].eventLayers[0].moveXEvents = [createEvent(0, 100, 0, 1), createEvent(500, 600, 1, 2)];
@@ -46,6 +118,29 @@ test('尾值取样不被同拍开始的后续事件覆盖，取消不修改谱�
   sampler.finish(false);
   assert.equal(session.chart, chart);
   assert.equal(chart.judgeLineList[0].eventLayers[0].moveXEvents[1].start, 500);
+});
+
+test('宽高比适配后的父子线移动及旋转取样与实际渲染重合', () => {
+  for (const ratio of [16 / 9, 4 / 3, 9 / 16]) for (const type of ['moveXEvents', 'moveYEvents', 'rotateEvents']) {
+    const chart = createChart(); chart.judgeLineList.push(createLine());
+    chart.judgeLineList[0].eventLayers[0].rotateEvents = [createEvent(35)];
+    chart.judgeLineList[1].father = 0;
+    const { sampler, context } = fixture(chart, false); context.realtimePreview.aspectRatio = ratio;
+    sampler.begin({ type, index: 0, field: 'start', lineIndex: 1 });
+    const targetChart = sampler.eventChart(type === 'rotateEvents' ? 20 : 125);
+    const target = sampler.handle(targetChart); sampler.applyPoint(target);
+    const value = sampler.draftChart.judgeLineList[1].eventLayers[0][type][0].start;
+    assert.ok(Math.abs(value - (type === 'rotateEvents' ? 20 : 125)) < 0.001, `${ratio} ${type}: ${value}`);
+    const view = sampler.view(); const screen = view.screen(sampler.handle(sampler.draftChart));
+    const display = sampler.previewState(); const scene = new SceneRuntime(); scene.compile(display.chart, context.tempo);
+    const scale = { x: Math.min(1, ratio / 1.5), y: Math.min(1, 1.5 / ratio) };
+    const state = scene.sampler(display.seconds, scale)(1);
+    if (type !== 'rotateEvents') {
+      assert.ok(Math.abs(screen.x - (450 + state.x * view.scale)) < 1e-8);
+      assert.ok(Math.abs(screen.y - (300 - state.y * view.scale)) < 1e-8);
+    }
+    sampler.finish(false);
+  }
 });
 
 test('拖拽出界时扩大视野且保持捕获，完成或取消恢复各自原缩放和编辑区', () => {

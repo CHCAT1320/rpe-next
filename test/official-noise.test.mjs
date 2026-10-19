@@ -195,7 +195,9 @@ test('existing ZIP/PEZ import resolves Japanese media, preserves originals and e
   assert.deepEqual(parseChart(serializeChart(chart)).noiseAreaOptions, chart.noiseAreaOptions);
   const exported = createChartExport(chart, loaded.assets, name, { format: 'pez' });
   const entries = await readZip(await exported.blob.arrayBuffer());
-  assert.deepEqual(entries.get('官谱/ハテ.json'), files.get('官谱/ハテ.json'));
+  assert.equal(entries.has('官谱/ハテ.json'), false);
+  const complete = await readZip(await createChartExport(chart, loaded.assets, name, { includeUnusedFiles: true }).blob.arrayBuffer());
+  assert.deepEqual(complete.get('官谱/ハテ.json'), files.get('官谱/ハテ.json'));
   const native = parseChart(new TextDecoder().decode(entries.get('官谱/ハテ.rpe.json'))); assert.deepEqual(native.blockAreaList, chart.blockAreaList);
   assert.deepEqual(native.noiseAreaOptions, chart.noiseAreaOptions);
 });

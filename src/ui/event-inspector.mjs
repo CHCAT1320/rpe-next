@@ -12,6 +12,8 @@ import { renderShaderInspector } from './shader-inspector.mjs';
 import { canCutEvent } from '../application/event-tools.mjs';
 import { runEventTool } from './event-tools.mjs';
 import { editorSkinContext } from './editor-skin-canvas.mjs';
+import { evaluateEventNumber } from '../core/numeric-expression.mjs';
+import { numericExpressionSource, setNumericExpressionResolver } from './numeric-expression-input.mjs';
 export { EASING_NAMES } from './easing-picker.mjs';
 const galleryState = { open: false };
 // Value change per pixel of label drag (the drag sensitivity setting scales it);
@@ -53,8 +55,10 @@ export function renderEventInspector(session, tempo, currentBeat, reportError, n
     return value;
   };
   const writeValue = (key, title, value) => {
-    const next = constrainNumber(key, value);
-    applyEventTransform(session, `修改事件${title}`, current => ({ ...current, [key]: next, ...(current.inst && (key === 'start' || key === 'end') ? { start: next, end: structuredClone(next) } : {}) }));
+    applyEventTransform(session, `修改事件${title}`, current => {
+      const next = constrainNumber(key, typeof value === 'function' ? value(current) : value);
+      return { ...current, [key]: next, ...(current.inst && (key === 'start' || key === 'end') ? { start: next, end: structuredClone(next) } : {}) };
+    });
   };
   const applyField = (input, key, title, kind, quiet = false) => {
     const update = () => {
@@ -65,6 +69,14 @@ export function renderEventInspector(session, tempo, currentBeat, reportError, n
       if (values.length !== 3 || values.some(number => !Number.isFinite(number))) throw new Error('颜色必须是 R,G,B 三个有限数字');
       value = values.map(number => Math.max(0, Math.min(255, number)));
     } else if (kind === 'number') {
+      const source = numericExpressionSource(input);
+      if (String(source).trim().endsWith('v')) {
+        const values = new Map(inspectorEntries(session).map(entry => [entry.event, evaluateEventNumber(source, {
+          type: entry.type, field: key, event: entry.event, tempo,
+          factor: session.chart.judgeLineList[entry.lineIndex ?? session.lineIndex].bpmfactor ?? 1,
+        })]));
+        writeValue(key, title, current => values.get(current)); return;
+      }
       value = Number(input.value);
       if (!input.value.trim() || !Number.isFinite(value)) return;
     } else value = input.value;
@@ -148,6 +160,13 @@ export function renderEventInspector(session, tempo, currentBeat, reportError, n
     input.oninput = event => { if (!event.isComposing && (kind !== 'number' || input.value.trim())) applyField(input, key, title, kind, true); };
     input.onchange = () => applyField(input, key, title, kind);
     if (kind === 'number') {
+      if (eventType === 'moveYEvents' && ['start', 'end'].includes(key)) {
+        setNumericExpressionResolver(input, source => {
+          const entry = inspectorEntries(session)[0];
+          return evaluateEventNumber(source, { type: entry.type, field: key, event: entry.event, tempo, factor: session.chart.judgeLineList[entry.lineIndex ?? session.lineIndex].bpmfactor ?? 1 });
+        });
+        input.title = '支持表达式；nv 表示以速度 n 计算位移（每秒 120 × n），由另一端数值及事件时长推算';
+      }
       const step = key === 'easingLeft' || key === 'easingRight' ? 0.05 : key === 'linkgroup' ? 1 : session.eventWheelSteps?.[eventType] ?? EVENT_WHEEL_STEPS[eventType] ?? 1;
       input.step = step; numericWheel(input, step);
       if (entries.length === 1) attachValueDrag(label, input, key, title, step);

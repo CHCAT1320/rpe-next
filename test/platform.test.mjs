@@ -17,7 +17,7 @@ test('转换导出只更新所属 info，保留原谱及同名文件', () => {
     ['one/info.txt', encode('Name: 测试\r\nChart: main.pec\r\nSong: MUSIC.ogg')],
     ['two/info.txt', encode('Chart: other.json')], ['one/music.ogg', new Uint8Array([1])],
   ]);
-  const output = packageEntries(chart, assets, 'one/main.pec');
+  const output = packageEntries(chart, assets, 'one/main.pec', { includeUnusedFiles: true });
   assert.equal(decode(output.get('one/main.pec')), 'original');
   assert.equal(decode(output.get('one/main.rpe.json')), 'existing');
   assert.match(decode(output.get('one/info.txt')), /Chart: main\.rpe-1\.json\r\n/);
@@ -25,7 +25,7 @@ test('转换导出只更新所属 info，保留原谱及同名文件', () => {
   assert.equal(resourceReferences(chart, assets, 'one/main.pec').song, 'MUSIC.ogg');
   assert.deepEqual(assetBytes(assets, 'MUSIC.ogg', 'one/main.pec'), new Uint8Array([1]));
   delete chart.rpeNextLegacySource;
-  assert.equal(packageEntries(chart, assets, 'one/main.json').get('one/info.txt'), assets.get('one/info.txt'));
+  assert.equal(packageEntries(chart, assets, 'one/main.json', { includeUnusedFiles: true }).get('one/info.txt'), assets.get('one/info.txt'));
 });
 
 test('官方 v3 转换遵循原版拍数、倍率和类型，保留原文档', () => {

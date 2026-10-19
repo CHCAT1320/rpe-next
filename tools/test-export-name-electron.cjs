@@ -23,8 +23,8 @@ async function renderer() {
   open(); chooseFormat('next:json'); input().value = 'same:name'; await apply();
   open(); chooseFormat('rpe:json'); input().value = 'same?name'; await apply();
   check(e.chart.META.name === chart.META.name && !e.dirty, 'Export changed chart metadata or dirty state');
-  check(document.querySelector('footer').textContent.includes('0.12.1'), 'Wrong displayed release version');
-  return { stem, title: chart.META.name, checks: ['title-based defaults, special characters, repeated JSON/PEZ exports and sanitization collisions', 'format changes preserve manual filename edits, metadata remains unchanged and version is 0.12.1'] };
+  check(document.querySelector('footer').textContent.includes('0.12.2'), 'Wrong displayed release version');
+  return { stem, title: chart.META.name, checks: ['title-based defaults, special characters, repeated JSON/PEZ exports and sanitization collisions', 'format changes preserve manual filename edits, metadata remains unchanged and version is 0.12.2'] };
 }
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 1440, height: 960, show: false, webPreferences: { backgroundThrottling: false } }), errors = [], downloads = [];

@@ -60,7 +60,7 @@ test('PEZ 根目录生成原 RPE 入口，引用真实资源路径并同步当�
     assert.equal(info.Name, '新曲名'); assert.equal(info.Composer, '作曲'); assert.equal(info.Charter, '谱师'); assert.equal(info.Level, 'IN 15');
     assert.equal(info.Chart, 'nested/chart.json'); assert.equal(info.Song, 'nested/music.ogg'); assert.equal(info.Picture, 'images/cover.png');
     for (const key of ['Chart', 'Song', 'Picture']) assert.ok(entries.has(info[key]), key);
-    assert.deepEqual(entries.get('other/info.txt'), assets.get('other/info.txt'));
+    assert.equal(entries.has('other/info.txt'), false);
     assert.deepEqual(entries.get(info.Song), assets.get('nested/music.ogg'));
     assert.deepEqual(entries.get(info.Picture), assets.get('images/cover.png'));
     const withoutMeta = { ...chart, META: { ...chart.META, song: '', background: '' } };
@@ -78,7 +78,7 @@ test('转换谱面和根目录旧入口导出时正确更新 Chart，标识不�
     ['main.pec', encode('source')], ['main.rpe.json', encode('existing')],
     ['INFO.TXT', encode('#\nPath: C:/private/chart\nChart: main.pec\n')],
   ]);
-  const output = packageEntries(chart, assets, 'main.pec');
+  const output = packageEntries(chart, assets, 'main.pec', { includeUnusedFiles: true });
   const info = parseInfo(decode(output.get('info.txt')));
   assert.match(info.Path, /^\d+$/); assert.equal(info.Chart, 'main.rpe-1.json');
   assert.equal(info.Name, '标题 Path: injected');

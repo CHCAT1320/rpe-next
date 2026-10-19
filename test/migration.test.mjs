@@ -34,7 +34,8 @@ test('扫描按 info.txt 选择主谱，保留项目资源，不读取凭据', a
   assert.equal(plan.failures.length, 0);
   const project = await materializeProject(plan, plan.projects[0]);
   assert.deepEqual(project.chart, chart);
-  assert.equal(project.assets.length, 5);
+  assert.equal(project.assets.length, 4);
+  assert.equal(new Map(project.assets).has('AutoSave_old.json'), false);
   assert.ok(new Map(project.assets).has('textures/测试.png'));
   assert.equal(project.chartName, 'main.json');
   assert.equal((await materializeProject(plan, plan.projects[0])).id, project.id);

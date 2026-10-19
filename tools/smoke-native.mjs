@@ -55,6 +55,18 @@ export async function smokeNative(contents, service, controls) {
     while (!window.rpenMods) { if (Date.now() > deadline) throw Error('App startup timeout'); await new Promise(resolve => setTimeout(resolve, 25)); }
     await window.rpenMods.manager.ready;
   });
+  const builtins = await run(contents, async () => {
+    const { builtinNoteSkins } = await import('/src/platform/note-skins.mjs');
+    const { ResourceNoteSkin } = await import('/src/ui/resource-note-skin.mjs');
+    const records = await builtinNoteSkins();
+    for (const record of records) {
+      const runtime = await ResourceNoteSkin.prepare(record, (key, image) => image);
+      runtime.dispose();
+    }
+    return records.map(record => ({ id: record.id, files: record.files.size }));
+  });
+  assert.ok(builtins.length > 0); assert.ok(builtins.every(record => record.files > 0));
+  checks.push('built-in note skin files and images load through the packaged application protocol');
   assert.equal(await run(contents, () => document.querySelector('#storage-settings') === document.querySelector('.settings-body').lastElementChild), true);
   checks.push('storage and backup settings appear after all other settings');
   const migration = await run(contents, async () => {

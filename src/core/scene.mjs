@@ -105,7 +105,7 @@ export class SceneRuntime {
     this.order = this.lines.map((line, index) => index).sort((left, right) => Number(this.lines[left].line.zOrder ?? 0) - Number(this.lines[right].line.zOrder ?? 0) || left - right);
   }
 
-  sampler(seconds) {
+  sampler(seconds, positionScale = { x: 1, y: 1 }) {
     const states = [];
     const done = new Set();
     const resolving = new Set();
@@ -114,6 +114,10 @@ export class SceneRuntime {
       if (resolving.has(index)) return false;
       resolving.add(index);
       states[index] = this.lines[index].state(seconds);
+      // Adapt local movement before resolving the parent's rotation. Callers that
+      // analyse or export chart coordinates keep the unadapted default space.
+      states[index].x *= positionScale.x;
+      states[index].y *= positionScale.y;
       const line = this.lines[index].line;
       const parent = line.father === null || line.father === undefined || line.father === '' ? -1 : (Number.isInteger(line.father) ? line.father : Number(line.father));
       if (Number.isInteger(parent) && parent >= 0 && parent < this.lines.length) {
@@ -132,8 +136,8 @@ export class SceneRuntime {
     return index => { if (!this.lines[index]) return undefined; resolve(index); return states[index]; };
   }
 
-  sample(seconds) {
-    const sample = this.sampler(seconds);
+  sample(seconds, positionScale) {
+    const sample = this.sampler(seconds, positionScale);
     return this.lines.map((runtime, index) => sample(index));
   }
 }
